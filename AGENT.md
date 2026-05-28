@@ -5,7 +5,7 @@
 ## 工作原则
 
 - 先做桌面外壳、项目管理、语音链路和需求状态，再接 Codex。
-- 第一开发平台是 Fedora，但代码必须按 Linux/Windows/macOS 跨平台设计。
+- 当前以本机开发环境为主，但代码必须按跨平台桌面软件设计。
 - 平台差异集中在 Tauri/Rust 后端或明确的 `platform` 层，不要散落在 React UI 中。
 - 腾讯 ASR 使用 WebSocket API 直连，SDK 只作为参考。
 - Codex 先作为外部二进制调用，不要一开始 fork `openai/codex`。
@@ -29,6 +29,6 @@
 
 - 前端不能直接持有 `TENCENTCLOUD_SECRET_KEY`。
 - 不要在 UI 层手写系统路径拼接。
-- 不要把 Fedora 专用命令写进通用逻辑。
+- 不要把某个操作系统专用命令写进通用逻辑。
 - 不要默认自动修改用户真实项目；第一轮 Codex 集成只对测试项目开放。
 - 不要过早引入复杂插件系统，先用清晰 provider 接口隔离 ASR、LLM、Codex。
