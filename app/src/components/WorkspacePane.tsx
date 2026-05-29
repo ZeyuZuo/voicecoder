@@ -1,11 +1,11 @@
 import {
   Code2,
-  ExternalLink,
   FileText,
   FolderOpen,
   Globe2,
   Maximize2,
-  PanelRight,
+  Minimize2,
+  PanelRightClose,
   SquareTerminal
 } from "lucide-react";
 import { useAppState } from "../providers/AppStateProvider";
@@ -38,7 +38,8 @@ const launcherItems = [
 ];
 
 export function WorkspacePane() {
-  const { workspaceMode, setWorkspaceMode, currentProject } = useAppState();
+  const { workspaceMode, setWorkspaceMode, currentProject, maximizedPane, toggleMaximizedPane, toggleWorkspace } = useAppState();
+  const maximized = maximizedPane === "workspace";
 
   return (
     <section className="workspace-pane">
@@ -49,14 +50,11 @@ export function WorkspacePane() {
           </button>
         </div>
         <div className="header-actions">
-          <button className="icon-button" aria-label="外部打开">
-            <ExternalLink size={17} />
+          <button className="icon-button" aria-label={maximized ? "还原右侧区域" : "放大右侧区域"} onClick={() => toggleMaximizedPane("workspace")}>
+            {maximized ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
           </button>
-          <button className="icon-button" aria-label="最大化">
-            <Maximize2 size={17} />
-          </button>
-          <button className="icon-button" aria-label="切换工作区">
-            <PanelRight size={18} />
+          <button className="icon-button" aria-label="折叠右侧边栏" onClick={toggleWorkspace}>
+            <PanelRightClose size={18} />
           </button>
         </div>
       </header>
@@ -102,4 +100,3 @@ function getWorkspaceTitle(mode: "files" | "browser" | "review" | "terminal") {
 
   return titles[mode];
 }
-

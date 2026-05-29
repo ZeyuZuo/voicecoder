@@ -14,11 +14,17 @@ type AppStateContextValue = {
   conversations: Conversation[];
   currentProject?: Project;
   workspaceMode: WorkspaceMode;
+  sidebarCollapsed: boolean;
+  workspaceCollapsed: boolean;
+  maximizedPane: "conversation" | "workspace" | null;
   prompt: string;
   addProjectFromPicker: () => Promise<void>;
   addProjectFromPath: (path: string) => void;
   selectProject: (projectId?: string) => void;
   setWorkspaceMode: (mode: WorkspaceMode) => void;
+  toggleSidebar: () => void;
+  toggleWorkspace: () => void;
+  toggleMaximizedPane: (pane: "conversation" | "workspace") => void;
   setPrompt: (value: string) => void;
 };
 
@@ -85,6 +91,9 @@ const AppStateContext = createContext<AppStateContextValue | null>(null);
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<PersistedState>(() => loadState());
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("launcher");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
+  const [maximizedPane, setMaximizedPane] = useState<"conversation" | "workspace" | null>(null);
   const [prompt, setPrompt] = useState("");
 
   const currentProject = useMemo(
@@ -145,20 +154,42 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const toggleSidebar = () => {
+    setSidebarCollapsed((collapsed) => !collapsed);
+  };
+
+  const toggleWorkspace = () => {
+    setWorkspaceCollapsed((collapsed) => !collapsed);
+    setMaximizedPane((pane) => (pane === "workspace" ? null : pane));
+  };
+
+  const toggleMaximizedPane = (pane: "conversation" | "workspace") => {
+    setMaximizedPane((currentPane) => (currentPane === pane ? null : pane));
+    if (pane === "workspace") {
+      setWorkspaceCollapsed(false);
+    }
+  };
+
   const value = useMemo<AppStateContextValue>(
     () => ({
       projects: state.projects,
       conversations: state.conversations,
       currentProject,
       workspaceMode,
+      sidebarCollapsed,
+      workspaceCollapsed,
+      maximizedPane,
       prompt,
       addProjectFromPicker,
       addProjectFromPath,
       selectProject,
       setWorkspaceMode,
+      toggleSidebar,
+      toggleWorkspace,
+      toggleMaximizedPane,
       setPrompt
     }),
-    [currentProject, prompt, state.conversations, state.projects, workspaceMode]
+    [currentProject, maximizedPane, prompt, sidebarCollapsed, state.conversations, state.projects, workspaceCollapsed, workspaceMode]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;

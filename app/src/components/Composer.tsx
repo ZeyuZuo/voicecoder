@@ -3,7 +3,6 @@ import {
   ChevronDown,
   Folder,
   GitBranch,
-  Laptop,
   Mic,
   Plus,
   Search,
@@ -49,12 +48,6 @@ export function Composer() {
             </button>
           </div>
           <div className="composer-actions-right">
-            <button className="model-pill">sub2api</button>
-            <button className="strength-pill">
-              <span>5.5</span>
-              <span>超高</span>
-              <ChevronDown size={14} />
-            </button>
             <button className="icon-button quiet" aria-label="语音输入">
               <Mic size={18} />
             </button>
@@ -127,11 +120,6 @@ export function Composer() {
           ) : null}
         </div>
         <button className="context-chip">
-          <Laptop size={16} />
-          <span>本地模式</span>
-          <ChevronDown size={14} />
-        </button>
-        <button className="context-chip">
           <GitBranch size={16} />
           <span>main</span>
           <ChevronDown size={14} />
@@ -140,4 +128,3 @@ export function Composer() {
     </div>
   );
 }
-

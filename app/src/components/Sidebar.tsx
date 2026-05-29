@@ -1,46 +1,23 @@
 import {
-  ArrowLeft,
-  ArrowRight,
-  Bot,
-  Boxes,
-  Clock3,
   Folder,
   MessageCircle,
-  PanelLeft,
-  Plug,
-  Search,
-  Settings,
-  Sparkles
+  PanelLeftClose,
+  Settings
 } from "lucide-react";
 import { useAppState } from "../providers/AppStateProvider";
 
 const navItems = [
-  { label: "快速对话", icon: MessageCircle, active: true },
-  { label: "搜索", icon: Search },
-  { label: "技能", icon: Sparkles },
-  { label: "插件", icon: Plug },
-  { label: "自动化", icon: Clock3 }
+  { label: "快速对话", icon: MessageCircle, active: true }
 ];
 
 export function Sidebar() {
-  const { projects, conversations, currentProject, selectProject } = useAppState();
+  const { projects, conversations, currentProject, selectProject, toggleSidebar } = useAppState();
 
   return (
     <aside className="sidebar">
-      <div className="window-row">
-        <div className="traffic-lights" aria-hidden="true">
-          <span className="traffic-light traffic-light-red" />
-          <span className="traffic-light traffic-light-yellow" />
-          <span className="traffic-light traffic-light-green" />
-        </div>
-        <button className="icon-button ghost" aria-label="切换侧边栏">
-          <PanelLeft size={16} />
-        </button>
-        <button className="icon-button ghost" aria-label="后退">
-          <ArrowLeft size={17} />
-        </button>
-        <button className="icon-button ghost" aria-label="前进">
-          <ArrowRight size={17} />
+      <div className="sidebar-header">
+        <button className="icon-button" aria-label="折叠左侧边栏" onClick={toggleSidebar}>
+          <PanelLeftClose size={18} />
         </button>
       </div>
 
@@ -107,14 +84,6 @@ export function Sidebar() {
 
       <div className="sidebar-footer">
         <button className="nav-item">
-          <Bot size={18} />
-          <span>本地模式</span>
-        </button>
-        <button className="nav-item">
-          <Boxes size={18} />
-          <span>工作区</span>
-        </button>
-        <button className="nav-item">
           <Settings size={18} />
           <span>设置</span>
         </button>
@@ -122,4 +91,3 @@ export function Sidebar() {
     </aside>
   );
 }
-
