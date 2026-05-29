@@ -16,7 +16,7 @@ export function ConversationPane() {
             </button>
           ) : null}
           <div className="conversation-title-block">
-            <h1>{currentProject ? `我们应该在 ${currentProject.name} 中构建什么？` : "我们应该在 voicecoder 中构建什么？"}</h1>
+            <h1>{currentProject ? `我们应该在 ${currentProject.name} 中构建什么？` : "我们应该聊些什么？"}</h1>
           </div>
         </div>
         <div className="header-actions">
@@ -36,7 +36,7 @@ export function ConversationPane() {
 
       <div className="empty-conversation">
         <div className="prompt-stage">
-          <h2>{currentProject ? `我们应该在 ${currentProject.name} 中构建什么？` : "我们应该在 voicecoder 中构建什么？"}</h2>
+          <h2>{currentProject ? `我们应该在 ${currentProject.name} 中构建什么？` : "我们应该聊些什么？"}</h2>
           <Composer />
         </div>
       </div>

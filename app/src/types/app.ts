@@ -16,3 +16,25 @@ export type WorkspaceMode = "launcher" | "files" | "browser" | "review" | "termi
 
 export type ComposerMode = "idle" | "project-menu-open" | "submitting";
 
+export type WorkspaceTabKind = "files" | "browser" | "review" | "terminal";
+
+export type WorkspaceTab = {
+  id: string;
+  kind: WorkspaceTabKind;
+  title: string;
+};
+
+export type FileTreeEntry = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  children?: FileTreeEntry[];
+};
+
+export type BrowserDirectoryProject = {
+  name: string;
+  path: string;
+  handle: FileSystemDirectoryHandle;
+};
+
+export type BrowserFileSystemEntry = FileSystemFileHandle | FileSystemDirectoryHandle;

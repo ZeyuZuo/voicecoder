@@ -47,7 +47,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 292px minmax(520px, 1fr) minmax(460px, 0.95fr);
+  grid-template-columns: var(--sidebar-width, 292px) 1px minmax(520px, 1fr) 1px minmax(var(--workspace-width, 460px), var(--workspace-width, 460px));
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -56,23 +56,33 @@ button {
 }
 
 .app-shell.is-sidebar-collapsed {
-  grid-template-columns: 0 minmax(520px, 1fr) minmax(460px, 0.95fr);
+  grid-template-columns: 0 0 minmax(520px, 1fr) 1px minmax(var(--workspace-width, 460px), var(--workspace-width, 460px));
 }
 
 .app-shell.is-workspace-collapsed {
-  grid-template-columns: 292px minmax(520px, 1fr) 0;
+  grid-template-columns: var(--sidebar-width, 292px) 1px minmax(520px, 1fr) 0 0;
 }
 
 .app-shell.is-sidebar-collapsed.is-workspace-collapsed {
-  grid-template-columns: 0 minmax(520px, 1fr) 0;
+  grid-template-columns: 0 0 minmax(520px, 1fr) 0 0;
 }
 
 .app-shell.is-conversation-maximized {
-  grid-template-columns: 0 minmax(680px, 1fr) 0;
+  grid-template-columns: 0 0 minmax(680px, 1fr) 0 0;
 }
 
 .app-shell.is-workspace-maximized {
-  grid-template-columns: 0 0 minmax(760px, 1fr);
+  grid-template-columns: 0 0 0 0 minmax(760px, 1fr);
+}
+
+.app-shell.is-resizing {
+  transition: none;
+}
+
+.app-shell.is-resizing .conversation-pane,
+.app-shell.is-resizing .workspace-pane,
+.app-shell.is-resizing .sidebar {
+  transition: none;
 }
 
 .sidebar {
@@ -257,6 +267,52 @@ button {
 .conversation-pane {
   border-left: 1px solid var(--line);
   border-right: 1px solid var(--line);
+}
+
+.pane-resizer {
+  position: relative;
+  z-index: 8;
+  width: 1px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-resizer::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 8px;
+  content: "";
+}
+
+.pane-resizer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: transparent;
+  content: "";
+  transition:
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after,
+.pane-resizer.is-active::after {
+  background: #1683ff;
+  box-shadow: 0 0 0 1px rgb(22 131 255 / 14%);
+}
+
+.pane-resizer[aria-hidden="true"] {
+  pointer-events: none;
+}
+
+.pane-resizer[aria-hidden="true"]::before,
+.pane-resizer[aria-hidden="true"]::after {
+  display: none;
 }
 
 .app-shell.is-workspace-maximized .conversation-pane {
@@ -563,7 +619,15 @@ button {
   background: var(--line);
 }
 
+.project-menu-message {
+  margin: 8px 8px 2px;
+  color: #8a6a1f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .workspace-pane {
+  container: workspace-pane / inline-size;
   display: flex;
   flex-direction: column;
 }
@@ -591,7 +655,76 @@ button {
 .workspace-tabs {
   display: flex;
   align-items: center;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.workspace-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-tab {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #6f7278;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.workspace-tab:hover {
+  background: #f4f4f2;
+}
+
+.workspace-tab.is-active {
+  border-color: #e5e5e2;
+  background: #f0f1ef;
+  color: #25272b;
+}
+
+.workspace-tab-main {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 5px 0 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.workspace-tab-main span {
+  overflow: hidden;
+  max-width: 120px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-close-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  margin-right: 4px;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: #8d9095;
+  cursor: pointer;
+}
+
+.tab-close-button:hover {
+  background: #e3e4e1;
+  color: #3f4247;
 }
 
 .add-tab-button {
@@ -613,7 +746,7 @@ button {
   display: grid;
   flex: 1;
   place-items: center;
-  padding: 44px;
+  padding: 32px 24px;
   transition:
     opacity 180ms ease,
     transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -621,8 +754,9 @@ button {
 
 .launcher-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(190px, 260px));
-  gap: 18px;
+  width: min(100%, 480px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 
 .launcher-card {
@@ -630,8 +764,8 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 132px;
-  padding: 24px;
+  min-height: 122px;
+  padding: 20px 16px;
   border-radius: 10px;
   background: #f3f3f1;
   color: #25272b;
@@ -643,15 +777,43 @@ button {
 }
 
 .launcher-card span {
-  margin-top: 16px;
-  font-size: 18px;
+  margin-top: 12px;
+  font-size: 17px;
   font-weight: 650;
 }
 
 .launcher-card small {
-  margin-top: 8px;
+  margin-top: 6px;
   color: #74777c;
-  font-size: 15px;
+  font-size: 14px;
+}
+
+@container workspace-pane (max-width: 380px) {
+  .workspace-launcher {
+    place-items: center;
+    padding: 24px;
+  }
+
+  .launcher-grid {
+    width: min(100%, 250px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .launcher-card {
+    min-height: 104px;
+    padding: 16px;
+  }
+
+  .launcher-card span {
+    margin-top: 10px;
+    font-size: 16px;
+  }
+
+  .launcher-card small {
+    margin-top: 5px;
+    font-size: 13px;
+  }
 }
 
 .workspace-placeholder {
@@ -686,12 +848,130 @@ button {
   line-height: 1.55;
 }
 
+.file-explorer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  background: #fbfbfa;
+}
+
+.file-explorer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  color: #383b40;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.file-explorer-title span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-explorer-status {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  color: #777a80;
+  font-size: 13px;
+}
+
+.file-explorer-status.is-error {
+  color: #b54708;
+}
+
+.file-tree {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 0 18px;
+  overflow: auto;
+}
+
+.file-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding-right: 12px;
+  background: transparent;
+  color: #41444a;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+
+.file-tree-row:hover {
+  background: #efefed;
+}
+
+.file-tree-row.is-selected {
+  background: #e7f0ff;
+  color: #1458a8;
+}
+
+.file-tree-row span:last-child {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tree-chevron {
+  flex: 0 0 auto;
+  color: #94979c;
+  transition: transform 140ms ease;
+}
+
+.file-tree-chevron.is-expanded {
+  transform: rotate(90deg);
+}
+
+.file-tree-spacer {
+  flex: 0 0 14px;
+  width: 14px;
+}
+
+.file-explorer-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 42px 32px;
+  color: #74777c;
+  text-align: center;
+}
+
+.file-explorer-empty h2 {
+  margin: 16px 0 8px;
+  color: #25272b;
+  font-size: 22px;
+}
+
+.file-explorer-empty p {
+  max-width: 320px;
+  margin: 0;
+  line-height: 1.55;
+}
+
 @media (max-width: 1240px) {
   .app-shell {
-    grid-template-columns: 260px minmax(500px, 1fr);
+    grid-template-columns: minmax(240px, var(--sidebar-width, 260px)) 1px minmax(500px, 1fr) 0 0;
   }
 
   .workspace-pane {
+    display: none;
+  }
+
+  .pane-resizer-right {
     display: none;
   }
 
@@ -700,16 +980,20 @@ button {
   .app-shell.is-sidebar-collapsed.is-workspace-collapsed,
   .app-shell.is-conversation-maximized,
   .app-shell.is-workspace-maximized {
-    grid-template-columns: 0 minmax(500px, 1fr);
+    grid-template-columns: 0 0 minmax(500px, 1fr) 0 0;
   }
 }
 
 @media (max-width: 760px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: 0 0 minmax(0, 1fr) 0 0;
   }
 
   .sidebar {
+    display: none;
+  }
+
+  .pane-resizer {
     display: none;
   }
 

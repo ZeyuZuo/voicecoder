@@ -1,6 +1,8 @@
 import { createContext, ReactNode, useContext, useMemo, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Conversation, Project, WorkspaceMode } from "../types/app";
+import type { Conversation, Project, WorkspaceMode, WorkspaceTab, WorkspaceTabKind } from "../types/app";
+import { registerBrowserDirectory } from "../utils/browserFileSystem";
 import { createId, getProjectName } from "../utils/project";
 
 type PersistedState = {
@@ -14,14 +16,21 @@ type AppStateContextValue = {
   conversations: Conversation[];
   currentProject?: Project;
   workspaceMode: WorkspaceMode;
+  workspaceTabs: WorkspaceTab[];
+  activeWorkspaceTabId?: string;
   sidebarCollapsed: boolean;
   workspaceCollapsed: boolean;
   maximizedPane: "conversation" | "workspace" | null;
+  projectPickerMessage?: string;
   prompt: string;
   addProjectFromPicker: () => Promise<void>;
   addProjectFromPath: (path: string) => void;
+  addBrowserProject: (name: string, path: string, handle: FileSystemDirectoryHandle) => void;
   selectProject: (projectId?: string) => void;
   setWorkspaceMode: (mode: WorkspaceMode) => void;
+  openWorkspaceTab: (kind: WorkspaceTabKind) => void;
+  selectWorkspaceTab: (tabId: string) => void;
+  closeWorkspaceTab: (tabId: string) => void;
   toggleSidebar: () => void;
   toggleWorkspace: () => void;
   toggleMaximizedPane: (pane: "conversation" | "workspace") => void;
@@ -30,30 +39,16 @@ type AppStateContextValue = {
 
 const STORAGE_KEY = "voicecoder.phase1.state";
 
-const initialConversations: Conversation[] = [
-  {
-    id: "conversation_seed_1",
-    title: "阅读 docs 后规划页面结构",
-    projectId: "project_voicecoder",
-    lastActivity: "刚刚"
-  }
-];
+const initialConversations: Conversation[] = [];
 
-const initialProjects: Project[] = [
-  {
-    id: "project_voicecoder",
-    name: "voicecoder",
-    path: "/Users/zzy/Desktop/code/voicecoder",
-    lastActivity: "当前项目"
-  }
-];
+const initialProjects: Project[] = [];
 
 function loadState(): PersistedState {
   if (typeof window === "undefined") {
     return {
       projects: initialProjects,
       conversations: initialConversations,
-      currentProjectId: "project_voicecoder"
+      currentProjectId: undefined
     };
   }
 
@@ -63,21 +58,24 @@ function loadState(): PersistedState {
       return {
         projects: initialProjects,
         conversations: initialConversations,
-        currentProjectId: "project_voicecoder"
+        currentProjectId: undefined
       };
     }
 
     const parsed = JSON.parse(raw) as PersistedState;
+    const projects = parsed.projects ?? [];
+    const currentProjectExists = projects.some((project) => project.id === parsed.currentProjectId);
+
     return {
-      projects: parsed.projects?.length ? parsed.projects : initialProjects,
+      projects,
       conversations: parsed.conversations ?? [],
-      currentProjectId: parsed.currentProjectId ?? parsed.projects?.[0]?.id ?? "project_voicecoder"
+      currentProjectId: currentProjectExists ? parsed.currentProjectId : undefined
     };
   } catch {
     return {
       projects: initialProjects,
       conversations: initialConversations,
-      currentProjectId: "project_voicecoder"
+      currentProjectId: undefined
     };
   }
 }
@@ -91,9 +89,12 @@ const AppStateContext = createContext<AppStateContextValue | null>(null);
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<PersistedState>(() => loadState());
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("launcher");
+  const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([]);
+  const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState<string | undefined>();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
   const [maximizedPane, setMaximizedPane] = useState<"conversation" | "workspace" | null>(null);
+  const [projectPickerMessage, setProjectPickerMessage] = useState<string | undefined>();
   const [prompt, setPrompt] = useState("");
 
   const currentProject = useMemo(
@@ -106,12 +107,16 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     persist(nextState);
   };
 
-  const addProjectFromPath = (path: string) => {
+  const addProject = ({ name, path }: { name: string; path: string }) => {
     const existingProject = state.projects.find((project) => project.path === path);
 
     if (existingProject) {
       updateState({
         ...state,
+        projects: [
+          { ...existingProject, lastActivity: "刚刚" },
+          ...state.projects.filter((project) => project.id !== existingProject.id)
+        ],
         currentProjectId: existingProject.id
       });
       return;
@@ -119,7 +124,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
     const project: Project = {
       id: createId("project"),
-      name: getProjectName(path),
+      name,
       path,
       lastActivity: "刚刚"
     };
@@ -127,27 +132,81 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     updateState({
       ...state,
       projects: [project, ...state.projects],
+      conversations: [
+        {
+          id: createId("conversation"),
+          title: "新对话",
+          projectId: project.id,
+          lastActivity: "刚刚"
+        },
+        ...state.conversations
+      ],
       currentProjectId: project.id
     });
   };
 
-  const addProjectFromPicker = async () => {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: "选择前端项目"
-      });
+  const addProjectFromPath = (path: string) => {
+    addProject({
+      name: getProjectName(path),
+      path
+    });
+  };
 
-      if (typeof selected === "string") {
-        addProjectFromPath(selected);
+  const addBrowserProject = (name: string, path: string, handle: FileSystemDirectoryHandle) => {
+    registerBrowserDirectory({ name, path, handle });
+    addProject({
+      name,
+      path
+    });
+  };
+
+  const addProjectFromPicker = async () => {
+    setProjectPickerMessage(undefined);
+
+    try {
+      if (isTauri()) {
+        const selected = await open({
+          directory: true,
+          multiple: false,
+          title: "选择前端项目"
+        });
+
+        if (typeof selected === "string") {
+          addProjectFromPath(selected);
+        }
+        return;
       }
-    } catch {
-      console.warn("System project picker is unavailable in this runtime.");
+
+      const browserProject = await pickDirectoryInBrowser();
+      if (browserProject) {
+        addBrowserProject(browserProject.name, browserProject.path, browserProject.handle);
+        return;
+      }
+
+      setProjectPickerMessage("当前浏览器不支持选择文件夹，请在 Tauri 窗口中使用。");
+    } catch (error) {
+      console.warn("Project picker failed.", error);
+      setProjectPickerMessage("没有打开文件夹选择器，请在 Tauri 窗口中重试。");
     }
   };
 
   const selectProject = (projectId?: string) => {
+    if (!projectId && !state.conversations.some((conversation) => !conversation.projectId)) {
+      updateState({
+        ...state,
+        conversations: [
+          {
+            id: createId("conversation"),
+            title: "快速对话",
+            lastActivity: "刚刚"
+          },
+          ...state.conversations
+        ],
+        currentProjectId: undefined
+      });
+      return;
+    }
+
     updateState({
       ...state,
       currentProjectId: projectId
@@ -170,29 +229,113 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const openWorkspaceTab = (kind: WorkspaceTabKind) => {
+    const existingTab = workspaceTabs.find((tab) => tab.kind === kind);
+
+    if (existingTab) {
+      setActiveWorkspaceTabId(existingTab.id);
+      setWorkspaceMode(kind);
+      return;
+    }
+
+    const tab: WorkspaceTab = {
+      id: createId("workspace"),
+      kind,
+      title: getWorkspaceTabTitle(kind)
+    };
+
+    setWorkspaceTabs((tabs) => [...tabs, tab]);
+    setActiveWorkspaceTabId(tab.id);
+    setWorkspaceMode(kind);
+  };
+
+  const selectWorkspaceTab = (tabId: string) => {
+    const tab = workspaceTabs.find((candidate) => candidate.id === tabId);
+
+    if (!tab) {
+      return;
+    }
+
+    setActiveWorkspaceTabId(tab.id);
+    setWorkspaceMode(tab.kind);
+  };
+
+  const closeWorkspaceTab = (tabId: string) => {
+    setWorkspaceTabs((tabs) => {
+      const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+
+      if (activeWorkspaceTabId === tabId) {
+        const nextActiveTab = nextTabs[nextTabs.length - 1];
+        setActiveWorkspaceTabId(nextActiveTab?.id);
+        setWorkspaceMode(nextActiveTab?.kind ?? "launcher");
+      }
+
+      return nextTabs;
+    });
+  };
+
   const value = useMemo<AppStateContextValue>(
     () => ({
       projects: state.projects,
       conversations: state.conversations,
       currentProject,
       workspaceMode,
+      workspaceTabs,
+      activeWorkspaceTabId,
       sidebarCollapsed,
       workspaceCollapsed,
       maximizedPane,
+      projectPickerMessage,
       prompt,
       addProjectFromPicker,
       addProjectFromPath,
+      addBrowserProject,
       selectProject,
       setWorkspaceMode,
+      openWorkspaceTab,
+      selectWorkspaceTab,
+      closeWorkspaceTab,
       toggleSidebar,
       toggleWorkspace,
       toggleMaximizedPane,
       setPrompt
     }),
-    [currentProject, maximizedPane, prompt, sidebarCollapsed, state.conversations, state.projects, workspaceCollapsed, workspaceMode]
+    [activeWorkspaceTabId, currentProject, maximizedPane, projectPickerMessage, prompt, sidebarCollapsed, state.conversations, state.projects, workspaceCollapsed, workspaceMode, workspaceTabs]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
+}
+
+function getWorkspaceTabTitle(kind: WorkspaceTabKind): string {
+  const titles: Record<WorkspaceTabKind, string> = {
+    files: "文件",
+    browser: "浏览器",
+    review: "审查",
+    terminal: "终端"
+  };
+
+  return titles[kind];
+}
+
+async function pickDirectoryInBrowser(): Promise<{ name: string; path: string; handle: FileSystemDirectoryHandle } | undefined> {
+  const picker = window.showDirectoryPicker;
+
+  if (picker) {
+    const directory = await picker.call(window);
+    return {
+      name: directory.name,
+      path: `browser://${directory.name}`,
+      handle: directory
+    };
+  }
+
+  return undefined;
+}
+
+declare global {
+  interface Window {
+    showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle>;
+  }
 }
 
 export function useAppState() {

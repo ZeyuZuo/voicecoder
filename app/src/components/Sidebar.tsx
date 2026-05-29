@@ -36,31 +36,35 @@ export function Sidebar() {
       <section className="sidebar-section">
         <h2 className="sidebar-title">项目</h2>
         <div className="project-stack">
-          {projects.map((project) => {
-            const projectConversations = conversations.filter((conversation) => conversation.projectId === project.id);
-            const selected = currentProject?.id === project.id;
+          {projects.length ? (
+            projects.map((project) => {
+              const projectConversations = conversations.filter((conversation) => conversation.projectId === project.id);
+              const selected = currentProject?.id === project.id;
 
-            return (
-              <div className="project-group" key={project.id}>
-                <button className={`project-row ${selected ? "is-selected" : ""}`} onClick={() => selectProject(project.id)}>
-                  <Folder size={18} />
-                  <span>{project.name}</span>
-                </button>
-                <div className="conversation-stack">
-                  {projectConversations.length > 0 ? (
-                    projectConversations.map((conversation) => (
-                      <button className="conversation-row" key={conversation.id}>
-                        <span className="conversation-title">{conversation.title}</span>
-                        <span className="conversation-time">{conversation.lastActivity}</span>
-                      </button>
-                    ))
-                  ) : (
-                    <span className="sidebar-empty">暂无对话</span>
-                  )}
+              return (
+                <div className="project-group" key={project.id}>
+                  <button className={`project-row ${selected ? "is-selected" : ""}`} onClick={() => selectProject(project.id)}>
+                    <Folder size={18} />
+                    <span>{project.name}</span>
+                  </button>
+                  <div className="conversation-stack">
+                    {projectConversations.length > 0 ? (
+                      projectConversations.map((conversation) => (
+                        <button className="conversation-row" key={conversation.id}>
+                          <span className="conversation-title">{conversation.title}</span>
+                          <span className="conversation-time">{conversation.lastActivity}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <span className="sidebar-empty">暂无对话</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          ) : (
+            <span className="sidebar-empty">暂无项目</span>
+          )}
         </div>
       </section>
 

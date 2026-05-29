@@ -9,6 +9,7 @@ import {
   ShieldCheck
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useGitBranch } from "../hooks/useGitBranch";
 import { useAppState } from "../providers/AppStateProvider";
 import { shortPath } from "../utils/project";
 
@@ -16,6 +17,7 @@ export function Composer() {
   const {
     projects,
     currentProject,
+    projectPickerMessage,
     prompt,
     addProjectFromPicker,
     selectProject,
@@ -24,6 +26,7 @@ export function Composer() {
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
 
   const visibleProjects = useMemo(() => projects.slice(0, 6), [projects]);
+  const gitBranch = useGitBranch(currentProject);
 
   const submitDisabled = prompt.trim().length === 0;
 
@@ -67,29 +70,33 @@ export function Composer() {
           </button>
           {projectMenuOpen ? (
             <div className="project-menu">
-              <label className="project-search">
-                <Search size={16} />
-                <input placeholder="搜索项目" />
-              </label>
-              <div className="project-options">
-                {visibleProjects.map((project) => (
-                  <button
-                    className={`project-option ${project.id === currentProject?.id ? "is-selected" : ""}`}
-                    key={project.id}
-                    onClick={() => {
-                      selectProject(project.id);
-                      setProjectMenuOpen(false);
-                    }}
-                  >
-                    <Folder size={17} />
-                    <span>
-                      <strong>{project.name}</strong>
-                      <small>{shortPath(project.path)}</small>
-                    </span>
-                  </button>
-                ))}
-              </div>
-              <div className="project-menu-separator" />
+              {visibleProjects.length ? (
+                <>
+                  <label className="project-search">
+                    <Search size={16} />
+                    <input placeholder="搜索项目" />
+                  </label>
+                  <div className="project-options">
+                    {visibleProjects.map((project) => (
+                      <button
+                        className={`project-option ${project.id === currentProject?.id ? "is-selected" : ""}`}
+                        key={project.id}
+                        onClick={() => {
+                          selectProject(project.id);
+                          setProjectMenuOpen(false);
+                        }}
+                      >
+                        <Folder size={17} />
+                        <span>
+                          <strong>{project.name}</strong>
+                          <small>{shortPath(project.path)}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="project-menu-separator" />
+                </>
+              ) : null}
               <button
                 className="project-option"
                 onClick={() => {
@@ -116,14 +123,17 @@ export function Composer() {
                   <small>只进行需求讨论</small>
                 </span>
               </button>
+              {projectPickerMessage ? <p className="project-menu-message">{projectPickerMessage}</p> : null}
             </div>
           ) : null}
         </div>
-        <button className="context-chip">
-          <GitBranch size={16} />
-          <span>main</span>
-          <ChevronDown size={14} />
-        </button>
+        {gitBranch ? (
+          <button className="context-chip">
+            <GitBranch size={16} />
+            <span>{gitBranch}</span>
+            <ChevronDown size={14} />
+          </button>
+        ) : null}
       </div>
     </div>
   );
