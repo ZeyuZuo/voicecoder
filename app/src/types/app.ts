@@ -24,6 +24,77 @@ export type WorkspaceTab = {
   title: string;
 };
 
+export type VoiceSessionStatus = "idle" | "starting" | "requesting-permission" | "recording" | "transcribing" | "error";
+
+export type VoiceTranscriptSegment = {
+  id: string;
+  sessionId: string;
+  speakerId?: string;
+  text: string;
+  isFinal: boolean;
+  startedAtMs?: number;
+  endedAtMs?: number;
+  createdAt: string;
+};
+
+export type VoiceProviderKind = "auto" | "mock" | "tencent";
+
+export type VoiceSessionStartedEvent = {
+  sessionId: string;
+  provider: VoiceProviderKind;
+  startedAt: string;
+};
+
+export type VoiceTranscriptEvent = VoiceTranscriptSegment;
+
+export type VoiceErrorEvent = {
+  sessionId?: string;
+  message: string;
+  code?: string;
+};
+
+export type VoiceStoppedEvent = {
+  sessionId?: string;
+  reason: "user" | "completed" | "error";
+  stoppedAt: string;
+};
+
+export type VoiceAudioChunkPayload = {
+  sessionId: string;
+  sampleRate: number;
+  channels: number;
+  format: "pcm_s16le";
+  sequence: number;
+  data: number[];
+};
+
+export type VoiceProviderStatus = {
+  autoProvider: Exclude<VoiceProviderKind, "auto">;
+  providerOverride?: VoiceProviderKind;
+  tencentConfigured: boolean;
+  missingTencentEnv: string[];
+};
+
+export type TencentAsrConfigCheck = {
+  ok: boolean;
+  missingEnv: string[];
+  host?: string;
+  appId?: string;
+  engineModelType?: string;
+  sentenceStrategy?: number;
+  voiceFormat?: number;
+  needVad?: number;
+  signedUrlPreview?: string;
+  error?: string;
+};
+
+export type VoiceSessionSnapshot = {
+  active: boolean;
+  sessionId?: string;
+  provider?: Exclude<VoiceProviderKind, "auto">;
+  receivedAudioChunks: number;
+};
+
 export type FileTreeEntry = {
   name: string;
   path: string;

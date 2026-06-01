@@ -10,7 +10,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:rust": "cd src-tauri && cargo fmt -- --check && cargo check && cargo test",
+    "check": "npm run typecheck && npm run build && npm run check:rust"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",

@@ -45,9 +45,63 @@
 
 判断：前端壳子已经够用了。接下来应该让产品获得真实能力，而不是继续装修空面板。
 
-## Phase 2：语音输入 MVP
+## 当前状态：Phase 2 语音输入 MVP 已跑通
 
 目标：先把麦克风输入、实时转写、录音状态和转写结果跑通，为后续需求整理和多人讨论打基础。
+
+已完成：
+
+- 已建立前后端语音事件协议。
+- 中间输入框麦克风按钮已接入语音状态。
+- 前端会通过 Web Audio 请求麦克风权限，采集音频并转换为 16kHz / 16bit / mono PCM。
+- 前端按约 200ms / 6400 bytes 分片发送给 Tauri 后端。
+- 当前采集关闭浏览器 echo cancellation、noise suppression 和 auto gain control，尽量保留原始音色，便于后续 provider 做 speaker diarization。
+- 停止录音时会 flush 不足 6400 bytes 的尾包，避免最后一小段音频丢失。
+- final 转写句子会自动追加进中间输入框，语音结果进入真实 prompt 输入链路。
+- 同一 final 句子更新时会替换已有文本，避免重复灌入 prompt。
+- 后端已提供语音 session 生命周期管理：
+  - 开始。
+  - 停止。
+  - 分片接收。
+  - 资源释放。
+- 腾讯云停止流程会发送结束包并等待最终转写，避免用户点击停止时丢失 final 句子。
+- 等待 final 期间前端会锁住麦克风按钮，避免重复停止打乱会话。
+- 错误恢复和启动前旧会话清理使用强制取消，不会卡在等待 final 的路径上。
+- 后端已提供语音 session snapshot 诊断命令，用于确认是否存在活动会话、当前 provider 和已收到分片数。
+- Mock ASR Provider 已可推送 partial / final 转写事件，用于稳定联调 UI 和状态机。
+- 腾讯云 ASR Provider 已具备后端直连骨架：
+  - 本地环境变量读取凭证。
+  - WebSocket 签名 URL 生成。
+  - 音频分片发送。
+  - `sentences.sentence` / `sentences.sentence_type` / `sentences.speaker_id` 返回解析。
+  - 普通实时 ASR `result.voice_text_str` / `result.slice_type` 返回解析。
+  - speaker id、时间戳和 final 状态映射。
+  - 对齐腾讯官方 speaker SDK 参数：`result_mod=1`、`speaker_diarization=1`、`sentence_strategy=0`、`enable_speaker_context=0`。
+  - `speaker_id=-1` 作为未稳定识别处理，不展示为用户 speaker。
+  - 腾讯返回的 speaker index 会映射为从 1 开始的 UI 标签，例如 `0 -> speaker-1`。
+  - 后端保留 speaker 诊断日志，用于观察腾讯真实返回的 speaker id 集合。
+- 自动 Provider 策略：
+  - 本地存在腾讯云凭证时使用腾讯云。
+  - 未配置凭证时自动回退 Mock。
+
+实测结论：
+
+- Tauri 客户端内真实麦克风采集和腾讯云实时转写可以跑通。
+- 腾讯云实时 speaker diarization 在当前单麦多人场景下不稳定：
+  - 云端会返回大量 `speaker_id=-1`。
+  - 同一个人可能在 `speaker_id=0` 和 `speaker_id=1` 之间摇摆。
+  - 因此 speaker 标签不能作为产品强可信能力。
+- Phase 2 保留 speaker 解析和诊断日志，但默认产品能力应聚焦“可靠语音输入”，不要依赖腾讯实时 speaker 结果做关键逻辑。
+
+下一步 provider 方向：
+
+- 优先评估讯飞实时语音转写：
+  - 标准版支持 `roleType=2` 实时角色分离。
+  - 大模型版支持 `role_type=2`，并可通过 `feature_ids` 做声纹分离。
+- 如果需要稳定区分固定人员，优先考虑“声纹注册 + 实时转写”，而不是纯盲分。
+- 阿里、火山、百度更适合作为“录音后处理 / 文件转写 + 说话人分离”的备选，不建议直接押注实时盲分。
+
+验收步骤见 `docs/phase2-voice-acceptance.md`。
 
 交付物：
 
@@ -78,21 +132,24 @@
   - 16kHz / 16bit / mono PCM 音频分片。
   - 约 200ms 一包发送。
   - 接收 partial / final 文本。
-  - 解析 speaker id、时间戳和句子。
+  - 解析 speaker id、时间戳和普通实时识别句子。
 - 语音转写面板或对话流展示：
   - 实时临时文本。
   - 最终句子。
-  - 说话人标记。
+  - final 句子追加到输入框。
+  - 说话人诊断标记。
   - 错误提示。
 
 验收标准：
 
 - 点击语音按钮后可以开始录音。
-- 停止后麦克风和 WebSocket 资源正确释放。
+- 停止后麦克风释放，并等待 ASR final 结果后关闭 WebSocket。
 - Mock Provider 可以稳定模拟一段转写流程。
 - 腾讯云 Provider 可以在真实麦克风下得到实时文本。
+- final 转写可以进入输入框，成为后续发送或需求整理的文本来源。
 - 前端不接触 SecretKey。
 - 出现麦克风权限失败、鉴权失败、网络断开时有明确 UI 反馈。
+- 腾讯云 speaker diarization 只作为实验性诊断，不作为 Phase 2 验收必需项。
 
 ## Phase 3：语音转需求状态机
 
@@ -102,7 +159,7 @@
 
 - 文本输入和语音输入进入同一个需求流。
 - 转写句子按时间顺序进入对话上下文。
-- 多人语音结果保留 speaker 信息。
+- 多人语音结果可以保留 provider 返回的 speaker 信息，但默认不强依赖 speaker 准确性。
 - 需求整理状态：
   - 原始输入。
   - 当前理解。

@@ -489,6 +489,13 @@ button {
   padding: 8px 10px 10px 16px;
 }
 
+.composer-actions-left,
+.composer-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .tool-button {
   flex: 0 0 auto;
   min-height: 34px;
@@ -516,6 +523,101 @@ button {
 .send-button:disabled {
   background: #a7a8ab;
   cursor: default;
+}
+
+.voice-button {
+  position: relative;
+}
+
+.voice-button.is-recording {
+  background: #ffe8e3;
+  color: #c8412f;
+}
+
+.voice-button.is-recording::after {
+  position: absolute;
+  inset: -3px;
+  border: 1px solid rgb(200 65 47 / 28%);
+  border-radius: 999px;
+  content: "";
+  animation: voice-ring 1.2s ease-out infinite;
+}
+
+.voice-session-panel {
+  margin: 10px 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #e2e0dc;
+  border-radius: 18px;
+  background: #fffdfa;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 5%);
+}
+
+.voice-session-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #3f4247;
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.voice-session-header small {
+  margin-left: auto;
+  color: #98999c;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.voice-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #9a9ca0;
+}
+
+.voice-session-panel.is-recording .voice-pulse {
+  background: #d74d3c;
+  animation: voice-pulse 1s ease-in-out infinite;
+}
+
+.voice-error {
+  margin: 9px 0 0;
+  color: #b03425;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.voice-provider-note {
+  margin: 8px 0 0;
+  color: #85888d;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.voice-partial,
+.voice-transcripts p {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 0;
+  color: #383b40;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.voice-partial {
+  color: #606369;
+}
+
+.voice-partial span,
+.voice-transcripts span {
+  flex: 0 0 auto;
+  color: #98999c;
+  font-size: 12px;
+}
+
+.voice-transcripts {
+  margin-top: 2px;
 }
 
 .context-bar {
@@ -617,6 +719,31 @@ button {
   height: 1px;
   margin: 8px 2px;
   background: var(--line);
+}
+
+@keyframes voice-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.42;
+    transform: scale(1.35);
+  }
+}
+
+@keyframes voice-ring {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.9);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
 }
 
 .project-menu-message {

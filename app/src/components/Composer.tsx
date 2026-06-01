@@ -8,8 +8,9 @@ import {
   Search,
   ShieldCheck
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useGitBranch } from "../hooks/useGitBranch";
+import { useVoiceSession } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
 import { shortPath } from "../utils/project";
 
@@ -24,11 +25,48 @@ export function Composer() {
     setPrompt
   } = useAppState();
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const appendedVoiceSegments = useRef<Map<string, string>>(new Map());
 
   const visibleProjects = useMemo(() => projects.slice(0, 6), [projects]);
   const gitBranch = useGitBranch(currentProject);
+  const voice = useVoiceSession();
 
   const submitDisabled = prompt.trim().length === 0;
+  const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
+  const voiceStatusLabel = getVoiceStatusLabel(voice.status);
+  const voiceProvider = voice.sessionSnapshot?.provider ?? voice.providerStatus?.autoProvider ?? voice.provider;
+  const missingTencentEnv = voice.tencentConfigCheck?.missingEnv ?? voice.providerStatus?.missingTencentEnv ?? [];
+
+  useEffect(() => {
+    const changedFinalSegments = voice.segments.filter((segment) => appendedVoiceSegments.current.get(segment.id) !== segment.text);
+
+    if (!changedFinalSegments.length) {
+      return;
+    }
+
+    let nextPrompt = prompt;
+
+    for (const segment of changedFinalSegments) {
+      const nextText = segment.text.trim();
+      if (!nextText) {
+        continue;
+      }
+
+      const previousText = appendedVoiceSegments.current.get(segment.id);
+      if (previousText && nextPrompt.includes(previousText)) {
+        nextPrompt = replaceLast(nextPrompt, previousText, nextText);
+      } else {
+        nextPrompt = nextPrompt.trim() ? `${nextPrompt.trimEnd()}\n${nextText}` : nextText;
+      }
+      appendedVoiceSegments.current.set(segment.id, nextText);
+    }
+
+    if (nextPrompt === prompt) {
+      return;
+    }
+
+    setPrompt(nextPrompt);
+  }, [prompt, setPrompt, voice.segments]);
 
   return (
     <div className="composer-shell">
@@ -51,7 +89,12 @@ export function Composer() {
             </button>
           </div>
           <div className="composer-actions-right">
-            <button className="icon-button quiet" aria-label="语音输入">
+            <button
+              className={`icon-button quiet voice-button ${voice.recording ? "is-recording" : ""}`}
+              aria-label={voiceButtonLabel}
+              disabled={voice.status === "transcribing"}
+              onClick={voice.toggle}
+            >
               <Mic size={18} />
             </button>
             <button className="send-button" disabled={submitDisabled} aria-label="发送需求">
@@ -60,6 +103,44 @@ export function Composer() {
           </div>
         </div>
       </div>
+
+      {voice.status !== "idle" || voice.segments.length ? (
+        <div className={`voice-session-panel ${voice.recording ? "is-recording" : ""}`}>
+          <div className="voice-session-header">
+            <span className="voice-pulse" />
+            <span>{voiceStatusLabel}</span>
+            {voiceProvider ? <small>{voiceProvider}</small> : null}
+          </div>
+          {voice.providerStatus ? (
+            <p className="voice-provider-note">
+              {getVoiceProviderNote(voice.providerStatus.autoProvider, voice.providerStatus.providerOverride, voice.tencentConfigCheck?.ok)}
+            </p>
+          ) : null}
+          {voiceProvider === "tencent" && missingTencentEnv.length ? (
+            <p className="voice-provider-note">缺少腾讯云配置：{missingTencentEnv.join("、")}</p>
+          ) : null}
+          {voice.error ? <p className="voice-error">{voice.error}</p> : null}
+          {voice.status === "error" && voice.sessionSnapshot?.active ? (
+            <p className="voice-provider-note">后端仍有语音会话，点击麦克风会先自动清理后重试。</p>
+          ) : null}
+          {voice.partialText ? (
+            <p className="voice-partial">
+              <span>实时</span>
+              {voice.partialText}
+            </p>
+          ) : null}
+          {voice.segments.length ? (
+            <div className="voice-transcripts">
+              {voice.segments.slice(-4).map((segment) => (
+                <p key={segment.id}>
+                  <span>{segment.speakerId ?? "speaker"}</span>
+                  {segment.text}
+                </p>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="context-bar">
         <div className="project-menu-anchor">
@@ -137,4 +218,36 @@ export function Composer() {
       </div>
     </div>
   );
+}
+
+function replaceLast(value: string, search: string, replacement: string) {
+  const index = value.lastIndexOf(search);
+  if (index < 0) {
+    return value;
+  }
+
+  return `${value.slice(0, index)}${replacement}${value.slice(index + search.length)}`;
+}
+
+function getVoiceStatusLabel(status: ReturnType<typeof useVoiceSession>["status"]) {
+  const labels = {
+    idle: "语音已停止",
+    starting: "正在启动语音输入",
+    "requesting-permission": "正在请求麦克风权限",
+    recording: "正在录音转写",
+    transcribing: "正在等待转写结果",
+    error: "语音输入出错"
+  };
+
+  return labels[status];
+}
+
+function getVoiceProviderNote(provider: string, override: string | undefined, tencentReady: boolean | undefined) {
+  const source = override ? `已指定 ${override}` : "自动选择";
+
+  if (provider === "tencent") {
+    return `${source} · 腾讯云${tencentReady ? "配置就绪" : "配置待检查"}`;
+  }
+
+  return `${source} · Mock 转写`;
 }

@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::{fs, path::Path};
 
+mod voice;
+
 #[derive(Serialize)]
 struct FileTreeEntry {
     name: String,
@@ -34,7 +36,8 @@ fn read_git_branch(path: String) -> Result<Option<String>, String> {
     };
 
     let head_path = git_dir.join("HEAD");
-    let head = fs::read_to_string(&head_path).map_err(|error| format!("Failed to read Git HEAD: {error}"))?;
+    let head = fs::read_to_string(&head_path)
+        .map_err(|error| format!("Failed to read Git HEAD: {error}"))?;
     let trimmed_head = head.trim();
 
     if let Some(branch) = trimmed_head.strip_prefix("ref: refs/heads/") {
@@ -57,7 +60,10 @@ fn read_directory(path: &Path, depth: usize) -> Result<Vec<FileTreeEntry>, Strin
         .filter_map(Result::ok)
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
-            !matches!(name.as_str(), "node_modules" | ".git" | "target" | "dist" | ".next")
+            !matches!(
+                name.as_str(),
+                "node_modules" | ".git" | "target" | "dist" | ".next"
+            )
         })
         .take(MAX_ENTRIES_PER_DIR)
         .map(|entry| {
@@ -109,8 +115,19 @@ fn find_git_dir(path: &Path) -> Option<std::path::PathBuf> {
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(voice::VoiceState::default())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![read_project_tree, read_git_branch])
+        .invoke_handler(tauri::generate_handler![
+            read_project_tree,
+            read_git_branch,
+            voice::start_voice_session,
+            voice::send_voice_audio_chunk,
+            voice::get_voice_provider_status,
+            voice::check_tencent_asr_config,
+            voice::get_voice_session_snapshot,
+            voice::stop_voice_session,
+            voice::cancel_voice_session
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run VoiceCoder");
 }
