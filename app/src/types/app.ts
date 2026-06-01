@@ -73,6 +73,16 @@ export type VoiceProviderStatus = {
   providerOverride?: VoiceProviderKind;
   tencentConfigured: boolean;
   missingTencentEnv: string[];
+  diagnostics: VoiceProviderDiagnostic[];
+};
+
+export type VoiceProviderDiagnostic = {
+  provider: Exclude<VoiceProviderKind, "auto">;
+  configured: boolean;
+  missingEnv: string[];
+  endpoint?: string;
+  details: Record<string, string>;
+  error?: string;
 };
 
 export type TencentAsrConfigCheck = {

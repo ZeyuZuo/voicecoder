@@ -146,6 +146,27 @@ trait AsrSession {
     fn stop(&mut self);
 }
 
+trait AsrProvider {
+    fn kind(&self) -> VoiceProviderKind;
+    fn validate_start(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn diagnostic(&self) -> VoiceProviderDiagnostic;
+    fn start_session(&self, context: AsrStartContext)
+        -> Result<Box<dyn AsrSession + Send>, String>;
+}
+
+struct AsrStartContext {
+    app: AppHandle,
+    session_id: String,
+    cancel_signal: Arc<AtomicBool>,
+    finish_signal: Arc<AtomicBool>,
+}
+
+struct MockAsrProvider;
+
+struct TencentAsrProvider;
+
 struct MockAsrSession;
 
 struct TencentAsrSession {
@@ -170,6 +191,111 @@ impl AsrSession for TencentAsrSession {
     fn stop(&mut self) {}
 }
 
+impl AsrProvider for MockAsrProvider {
+    fn kind(&self) -> VoiceProviderKind {
+        VoiceProviderKind::Mock
+    }
+
+    fn diagnostic(&self) -> VoiceProviderDiagnostic {
+        VoiceProviderDiagnostic {
+            provider: self.kind(),
+            configured: true,
+            missing_env: Vec::new(),
+            endpoint: None,
+            details: BTreeMap::new(),
+            error: None,
+        }
+    }
+
+    fn start_session(
+        &self,
+        context: AsrStartContext,
+    ) -> Result<Box<dyn AsrSession + Send>, String> {
+        spawn_mock_provider(
+            context.app,
+            context.session_id,
+            Arc::clone(&context.cancel_signal),
+        );
+        Ok(Box::new(MockAsrSession))
+    }
+}
+
+impl AsrProvider for TencentAsrProvider {
+    fn kind(&self) -> VoiceProviderKind {
+        VoiceProviderKind::Tencent
+    }
+
+    fn validate_start(&self) -> Result<(), String> {
+        TencentAsrConfig::from_env().map(|_| ())
+    }
+
+    fn diagnostic(&self) -> VoiceProviderDiagnostic {
+        let missing_env = TencentAsrConfig::missing_required_env();
+        if !missing_env.is_empty() {
+            return VoiceProviderDiagnostic {
+                provider: self.kind(),
+                configured: false,
+                missing_env,
+                endpoint: None,
+                details: BTreeMap::new(),
+                error: Some("腾讯云 ASR 凭证未配置完整。".to_string()),
+            };
+        }
+
+        match TencentAsrConfig::from_env() {
+            Ok(config) => {
+                let mut details = BTreeMap::new();
+                details.insert("appId".to_string(), config.app_id.clone());
+                details.insert(
+                    "engineModelType".to_string(),
+                    config.engine_model_type.clone(),
+                );
+                details.insert(
+                    "sentenceStrategy".to_string(),
+                    config.sentence_strategy.to_string(),
+                );
+                details.insert("voiceFormat".to_string(), config.voice_format.to_string());
+                details.insert("needVad".to_string(), config.need_vad.to_string());
+
+                VoiceProviderDiagnostic {
+                    provider: self.kind(),
+                    configured: true,
+                    missing_env,
+                    endpoint: Some(config.host),
+                    details,
+                    error: None,
+                }
+            }
+            Err(error) => VoiceProviderDiagnostic {
+                provider: self.kind(),
+                configured: false,
+                missing_env,
+                endpoint: None,
+                details: BTreeMap::new(),
+                error: Some(error),
+            },
+        }
+    }
+
+    fn start_session(
+        &self,
+        context: AsrStartContext,
+    ) -> Result<Box<dyn AsrSession + Send>, String> {
+        let config = TencentAsrConfig::from_env()?;
+        let sender = spawn_tencent_provider(
+            context.app,
+            context.session_id,
+            Arc::clone(&context.cancel_signal),
+            Arc::clone(&context.finish_signal),
+            config,
+        );
+
+        Ok(Box::new(TencentAsrSession {
+            audio_sender: sender,
+        }))
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VoiceErrorEvent {
@@ -185,6 +311,7 @@ pub struct VoiceProviderStatus {
     provider_override: Option<VoiceProviderKind>,
     tencent_configured: bool,
     missing_tencent_env: Vec<String>,
+    diagnostics: Vec<VoiceProviderDiagnostic>,
 }
 
 #[derive(Serialize)]
@@ -199,6 +326,17 @@ pub struct TencentAsrConfigCheck {
     voice_format: Option<u8>,
     need_vad: Option<u8>,
     signed_url_preview: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceProviderDiagnostic {
+    provider: VoiceProviderKind,
+    configured: bool,
+    missing_env: Vec<String>,
+    endpoint: Option<String>,
+    details: BTreeMap<String, String>,
     error: Option<String>,
 }
 
@@ -274,13 +412,8 @@ pub fn start_voice_session(
     let cancel_signal = Arc::new(AtomicBool::new(false));
     let finish_signal = Arc::new(AtomicBool::new(false));
     let resolved_provider = resolve_provider(provider);
-    let tencent_config = match resolved_provider {
-        VoiceProviderKind::Auto => {
-            unreachable!("auto provider must be resolved before session start")
-        }
-        VoiceProviderKind::Mock => None,
-        VoiceProviderKind::Tencent => Some(TencentAsrConfig::from_env()?),
-    };
+    let provider_adapter = provider_for_kind(resolved_provider)?;
+    provider_adapter.validate_start()?;
 
     *active_session = Some(ActiveVoiceSession {
         session_id: session_id.clone(),
@@ -303,36 +436,22 @@ pub fn start_voice_session(
         return Err(format!("Failed to emit voice start event: {error}"));
     }
 
-    match resolved_provider {
-        VoiceProviderKind::Auto => {
-            unreachable!("auto provider must be resolved before session start")
+    let provider_session = match provider_adapter.start_session(AsrStartContext {
+        app: app.clone(),
+        session_id: session_id.clone(),
+        cancel_signal: Arc::clone(&cancel_signal),
+        finish_signal: Arc::clone(&finish_signal),
+    }) {
+        Ok(provider_session) => provider_session,
+        Err(error) => {
+            *active_session = None;
+            return Err(error);
         }
-        VoiceProviderKind::Mock => {
-            spawn_mock_provider(app.clone(), session_id.clone(), Arc::clone(&cancel_signal));
-            let Some(session) = active_session.as_mut() else {
-                return Err("Voice session was stopped before Mock ASR started.".to_string());
-            };
-            session.provider_session = Some(Box::new(MockAsrSession));
-        }
-        VoiceProviderKind::Tencent => {
-            let Some(config) = tencent_config else {
-                return Err("Tencent ASR config was not initialized.".to_string());
-            };
-            let sender = spawn_tencent_provider(
-                app.clone(),
-                session_id.clone(),
-                Arc::clone(&cancel_signal),
-                Arc::clone(&finish_signal),
-                config,
-            );
-            let Some(session) = active_session.as_mut() else {
-                return Err("Voice session was stopped before Tencent ASR started.".to_string());
-            };
-            session.provider_session = Some(Box::new(TencentAsrSession {
-                audio_sender: sender,
-            }));
-        }
-    }
+    };
+    let Some(session) = active_session.as_mut() else {
+        return Err("Voice session was stopped before ASR provider started.".to_string());
+    };
+    session.provider_session = Some(provider_session);
 
     Ok(session_id)
 }
@@ -411,6 +530,7 @@ pub fn get_voice_provider_status() -> VoiceProviderStatus {
         provider_override,
         tencent_configured,
         missing_tencent_env,
+        diagnostics: provider_diagnostics(),
     }
 }
 
@@ -1003,6 +1123,23 @@ fn normalized_tencent_speaker_id(speaker_id: Option<i32>) -> Option<String> {
             Some(format!("speaker-{}", speaker + 1))
         }
     })
+}
+
+fn provider_for_kind(provider: VoiceProviderKind) -> Result<Box<dyn AsrProvider + Send>, String> {
+    match provider {
+        VoiceProviderKind::Auto => {
+            Err("auto provider must be resolved before session start".to_string())
+        }
+        VoiceProviderKind::Mock => Ok(Box::new(MockAsrProvider)),
+        VoiceProviderKind::Tencent => Ok(Box::new(TencentAsrProvider)),
+    }
+}
+
+fn provider_diagnostics() -> Vec<VoiceProviderDiagnostic> {
+    vec![
+        MockAsrProvider.diagnostic(),
+        TencentAsrProvider.diagnostic(),
+    ]
 }
 
 fn resolve_provider(provider: VoiceProviderKind) -> VoiceProviderKind {
