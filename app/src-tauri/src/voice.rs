@@ -1,5 +1,7 @@
+mod mock;
 mod tencent;
 
+use mock::MockAsrProvider;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -9,8 +11,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tencent::{TencentAsrConfig, TencentAsrProvider};
@@ -84,47 +85,6 @@ pub(crate) struct AsrStartContext {
     pub session_id: String,
     pub cancel_signal: Arc<AtomicBool>,
     pub finish_signal: Arc<AtomicBool>,
-}
-
-struct MockAsrProvider;
-
-struct MockAsrSession;
-
-impl AsrSession for MockAsrSession {
-    fn send_audio_chunk(&mut self, _chunk: Vec<u8>) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn stop(&mut self) {}
-}
-
-impl AsrProvider for MockAsrProvider {
-    fn kind(&self) -> VoiceProviderKind {
-        VoiceProviderKind::Mock
-    }
-
-    fn diagnostic(&self) -> VoiceProviderDiagnostic {
-        VoiceProviderDiagnostic {
-            provider: self.kind(),
-            configured: true,
-            missing_env: Vec::new(),
-            endpoint: None,
-            details: BTreeMap::new(),
-            error: None,
-        }
-    }
-
-    fn start_session(
-        &self,
-        context: AsrStartContext,
-    ) -> Result<Box<dyn AsrSession + Send>, String> {
-        spawn_mock_provider(
-            context.app,
-            context.session_id,
-            Arc::clone(&context.cancel_signal),
-        );
-        Ok(Box::new(MockAsrSession))
-    }
 }
 
 #[derive(Clone, Serialize)]
@@ -492,52 +452,6 @@ pub fn cancel_voice_session(
     emit_stopped(&app, Some(session_id), VoiceStoppedReason::User);
 
     Ok(())
-}
-
-fn spawn_mock_provider(app: AppHandle, session_id: String, stop_signal: Arc<AtomicBool>) {
-    thread::spawn(move || {
-        let script = [
-            ("speaker-1", "我想先用语音描述这个需求。", true),
-            ("speaker-1", "前端点击麦克风后进入录音模式，", false),
-            (
-                "speaker-1",
-                "前端点击麦克风后进入录音模式，并实时显示转写。",
-                true,
-            ),
-            ("speaker-2", "后端要负责语音服务和资源释放。", true),
-        ];
-
-        for (index, (speaker_id, text, is_final)) in script.iter().enumerate() {
-            if stop_signal.load(Ordering::Relaxed) {
-                emit_stopped(&app, Some(session_id.clone()), VoiceStoppedReason::User);
-                return;
-            }
-
-            thread::sleep(Duration::from_millis(if *is_final { 850 } else { 600 }));
-
-            if stop_signal.load(Ordering::Relaxed) {
-                emit_stopped(&app, Some(session_id.clone()), VoiceStoppedReason::User);
-                return;
-            }
-
-            let _ = app.emit(
-                TRANSCRIPT_EVENT,
-                VoiceTranscriptEvent {
-                    id: format!("{session_id}-{index}"),
-                    session_id: session_id.clone(),
-                    speaker_id: Some((*speaker_id).to_string()),
-                    text: (*text).to_string(),
-                    is_final: *is_final,
-                    started_at_ms: Some((index as u32) * 1200),
-                    ended_at_ms: Some((index as u32) * 1200 + 900),
-                    created_at: now_millis_string(),
-                },
-            );
-        }
-
-        clear_active_session(&app, &session_id);
-        emit_stopped(&app, Some(session_id), VoiceStoppedReason::Completed);
-    });
 }
 
 fn provider_for_kind(provider: VoiceProviderKind) -> Result<Box<dyn AsrProvider + Send>, String> {
