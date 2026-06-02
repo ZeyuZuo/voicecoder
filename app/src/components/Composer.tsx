@@ -261,6 +261,10 @@ function getProviderLabel(provider: string) {
     return "腾讯云";
   }
 
+  if (provider === "iflytek_llm") {
+    return "讯飞大模型";
+  }
+
   if (provider === "mock") {
     return "Mock";
   }

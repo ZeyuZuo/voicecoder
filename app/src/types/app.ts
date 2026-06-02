@@ -37,7 +37,7 @@ export type VoiceTranscriptSegment = {
   createdAt: string;
 };
 
-export type VoiceProviderKind = "auto" | "mock" | "tencent";
+export type VoiceProviderKind = "auto" | "mock" | "tencent" | "iflytek_llm";
 
 export type VoiceSessionStartedEvent = {
   sessionId: string;

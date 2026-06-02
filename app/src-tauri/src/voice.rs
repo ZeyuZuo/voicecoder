@@ -1,3 +1,4 @@
+mod iflytek;
 mod mock;
 mod registry;
 mod tencent;
@@ -38,11 +39,12 @@ struct ActiveVoiceSession {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum VoiceProviderKind {
     Auto,
     Mock,
     Tencent,
+    IflytekLlm,
 }
 
 #[derive(Clone, Serialize)]
@@ -272,7 +274,7 @@ pub fn send_voice_audio_chunk(
 
     let send_result = match session.provider {
         VoiceProviderKind::Auto => Ok(()),
-        VoiceProviderKind::Mock | VoiceProviderKind::Tencent => {
+        VoiceProviderKind::Mock | VoiceProviderKind::Tencent | VoiceProviderKind::IflytekLlm => {
             let Some(provider_session) = session.provider_session.as_mut() else {
                 return Err("ASR Provider 尚未连接。".to_string());
             };
@@ -406,7 +408,7 @@ pub fn stop_voice_session(
 
     if let Some(session) = active_session.as_mut() {
         match session.provider {
-            VoiceProviderKind::Tencent => {
+            VoiceProviderKind::Tencent | VoiceProviderKind::IflytekLlm => {
                 session.finish_signal.store(true, Ordering::Relaxed);
                 if let Some(provider_session) = session.provider_session.as_mut() {
                     provider_session.stop();

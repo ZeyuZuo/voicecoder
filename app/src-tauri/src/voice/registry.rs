@@ -1,6 +1,7 @@
 use super::{
-    mock::MockAsrProvider, read_local_env, tencent::TencentAsrConfig, tencent::TencentAsrProvider,
-    AsrProvider, VoiceProviderDiagnostic, VoiceProviderKind,
+    iflytek::IflytekLlmAsrProvider, mock::MockAsrProvider, read_local_env,
+    tencent::TencentAsrConfig, tencent::TencentAsrProvider, AsrProvider, VoiceProviderDiagnostic,
+    VoiceProviderKind,
 };
 
 pub(crate) struct ProviderRegistry;
@@ -15,6 +16,7 @@ impl ProviderRegistry {
             }
             VoiceProviderKind::Mock => Ok(Box::new(MockAsrProvider)),
             VoiceProviderKind::Tencent => Ok(Box::new(TencentAsrProvider)),
+            VoiceProviderKind::IflytekLlm => Ok(Box::new(IflytekLlmAsrProvider)),
         }
     }
 
@@ -22,6 +24,7 @@ impl ProviderRegistry {
         vec![
             MockAsrProvider.diagnostic(),
             TencentAsrProvider.diagnostic(),
+            IflytekLlmAsrProvider.diagnostic(),
         ]
     }
 
@@ -47,6 +50,7 @@ impl ProviderRegistry {
         match value.trim().to_lowercase().as_str() {
             "mock" => Some(VoiceProviderKind::Mock),
             "tencent" => Some(VoiceProviderKind::Tencent),
+            "iflytek_llm" => Some(VoiceProviderKind::IflytekLlm),
             "auto" => None,
             _ => None,
         }
@@ -66,6 +70,10 @@ mod tests {
         assert_eq!(
             ProviderRegistry::parse_provider_override(" Tencent "),
             Some(VoiceProviderKind::Tencent)
+        );
+        assert_eq!(
+            ProviderRegistry::parse_provider_override("iflytek_llm"),
+            Some(VoiceProviderKind::IflytekLlm)
         );
         assert_eq!(ProviderRegistry::parse_provider_override("auto"), None);
         assert_eq!(ProviderRegistry::parse_provider_override("unknown"), None);
