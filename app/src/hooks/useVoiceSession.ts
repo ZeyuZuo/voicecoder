@@ -2,7 +2,6 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  TencentAsrConfigCheck,
   VoiceErrorEvent,
   VoiceProviderKind,
   VoiceProviderStatus,
@@ -21,7 +20,6 @@ type VoiceSessionState = {
   provider: VoiceProviderKind;
   providerStatus?: VoiceProviderStatus;
   sessionSnapshot?: VoiceSessionSnapshot;
-  tencentConfigCheck?: TencentAsrConfigCheck;
   partialText: string;
   segments: VoiceTranscriptSegment[];
   error?: string;
@@ -94,14 +92,6 @@ export function useVoiceSession() {
           ...current,
           providerStatus,
           provider: providerStatus.autoProvider
-        }));
-      })
-      .catch(() => undefined);
-    void invoke<TencentAsrConfigCheck>("check_tencent_asr_config")
-      .then((tencentConfigCheck) => {
-        setState((current) => ({
-          ...current,
-          tencentConfigCheck
         }));
       })
       .catch(() => undefined);

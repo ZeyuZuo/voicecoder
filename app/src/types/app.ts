@@ -71,8 +71,6 @@ export type VoiceAudioChunkPayload = {
 export type VoiceProviderStatus = {
   autoProvider: Exclude<VoiceProviderKind, "auto">;
   providerOverride?: VoiceProviderKind;
-  tencentConfigured: boolean;
-  missingTencentEnv: string[];
   diagnostics: VoiceProviderDiagnostic[];
 };
 
@@ -82,19 +80,6 @@ export type VoiceProviderDiagnostic = {
   missingEnv: string[];
   endpoint?: string;
   details: Record<string, string>;
-  error?: string;
-};
-
-export type TencentAsrConfigCheck = {
-  ok: boolean;
-  missingEnv: string[];
-  host?: string;
-  appId?: string;
-  engineModelType?: string;
-  sentenceStrategy?: number;
-  voiceFormat?: number;
-  needVad?: number;
-  signedUrlPreview?: string;
   error?: string;
 };
 

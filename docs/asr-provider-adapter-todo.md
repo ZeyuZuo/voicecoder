@@ -93,7 +93,7 @@ VoiceProviderDiagnostic
 - [x] Step 2：把腾讯实现从 `voice.rs` 移到独立 `voice/tencent.rs`。
 - [x] Step 3：把 Mock 实现移到独立 `voice/mock.rs`。
 - [x] Step 4：增加 provider registry，集中处理 `auto` 和显式 provider override。
-- [ ] Step 5：把前端 `TencentAsrConfigCheck` 升级为通用 provider diagnostics。
+- [x] Step 5：把前端 `TencentAsrConfigCheck` 升级为通用 provider diagnostics。
 - [ ] Step 6：新增讯飞大模型 provider 骨架和配置诊断。
 - [ ] Step 7：实现讯飞大模型 WebSocket 鉴权、40ms pacing、结束包和错误处理。
 - [ ] Step 8：实现讯飞返回 JSON parser，把角色编号归一化为 `speaker-*`。
