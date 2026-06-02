@@ -96,7 +96,7 @@ VoiceProviderDiagnostic
 - [x] Step 5：把前端 `TencentAsrConfigCheck` 升级为通用 provider diagnostics。
 - [x] Step 6：新增讯飞大模型 provider 骨架和配置诊断。
 - [x] Step 7：实现讯飞大模型 WebSocket 鉴权、40ms pacing、结束包和错误处理。
-- [ ] Step 8：实现讯飞返回 JSON parser，把角色编号归一化为 `speaker-*`。
+- [x] Step 8：实现讯飞返回 JSON parser，把角色编号归一化为 `speaker-*`。
 - [ ] Step 9：增加 `VOICECODER_ASR_PROVIDER=iflytek_llm` 验收文档。
 - [ ] Step 10：真实多人测试后决定 `auto` 默认优先级。
 

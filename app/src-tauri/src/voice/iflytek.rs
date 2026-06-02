@@ -1,6 +1,7 @@
 use super::{
-    emit_error, emit_stopped, now_millis, read_local_env, runtime, AsrProvider, AsrSession,
-    AsrStartContext, VoiceProviderDiagnostic, VoiceProviderKind, VoiceStoppedReason,
+    emit_error, emit_stopped, now_millis, now_millis_string, read_local_env, runtime, AsrProvider,
+    AsrSession, AsrStartContext, VoiceProviderDiagnostic, VoiceProviderKind, VoiceStoppedReason,
+    VoiceTranscriptEvent, TRANSCRIPT_EVENT,
 };
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
@@ -19,7 +20,7 @@ use std::{
     thread,
     time::Duration,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -87,6 +88,31 @@ struct IflytekRealtimeResponse {
     data: Option<Value>,
     desc: Option<String>,
     sid: Option<String>,
+}
+
+#[derive(Default)]
+struct IflytekSpeakerState {
+    current_speaker_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct IflytekParsedTranscript {
+    id_key: String,
+    speaker_id: Option<String>,
+    text: String,
+    is_final: bool,
+    started_at_ms: Option<u32>,
+    ended_at_ms: Option<u32>,
+}
+
+struct IflytekTranscriptBuilder {
+    group_index: usize,
+    segment_key: String,
+    text: String,
+    speaker_id: Option<String>,
+    is_final: bool,
+    started_at_ms: Option<u32>,
+    ended_at_ms: Option<u32>,
 }
 
 enum IflytekMessageAction {
@@ -330,6 +356,8 @@ fn spawn_iflytek_llm_provider(
             let reader_cancel_signal = Arc::clone(&cancel_signal);
 
             let reader_task = tokio::spawn(async move {
+                let mut speaker_state = IflytekSpeakerState::default();
+
                 while let Some(message) = reader.next().await {
                     if reader_cancel_signal.load(Ordering::Relaxed) {
                         return;
@@ -337,7 +365,12 @@ fn spawn_iflytek_llm_provider(
 
                     match message {
                         Ok(Message::Text(text)) => {
-                            match handle_iflytek_message(&reader_app, &reader_session_id, &text) {
+                            match handle_iflytek_message(
+                                &reader_app,
+                                &reader_session_id,
+                                &mut speaker_state,
+                                &text,
+                            ) {
                                 IflytekMessageAction::Continue => {}
                                 IflytekMessageAction::Stop(reason) => {
                                     let _ = completion_sender.send(reason);
@@ -533,6 +566,7 @@ where
 fn handle_iflytek_message(
     app: &AppHandle,
     session_id: &str,
+    speaker_state: &mut IflytekSpeakerState,
     raw_message: &str,
 ) -> IflytekMessageAction {
     let parsed = serde_json::from_str::<IflytekRealtimeResponse>(raw_message);
@@ -566,6 +600,10 @@ fn handle_iflytek_message(
         return IflytekMessageAction::Stop(VoiceStoppedReason::Error);
     }
 
+    for transcript in parse_iflytek_transcript_events(response.data.as_ref(), speaker_state) {
+        emit_iflytek_transcript(app, session_id, transcript);
+    }
+
     if iflytek_data_is_final(response.data.as_ref()) {
         return IflytekMessageAction::Stop(VoiceStoppedReason::Completed);
     }
@@ -581,6 +619,209 @@ fn format_iflytek_error(response: &IflytekRealtimeResponse) -> String {
         .unwrap_or("讯飞大模型 ASR 返回错误。");
     let sid = response.sid.as_deref().unwrap_or("-");
     format!("讯飞大模型 ASR 返回错误码 {code}：{desc}（sid: {sid}）")
+}
+
+fn parse_iflytek_transcript_events(
+    data: Option<&Value>,
+    speaker_state: &mut IflytekSpeakerState,
+) -> Vec<IflytekParsedTranscript> {
+    let Some(data) = normalized_iflytek_data(data) else {
+        return Vec::new();
+    };
+
+    let Some(st) = data.pointer("/cn/st") else {
+        return Vec::new();
+    };
+
+    let segment_key = value_to_string(data.get("seg_id"))
+        .or_else(|| value_to_string(st.get("seg_id")))
+        .unwrap_or_else(|| now_millis().to_string());
+    let segment_started_at_ms = value_to_u32(st.get("bg"));
+    let segment_ended_at_ms = value_to_u32(st.get("ed"));
+    let is_final = value_to_string(st.get("type")).as_deref() == Some("0");
+    let mut transcripts = Vec::new();
+    let mut builder = IflytekTranscriptBuilder::new(
+        segment_key,
+        speaker_state.current_speaker_id.clone(),
+        is_final,
+        segment_started_at_ms,
+        segment_ended_at_ms,
+    );
+
+    let Some(rt_items) = st.get("rt").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    for rt_item in rt_items {
+        let Some(ws_items) = rt_item.get("ws").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for ws_item in ws_items {
+            let Some(cw_items) = ws_item.get("cw").and_then(Value::as_array) else {
+                continue;
+            };
+
+            for cw_item in cw_items {
+                let next_speaker_id = cw_item
+                    .get("rl")
+                    .and_then(normalized_iflytek_speaker_id)
+                    .map(|speaker_id| {
+                        speaker_state.current_speaker_id = Some(speaker_id.clone());
+                        speaker_id
+                    })
+                    .or_else(|| speaker_state.current_speaker_id.clone());
+
+                if builder.should_split_for_speaker(next_speaker_id.as_ref()) {
+                    let segment_key = builder.segment_key.clone();
+                    if let Some(transcript) = builder.finish() {
+                        transcripts.push(transcript);
+                    }
+                    let group_index = transcripts.len();
+                    builder = IflytekTranscriptBuilder::new(
+                        segment_key,
+                        next_speaker_id.clone(),
+                        is_final,
+                        segment_started_at_ms,
+                        segment_ended_at_ms,
+                    );
+                    builder.group_index = group_index;
+                } else {
+                    builder.speaker_id = next_speaker_id.clone();
+                }
+
+                let word_kind = value_to_string(cw_item.get("wp"));
+                if word_kind.as_deref() == Some("g") {
+                    continue;
+                }
+
+                let Some(word) = value_to_string(cw_item.get("w")) else {
+                    continue;
+                };
+                if word.trim().is_empty() {
+                    continue;
+                }
+
+                builder.push_word(
+                    &word,
+                    value_to_u32(cw_item.get("wb")),
+                    value_to_u32(cw_item.get("we")),
+                );
+            }
+        }
+    }
+
+    if let Some(transcript) = builder.finish() {
+        transcripts.push(transcript);
+    }
+
+    transcripts
+}
+
+impl IflytekTranscriptBuilder {
+    fn new(
+        segment_key: String,
+        speaker_id: Option<String>,
+        is_final: bool,
+        started_at_ms: Option<u32>,
+        ended_at_ms: Option<u32>,
+    ) -> Self {
+        Self {
+            group_index: 0,
+            segment_key,
+            text: String::new(),
+            speaker_id,
+            is_final,
+            started_at_ms,
+            ended_at_ms,
+        }
+    }
+
+    fn should_split_for_speaker(&self, next_speaker_id: Option<&String>) -> bool {
+        !self.text.is_empty()
+            && next_speaker_id.is_some()
+            && self.speaker_id.as_ref() != next_speaker_id
+    }
+
+    fn push_word(&mut self, word: &str, started_at_ms: Option<u32>, ended_at_ms: Option<u32>) {
+        if self.text.is_empty() {
+            self.started_at_ms = started_at_ms.or(self.started_at_ms);
+        }
+        self.ended_at_ms = ended_at_ms.or(self.ended_at_ms);
+        self.text.push_str(word);
+    }
+
+    fn finish(self) -> Option<IflytekParsedTranscript> {
+        let text = self.text.trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+
+        Some(IflytekParsedTranscript {
+            id_key: format!("{}-{}", self.segment_key, self.group_index),
+            speaker_id: self.speaker_id,
+            text,
+            is_final: self.is_final,
+            started_at_ms: self.started_at_ms,
+            ended_at_ms: self.ended_at_ms,
+        })
+    }
+}
+
+fn emit_iflytek_transcript(app: &AppHandle, session_id: &str, transcript: IflytekParsedTranscript) {
+    let _ = app.emit(
+        TRANSCRIPT_EVENT,
+        VoiceTranscriptEvent {
+            id: format!("{session_id}-{}", transcript.id_key),
+            session_id: session_id.to_string(),
+            speaker_id: transcript.speaker_id,
+            text: transcript.text,
+            is_final: transcript.is_final,
+            started_at_ms: transcript.started_at_ms,
+            ended_at_ms: transcript.ended_at_ms,
+            created_at: now_millis_string(),
+        },
+    );
+}
+
+fn normalized_iflytek_data(data: Option<&Value>) -> Option<Value> {
+    match data? {
+        Value::String(text) => serde_json::from_str::<Value>(text).ok(),
+        value => Some(value.clone()),
+    }
+}
+
+fn normalized_iflytek_speaker_id(value: &Value) -> Option<String> {
+    let role = value_to_i32(Some(value))?;
+    if role <= 0 {
+        return None;
+    }
+
+    Some(format!("speaker-{role}"))
+}
+
+fn value_to_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn value_to_i32(value: Option<&Value>) -> Option<i32> {
+    match value? {
+        Value::Number(number) => number.as_i64().and_then(|value| i32::try_from(value).ok()),
+        Value::String(text) => text.trim().parse::<i32>().ok(),
+        _ => None,
+    }
+}
+
+fn value_to_u32(value: Option<&Value>) -> Option<u32> {
+    match value? {
+        Value::Number(number) => number.as_u64().and_then(|value| u32::try_from(value).ok()),
+        Value::String(text) => text.trim().parse::<u32>().ok(),
+        _ => None,
+    }
 }
 
 fn iflytek_data_is_final(data: Option<&Value>) -> bool {
@@ -726,6 +967,154 @@ mod tests {
             data.to_string()
         ))));
         assert!(!iflytek_data_is_final(Some(&json!({ "ls": false }))));
+    }
+
+    #[test]
+    fn parses_iflytek_transcript_event() {
+        let mut speaker_state = IflytekSpeakerState::default();
+        let data = json!({
+            "seg_id": 7,
+            "cn": {
+                "st": {
+                    "bg": "120",
+                    "ed": "880",
+                    "type": "0",
+                    "rt": [
+                        {
+                            "ws": [
+                                {
+                                    "cw": [
+                                        { "w": "你好", "wp": "n", "rl": "1", "wb": "120", "we": "420" },
+                                        { "w": "。", "wp": "p", "rl": "0", "wb": "420", "we": "480" }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let transcripts = parse_iflytek_transcript_events(Some(&data), &mut speaker_state);
+
+        assert_eq!(
+            transcripts,
+            vec![IflytekParsedTranscript {
+                id_key: "7-0".to_string(),
+                speaker_id: Some("speaker-1".to_string()),
+                text: "你好。".to_string(),
+                is_final: true,
+                started_at_ms: Some(120),
+                ended_at_ms: Some(480),
+            }]
+        );
+        assert_eq!(
+            speaker_state.current_speaker_id.as_deref(),
+            Some("speaker-1")
+        );
+    }
+
+    #[test]
+    fn parses_iflytek_transcript_from_string_data() {
+        let mut speaker_state = IflytekSpeakerState::default();
+        let data = json!({
+            "seg_id": "8",
+            "cn": {
+                "st": {
+                    "type": "1",
+                    "rt": [
+                        {
+                            "ws": [
+                                {
+                                    "cw": [
+                                        { "w": "中间", "wp": "n", "rl": 2 },
+                                        { "w": "结果", "wp": "n", "rl": 0 }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let transcripts = parse_iflytek_transcript_events(
+            Some(&Value::String(data.to_string())),
+            &mut speaker_state,
+        );
+
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].id_key, "8-0");
+        assert_eq!(transcripts[0].speaker_id.as_deref(), Some("speaker-2"));
+        assert_eq!(transcripts[0].text, "中间结果");
+        assert!(!transcripts[0].is_final);
+    }
+
+    #[test]
+    fn carries_iflytek_speaker_for_role_zero() {
+        let mut speaker_state = IflytekSpeakerState {
+            current_speaker_id: Some("speaker-3".to_string()),
+        };
+        let data = json!({
+            "seg_id": 9,
+            "cn": {
+                "st": {
+                    "type": "0",
+                    "rt": [
+                        {
+                            "ws": [
+                                {
+                                    "cw": [
+                                        { "w": "继续说话", "wp": "n", "rl": "0" }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let transcripts = parse_iflytek_transcript_events(Some(&data), &mut speaker_state);
+
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].speaker_id.as_deref(), Some("speaker-3"));
+        assert_eq!(transcripts[0].text, "继续说话");
+    }
+
+    #[test]
+    fn splits_iflytek_transcript_when_speaker_changes() {
+        let mut speaker_state = IflytekSpeakerState::default();
+        let data = json!({
+            "seg_id": 10,
+            "cn": {
+                "st": {
+                    "type": "0",
+                    "rt": [
+                        {
+                            "ws": [
+                                {
+                                    "cw": [
+                                        { "w": "甲说", "wp": "n", "rl": "1" },
+                                        { "w": "乙答", "wp": "n", "rl": "2" }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+
+        let transcripts = parse_iflytek_transcript_events(Some(&data), &mut speaker_state);
+
+        assert_eq!(transcripts.len(), 2);
+        assert_eq!(transcripts[0].id_key, "10-0");
+        assert_eq!(transcripts[0].speaker_id.as_deref(), Some("speaker-1"));
+        assert_eq!(transcripts[0].text, "甲说");
+        assert_eq!(transcripts[1].id_key, "10-1");
+        assert_eq!(transcripts[1].speaker_id.as_deref(), Some("speaker-2"));
+        assert_eq!(transcripts[1].text, "乙答");
     }
 
     #[test]
