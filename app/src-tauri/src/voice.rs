@@ -585,10 +585,8 @@ mod tests {
     fn provider_status_reports_missing_tencent_credentials() {
         let status = get_voice_provider_status();
 
-        if status.provider_override == Some(VoiceProviderKind::Mock) {
-            assert_eq!(status.auto_provider, VoiceProviderKind::Mock);
-        } else if status.provider_override == Some(VoiceProviderKind::Tencent) {
-            assert_eq!(status.auto_provider, VoiceProviderKind::Tencent);
+        if let Some(provider_override) = status.provider_override {
+            assert_eq!(status.auto_provider, provider_override);
         } else if status.tencent_configured {
             assert_eq!(status.auto_provider, VoiceProviderKind::Tencent);
             assert!(status.missing_tencent_env.is_empty());
