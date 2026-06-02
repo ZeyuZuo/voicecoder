@@ -1,7 +1,8 @@
 mod mock;
+mod registry;
 mod tencent;
 
-use mock::MockAsrProvider;
+use registry::ProviderRegistry;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -14,7 +15,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager};
-use tencent::{TencentAsrConfig, TencentAsrProvider};
+use tencent::TencentAsrConfig;
 use tokio::runtime::Runtime;
 
 const SESSION_STARTED_EVENT: &str = "voice://session-started";
@@ -191,8 +192,8 @@ pub fn start_voice_session(
     let session_id = create_session_id();
     let cancel_signal = Arc::new(AtomicBool::new(false));
     let finish_signal = Arc::new(AtomicBool::new(false));
-    let resolved_provider = resolve_provider(provider);
-    let provider_adapter = provider_for_kind(resolved_provider)?;
+    let resolved_provider = ProviderRegistry::resolve_provider(provider);
+    let provider_adapter = ProviderRegistry::provider_for_kind(resolved_provider)?;
     provider_adapter.validate_start()?;
 
     *active_session = Some(ActiveVoiceSession {
@@ -303,14 +304,14 @@ pub fn send_voice_audio_chunk(
 pub fn get_voice_provider_status() -> VoiceProviderStatus {
     let missing_tencent_env = TencentAsrConfig::missing_required_env();
     let tencent_configured = missing_tencent_env.is_empty();
-    let provider_override = provider_override_from_env();
+    let provider_override = ProviderRegistry::provider_override_from_env();
 
     VoiceProviderStatus {
-        auto_provider: resolve_provider(VoiceProviderKind::Auto),
+        auto_provider: ProviderRegistry::resolve_provider(VoiceProviderKind::Auto),
         provider_override,
         tencent_configured,
         missing_tencent_env,
-        diagnostics: provider_diagnostics(),
+        diagnostics: ProviderRegistry::diagnostics(),
     }
 }
 
@@ -452,49 +453,6 @@ pub fn cancel_voice_session(
     emit_stopped(&app, Some(session_id), VoiceStoppedReason::User);
 
     Ok(())
-}
-
-fn provider_for_kind(provider: VoiceProviderKind) -> Result<Box<dyn AsrProvider + Send>, String> {
-    match provider {
-        VoiceProviderKind::Auto => {
-            Err("auto provider must be resolved before session start".to_string())
-        }
-        VoiceProviderKind::Mock => Ok(Box::new(MockAsrProvider)),
-        VoiceProviderKind::Tencent => Ok(Box::new(TencentAsrProvider)),
-    }
-}
-
-fn provider_diagnostics() -> Vec<VoiceProviderDiagnostic> {
-    vec![
-        MockAsrProvider.diagnostic(),
-        TencentAsrProvider.diagnostic(),
-    ]
-}
-
-fn resolve_provider(provider: VoiceProviderKind) -> VoiceProviderKind {
-    match provider {
-        VoiceProviderKind::Auto => provider_override_from_env().unwrap_or_else(|| {
-            if TencentAsrConfig::is_available() {
-                VoiceProviderKind::Tencent
-            } else {
-                VoiceProviderKind::Mock
-            }
-        }),
-        explicit_provider => explicit_provider,
-    }
-}
-
-fn provider_override_from_env() -> Option<VoiceProviderKind> {
-    read_local_env("VOICECODER_ASR_PROVIDER").and_then(|value| parse_provider_override(&value))
-}
-
-fn parse_provider_override(value: &str) -> Option<VoiceProviderKind> {
-    match value.trim().to_lowercase().as_str() {
-        "mock" => Some(VoiceProviderKind::Mock),
-        "tencent" => Some(VoiceProviderKind::Tencent),
-        "auto" => None,
-        _ => None,
-    }
 }
 
 fn read_local_env(key: &str) -> Option<String> {
@@ -640,20 +598,6 @@ mod tests {
                 .iter()
                 .all(|key| !key.contains("SECRET_KEY_VALUE")));
         }
-    }
-
-    #[test]
-    fn provider_override_parser_accepts_known_values() {
-        assert_eq!(
-            parse_provider_override("mock"),
-            Some(VoiceProviderKind::Mock)
-        );
-        assert_eq!(
-            parse_provider_override(" Tencent "),
-            Some(VoiceProviderKind::Tencent)
-        );
-        assert_eq!(parse_provider_override("auto"), None);
-        assert_eq!(parse_provider_override("unknown"), None);
     }
 
     #[test]
