@@ -90,7 +90,7 @@ VoiceProviderDiagnostic
 ## 开发 Todo
 
 - [x] Step 1：抽出通用 provider/session/diagnostic 边界，保持 Mock 和腾讯行为不变。
-- [ ] Step 2：把腾讯实现从 `voice.rs` 移到独立 `voice/tencent.rs`。
+- [x] Step 2：把腾讯实现从 `voice.rs` 移到独立 `voice/tencent.rs`。
 - [ ] Step 3：把 Mock 实现移到独立 `voice/mock.rs`。
 - [ ] Step 4：增加 provider registry，集中处理 `auto` 和显式 provider override。
 - [ ] Step 5：把前端 `TencentAsrConfigCheck` 升级为通用 provider diagnostics。
