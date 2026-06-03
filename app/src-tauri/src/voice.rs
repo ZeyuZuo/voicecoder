@@ -103,8 +103,6 @@ struct VoiceErrorEvent {
 pub struct VoiceProviderStatus {
     auto_provider: VoiceProviderKind,
     provider_override: Option<VoiceProviderKind>,
-    tencent_configured: bool,
-    missing_tencent_env: Vec<String>,
     diagnostics: Vec<VoiceProviderDiagnostic>,
 }
 
@@ -304,15 +302,11 @@ pub fn send_voice_audio_chunk(
 
 #[tauri::command]
 pub fn get_voice_provider_status() -> VoiceProviderStatus {
-    let missing_tencent_env = TencentAsrConfig::missing_required_env();
-    let tencent_configured = missing_tencent_env.is_empty();
     let provider_override = ProviderRegistry::provider_override_from_env();
 
     VoiceProviderStatus {
         auto_provider: ProviderRegistry::resolve_provider(VoiceProviderKind::Auto),
         provider_override,
-        tencent_configured,
-        missing_tencent_env,
         diagnostics: ProviderRegistry::diagnostics(),
     }
 }
@@ -582,22 +576,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_status_reports_missing_tencent_credentials() {
+    fn provider_status_reports_generic_provider_diagnostics() {
         let status = get_voice_provider_status();
 
         if let Some(provider_override) = status.provider_override {
             assert_eq!(status.auto_provider, provider_override);
-        } else if status.tencent_configured {
-            assert_eq!(status.auto_provider, VoiceProviderKind::Tencent);
-            assert!(status.missing_tencent_env.is_empty());
         } else {
-            assert_eq!(status.auto_provider, VoiceProviderKind::Mock);
-            assert!(!status.missing_tencent_env.is_empty());
-            assert!(status
-                .missing_tencent_env
-                .iter()
-                .all(|key| !key.contains("SECRET_KEY_VALUE")));
+            assert!(matches!(
+                status.auto_provider,
+                VoiceProviderKind::Mock | VoiceProviderKind::Tencent
+            ));
         }
+
+        assert!(status
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.provider == VoiceProviderKind::Mock));
+        assert!(status
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.provider == VoiceProviderKind::Tencent));
+        assert!(status
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.provider == VoiceProviderKind::IflytekLlm));
+        assert!(status
+            .diagnostics
+            .iter()
+            .flat_map(|diagnostic| diagnostic.missing_env.iter())
+            .all(|key| !key.contains("SECRET_KEY_VALUE")));
     }
 
     #[test]
