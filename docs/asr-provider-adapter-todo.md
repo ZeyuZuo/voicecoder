@@ -97,7 +97,7 @@ VoiceProviderDiagnostic
 - [x] Step 6：新增讯飞大模型 provider 骨架和配置诊断。
 - [x] Step 7：实现讯飞大模型 WebSocket 鉴权、40ms pacing、结束包和错误处理。
 - [x] Step 8：实现讯飞返回 JSON parser，把角色编号归一化为 `speaker-*`。
-- [ ] Step 9：增加 `VOICECODER_ASR_PROVIDER=iflytek_llm` 验收文档。
+- [x] Step 9：增加 `VOICECODER_ASR_PROVIDER=iflytek_llm` 验收文档。
 - [ ] Step 10：真实多人测试后决定 `auto` 默认优先级。
 
 ## Step 1 验收
