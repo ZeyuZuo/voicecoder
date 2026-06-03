@@ -179,7 +179,7 @@ IFLYTEK_LLM_FEATURE_IDS=feature_id_1,feature_id_2
 通过标准：
 
 - 能连接讯飞 WebSocket，不出现鉴权或连接错误。
-- 后端按 16kHz / 16bit / mono PCM 发送音频，并在讯飞 adapter 内按 40ms / 1280 bytes pacing 重分片。
+- 前端按讯飞 provider 推荐值发送 40ms / 1280 bytes 音频分片，后端 adapter 仍保留 1280 bytes 重分片作为兜底。
 - 停止时会发送讯飞结束包，并等待最终帧或超时收尾。
 - 能看到实时转写文本。
 - final 句子进入转写列表，并自动追加到中间输入框。
@@ -208,8 +208,8 @@ IFLYTEK_LLM_FEATURE_IDS=feature_id_1,feature_id_2
 - 讯飞返回 `35014` / `100012`：检查本机系统时间是否准确。
 - 讯飞返回 `35030`：签名重复或过期，重启客户端后重试。
 - 讯飞返回 `37005`：服务端长时间未收到音频，确认麦克风权限和音频分片发送是否正常。
-- 讯飞返回 `100001`：音频发送过快，检查 adapter pacing 是否仍为 40ms / 1280 bytes。
-- 没有转写文本：确认使用 16kHz / 16bit / mono PCM 分片，当前前端会按约 200ms / 6400 bytes 发送，并在停止时发送尾包。
+- 讯飞返回 `100001`：音频发送过快，检查讯飞 provider 的前端分片和 adapter pacing 是否仍为 40ms / 1280 bytes。
+- 没有转写文本：确认使用 16kHz / 16bit / mono PCM 分片；腾讯/Mock 默认约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes，并在停止时发送尾包。
 - speaker 标签来回跳：这是腾讯实时 speaker diarization 的实测不稳定表现，不影响 Phase 2 的语音输入主链路。
 - 讯飞 `speaker-*` 标签来回跳：先区分盲分和声纹分离模式；盲分不稳定时，再测试配置 `IFLYTEK_LLM_FEATURE_IDS` 的声纹分离。
 - 客户端出现 `CryptoProvider` panic：检查 Rust TLS 依赖特性，当前项目显式使用 rustls `ring` provider。

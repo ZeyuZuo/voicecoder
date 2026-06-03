@@ -25,6 +25,9 @@ type VoiceSessionState = {
   error?: string;
 };
 
+const DEFAULT_AUDIO_CHUNK_SIZE_BYTES = 6400;
+const IFLYTEK_LLM_AUDIO_CHUNK_SIZE_BYTES = 1280;
+
 const initialVoiceState: VoiceSessionState = {
   status: "idle",
   provider: "mock",
@@ -218,7 +221,17 @@ export function useVoiceSession() {
       await invoke("cancel_voice_session").catch(() => undefined);
       suppressUnboundSessionEventsRef.current = false;
       const sessionId = await invoke<string>("start_voice_session", { provider: "auto" satisfies VoiceProviderKind });
-      refreshSessionSnapshot();
+      const sessionSnapshot = await loadSessionSnapshot();
+      const audioChunkSizeBytes = getAudioChunkSizeBytes(sessionSnapshot?.provider);
+      if (sessionSnapshot) {
+        setState((current) => ({
+          ...current,
+          sessionSnapshot,
+          provider: sessionSnapshot.provider ?? current.provider
+        }));
+      } else {
+        refreshSessionSnapshot();
+      }
       if (sessionRequestRef.current !== requestId) {
         stopMediaStreamTracks(stream);
         await stopActiveBackendSession();
@@ -232,6 +245,7 @@ export function useVoiceSession() {
       }));
       captureRef.current = await createVoiceCapture(stream, {
         sessionId,
+        chunkSizeBytes: audioChunkSizeBytes,
         onError: (message) => {
           releaseVoiceSession(message);
         }
@@ -319,6 +333,22 @@ async function stopActiveBackendSession() {
   if (isTauri()) {
     await invoke("cancel_voice_session").catch(() => undefined);
   }
+}
+
+async function loadSessionSnapshot() {
+  if (!isTauri()) {
+    return undefined;
+  }
+
+  return invoke<VoiceSessionSnapshot>("get_voice_session_snapshot").catch(() => undefined);
+}
+
+function getAudioChunkSizeBytes(provider: VoiceSessionSnapshot["provider"]) {
+  if (provider === "iflytek_llm") {
+    return IFLYTEK_LLM_AUDIO_CHUNK_SIZE_BYTES;
+  }
+
+  return DEFAULT_AUDIO_CHUNK_SIZE_BYTES;
 }
 
 function stopMediaStreamTracks(stream: MediaStream) {

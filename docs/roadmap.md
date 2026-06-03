@@ -54,9 +54,9 @@
 - 已建立前后端语音事件协议。
 - 中间输入框麦克风按钮已接入语音状态。
 - 前端会通过 Web Audio 请求麦克风权限，采集音频并转换为 16kHz / 16bit / mono PCM。
-- 前端按约 200ms / 6400 bytes 分片发送给 Tauri 后端。
+- 前端按 provider 推荐值分片发送给 Tauri 后端：腾讯/Mock 使用约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes。
 - 当前采集关闭浏览器 echo cancellation、noise suppression 和 auto gain control，尽量保留原始音色，便于后续 provider 做 speaker diarization。
-- 停止录音时会 flush 不足 6400 bytes 的尾包，避免最后一小段音频丢失。
+- 停止录音时会 flush 不足当前 provider 分片大小的尾包，避免最后一小段音频丢失。
 - final 转写句子会自动追加进中间输入框，语音结果进入真实 prompt 输入链路。
 - 同一 final 句子更新时会替换已有文本，避免重复灌入 prompt。
 - 后端已提供语音 session 生命周期管理：
