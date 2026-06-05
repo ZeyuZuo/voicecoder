@@ -2,6 +2,7 @@ mod iflytek;
 mod mock;
 mod registry;
 mod tencent;
+mod volcengine;
 
 use registry::ProviderRegistry;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,7 @@ pub enum VoiceProviderKind {
     Mock,
     Tencent,
     IflytekLlm,
+    Volcengine,
 }
 
 #[derive(Clone, Serialize)]
@@ -272,7 +274,10 @@ pub fn send_voice_audio_chunk(
 
     let send_result = match session.provider {
         VoiceProviderKind::Auto => Ok(()),
-        VoiceProviderKind::Mock | VoiceProviderKind::Tencent | VoiceProviderKind::IflytekLlm => {
+        VoiceProviderKind::Mock
+        | VoiceProviderKind::Tencent
+        | VoiceProviderKind::IflytekLlm
+        | VoiceProviderKind::Volcengine => {
             let Some(provider_session) = session.provider_session.as_mut() else {
                 return Err("ASR Provider 尚未连接。".to_string());
             };
@@ -402,7 +407,9 @@ pub fn stop_voice_session(
 
     if let Some(session) = active_session.as_mut() {
         match session.provider {
-            VoiceProviderKind::Tencent | VoiceProviderKind::IflytekLlm => {
+            VoiceProviderKind::Tencent
+            | VoiceProviderKind::IflytekLlm
+            | VoiceProviderKind::Volcengine => {
                 session.finish_signal.store(true, Ordering::Relaxed);
                 if let Some(provider_session) = session.provider_session.as_mut() {
                     provider_session.stop();
