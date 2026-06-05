@@ -69,8 +69,8 @@ pub(crate) struct IflytekLlmAsrProvider;
 
 pub(crate) struct IflytekLlmConfig {
     app_id: String,
-    access_key_id: String,
-    access_key_secret: String,
+    api_key: String,
+    api_secret: String,
     endpoint: String,
     lang: String,
     role_type: String,
@@ -156,7 +156,7 @@ impl AsrProvider for IflytekLlmAsrProvider {
             Ok(config) => {
                 let mut details = BTreeMap::new();
                 details.insert("appId".to_string(), config.app_id);
-                details.insert("accessKeyId".to_string(), config.access_key_id);
+                details.insert("apiKey".to_string(), config.api_key);
                 details.insert("lang".to_string(), config.lang);
                 details.insert(
                     "audioEncode".to_string(),
@@ -220,8 +220,11 @@ impl IflytekLlmConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
         Ok(Self {
             app_id: required_env("IFLYTEK_LLM_APP_ID")?,
-            access_key_id: required_env("IFLYTEK_LLM_ACCESS_KEY_ID")?,
-            access_key_secret: required_env("IFLYTEK_LLM_ACCESS_KEY_SECRET")?,
+            api_key: required_env_with_legacy("IFLYTEK_LLM_API_KEY", "IFLYTEK_LLM_ACCESS_KEY_ID")?,
+            api_secret: required_env_with_legacy(
+                "IFLYTEK_LLM_API_SECRET",
+                "IFLYTEK_LLM_ACCESS_KEY_SECRET",
+            )?,
             endpoint: read_local_env("IFLYTEK_LLM_ENDPOINT")
                 .unwrap_or_else(|| DEFAULT_IFLYTEK_LLM_ENDPOINT.to_string()),
             lang: read_local_env("IFLYTEK_LLM_LANG")
@@ -233,15 +236,19 @@ impl IflytekLlmConfig {
     }
 
     pub(crate) fn missing_required_env() -> Vec<String> {
-        [
-            "IFLYTEK_LLM_APP_ID",
-            "IFLYTEK_LLM_ACCESS_KEY_ID",
-            "IFLYTEK_LLM_ACCESS_KEY_SECRET",
-        ]
-        .iter()
-        .filter(|key| required_env(key).is_err())
-        .map(|key| (*key).to_string())
-        .collect()
+        let mut missing_env = Vec::new();
+        if required_env("IFLYTEK_LLM_APP_ID").is_err() {
+            missing_env.push("IFLYTEK_LLM_APP_ID".to_string());
+        }
+        if required_env_with_legacy("IFLYTEK_LLM_API_KEY", "IFLYTEK_LLM_ACCESS_KEY_ID").is_err() {
+            missing_env.push("IFLYTEK_LLM_API_KEY".to_string());
+        }
+        if required_env_with_legacy("IFLYTEK_LLM_API_SECRET", "IFLYTEK_LLM_ACCESS_KEY_SECRET")
+            .is_err()
+        {
+            missing_env.push("IFLYTEK_LLM_API_SECRET".to_string());
+        }
+        missing_env
     }
 
     fn signed_websocket_url(&self, request_id: &str) -> Result<String, String> {
@@ -250,7 +257,7 @@ impl IflytekLlmConfig {
 
     fn signed_websocket_url_with_utc(&self, request_id: &str, utc: &str) -> Result<String, String> {
         let mut params = BTreeMap::new();
-        params.insert("accessKeyId", self.access_key_id.clone());
+        params.insert("accessKeyId", self.api_key.clone());
         params.insert("appId", self.app_id.clone());
         params.insert("audio_encode", IFLYTEK_LLM_AUDIO_ENCODE.to_string());
         if let Some(feature_ids) = self
@@ -267,7 +274,7 @@ impl IflytekLlmConfig {
         params.insert("uuid", request_id.to_string());
 
         let base_string = encode_query_params(&params);
-        let signature = sign_hmac_sha1_base64(&self.access_key_secret, &base_string)?;
+        let signature = sign_hmac_sha1_base64(&self.api_secret, &base_string)?;
         let query = params
             .iter()
             .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
@@ -956,6 +963,10 @@ fn required_env(key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("缺少本地环境变量 {key}，请先配置讯飞大模型 ASR 凭证。"))
 }
 
+fn required_env_with_legacy(key: &str, legacy_key: &str) -> Result<String, String> {
+    required_env(key).or_else(|_| required_env(legacy_key))
+}
+
 fn count_feature_ids(value: &str) -> usize {
     value
         .split(',')
@@ -1005,8 +1016,8 @@ mod tests {
     fn signs_iflytek_websocket_url_without_exposing_secret() {
         let config = IflytekLlmConfig {
             app_id: "test-app".to_string(),
-            access_key_id: "test-access-key-id".to_string(),
-            access_key_secret: "test-access-key-secret".to_string(),
+            api_key: "test-api-key".to_string(),
+            api_secret: "test-api-secret".to_string(),
             endpoint: DEFAULT_IFLYTEK_LLM_ENDPOINT.to_string(),
             lang: "autodialect".to_string(),
             role_type: "2".to_string(),
@@ -1019,7 +1030,7 @@ mod tests {
 
         assert!(url.starts_with(DEFAULT_IFLYTEK_LLM_ENDPOINT));
         assert!(url.contains("appId=test-app"));
-        assert!(url.contains("accessKeyId=test-access-key-id"));
+        assert!(url.contains("accessKeyId=test-api-key"));
         assert!(url.contains("audio_encode=pcm_s16le"));
         assert!(url.contains("feature_ids=feature-a%2Cfeature-b"));
         assert!(url.contains("lang=autodialect"));
@@ -1028,15 +1039,15 @@ mod tests {
         assert!(url.contains("utc=2026-06-02T12%3A34%3A56%2B0000"));
         assert!(url.contains("uuid=voice-test"));
         assert!(url.contains("signature="));
-        assert!(!url.contains("test-access-key-secret"));
+        assert!(!url.contains("test-api-secret"));
     }
 
     #[test]
     fn redacts_iflytek_diagnostic_url() {
         let config = IflytekLlmConfig {
             app_id: "test-app".to_string(),
-            access_key_id: "test-access-key-id".to_string(),
-            access_key_secret: "test-access-key-secret".to_string(),
+            api_key: "test-api-key".to_string(),
+            api_secret: "test-api-secret".to_string(),
             endpoint: DEFAULT_IFLYTEK_LLM_ENDPOINT.to_string(),
             lang: "autodialect".to_string(),
             role_type: "2".to_string(),
@@ -1049,8 +1060,8 @@ mod tests {
 
         assert!(preview.contains("accessKeyId=<redacted>"));
         assert!(preview.contains("signature=<redacted>"));
-        assert!(!preview.contains("test-access-key-id"));
-        assert!(!preview.contains("test-access-key-secret"));
+        assert!(!preview.contains("test-api-key"));
+        assert!(!preview.contains("test-api-secret"));
     }
 
     #[test]

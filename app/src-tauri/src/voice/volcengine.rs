@@ -47,8 +47,8 @@ const COMPRESSION_NONE: u8 = 0x0;
 pub(crate) struct VolcengineAsrProvider;
 
 pub(crate) struct VolcengineAsrConfig {
-    app_key: String,
-    access_key: String,
+    app_id: String,
+    access_token: String,
     endpoint: String,
     resource_id: String,
     language: String,
@@ -121,7 +121,7 @@ impl AsrProvider for VolcengineAsrProvider {
         match VolcengineAsrConfig::from_env() {
             Ok(config) => {
                 let mut details = BTreeMap::new();
-                details.insert("appKey".to_string(), config.app_key.clone());
+                details.insert("appId".to_string(), config.app_id.clone());
                 details.insert("resourceId".to_string(), config.resource_id.clone());
                 details.insert("language".to_string(), config.language.clone());
                 details.insert(
@@ -184,8 +184,11 @@ impl AsrProvider for VolcengineAsrProvider {
 impl VolcengineAsrConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
         Ok(Self {
-            app_key: required_env("VOLCENGINE_ASR_APP_KEY")?,
-            access_key: required_env("VOLCENGINE_ASR_ACCESS_KEY")?,
+            app_id: required_env_with_legacy("VOLCENGINE_ASR_APP_ID", "VOLCENGINE_ASR_APP_KEY")?,
+            access_token: required_env_with_legacy(
+                "VOLCENGINE_ASR_ACCESS_TOKEN",
+                "VOLCENGINE_ASR_ACCESS_KEY",
+            )?,
             endpoint: read_local_env("VOLCENGINE_ASR_ENDPOINT")
                 .unwrap_or_else(|| DEFAULT_VOLCENGINE_ASR_ENDPOINT.to_string()),
             resource_id: read_local_env("VOLCENGINE_ASR_RESOURCE_ID")
@@ -207,11 +210,16 @@ impl VolcengineAsrConfig {
     }
 
     pub(crate) fn missing_required_env() -> Vec<String> {
-        ["VOLCENGINE_ASR_APP_KEY", "VOLCENGINE_ASR_ACCESS_KEY"]
-            .iter()
-            .filter(|key| required_env(key).is_err())
-            .map(|key| (*key).to_string())
-            .collect()
+        let mut missing_env = Vec::new();
+        if required_env_with_legacy("VOLCENGINE_ASR_APP_ID", "VOLCENGINE_ASR_APP_KEY").is_err() {
+            missing_env.push("VOLCENGINE_ASR_APP_ID".to_string());
+        }
+        if required_env_with_legacy("VOLCENGINE_ASR_ACCESS_TOKEN", "VOLCENGINE_ASR_ACCESS_KEY")
+            .is_err()
+        {
+            missing_env.push("VOLCENGINE_ASR_ACCESS_TOKEN".to_string());
+        }
+        missing_env
     }
 
     fn connect_request(&self, connect_id: &str) -> Result<Request, String> {
@@ -223,15 +231,15 @@ impl VolcengineAsrConfig {
         let headers = request.headers_mut();
         headers.insert(
             "X-Api-App-Key",
-            self.app_key
+            self.app_id
                 .parse()
-                .map_err(|_| "火山引擎 ASR App Key 不是合法 Header 值。".to_string())?,
+                .map_err(|_| "火山引擎 ASR APP ID 不是合法 Header 值。".to_string())?,
         );
         headers.insert(
             "X-Api-Access-Key",
-            self.access_key
+            self.access_token
                 .parse()
-                .map_err(|_| "火山引擎 ASR Access Key 不是合法 Header 值。".to_string())?,
+                .map_err(|_| "火山引擎 ASR Access Token 不是合法 Header 值。".to_string())?,
         );
         headers.insert(
             "X-Api-Resource-Id",
@@ -984,6 +992,10 @@ fn required_env(key: &str) -> Result<String, String> {
     read_local_env(key)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("缺少本地环境变量 {key}，请先配置火山引擎 ASR 凭证。"))
+}
+
+fn required_env_with_legacy(key: &str, legacy_key: &str) -> Result<String, String> {
+    required_env(key).or_else(|_| required_env(legacy_key))
 }
 
 fn optional_bool_env(key: &str, default_value: bool) -> bool {

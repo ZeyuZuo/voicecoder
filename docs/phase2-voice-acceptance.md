@@ -16,15 +16,15 @@ TENCENT_ASR_VOICE_FORMAT=1
 TENCENT_ASR_NEED_VAD=1
 
 IFLYTEK_LLM_APP_ID=
-IFLYTEK_LLM_ACCESS_KEY_ID=
-IFLYTEK_LLM_ACCESS_KEY_SECRET=
+IFLYTEK_LLM_API_KEY=
+IFLYTEK_LLM_API_SECRET=
 IFLYTEK_LLM_ENDPOINT=wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1
 IFLYTEK_LLM_LANG=autodialect
 IFLYTEK_LLM_ROLE_TYPE=2
 IFLYTEK_LLM_FEATURE_IDS=
 
-VOLCENGINE_ASR_APP_KEY=
-VOLCENGINE_ASR_ACCESS_KEY=
+VOLCENGINE_ASR_APP_ID=
+VOLCENGINE_ASR_ACCESS_TOKEN=
 VOLCENGINE_ASR_ENDPOINT=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
 VOLCENGINE_ASR_RESOURCE_ID=volc.bigasr.sauc.duration
 VOLCENGINE_ASR_LANGUAGE=zh-CN
@@ -35,6 +35,7 @@ VOLCENGINE_ASR_SSD_VERSION=200
 VOLCENGINE_ASR_END_WINDOW_SIZE=400
 
 VOICECODER_ASR_PROVIDER=auto
+SERVICE_CHOICES=auto,mock,tencent,iflytek_llm,volcengine
 ```
 
 `VOICECODER_ASR_PROVIDER` 可选值：
@@ -47,7 +48,9 @@ VOICECODER_ASR_PROVIDER=auto
 
 `IFLYTEK_LLM_FEATURE_IDS` 仅在已通过讯飞声纹注册拿到声纹 ID 时填写，多个声纹 ID 用英文逗号分隔。没有注册声纹时留空，配合 `IFLYTEK_LLM_ROLE_TYPE=2` 先测试实时角色盲分。
 
-`VOLCENGINE_ASR_APP_KEY` 对应火山控制台里的 API 名称，`VOLCENGINE_ASR_ACCESS_KEY` 对应 API Key。
+讯飞按控制台名称填写：`IFLYTEK_LLM_APP_ID` 对应 AppID，`IFLYTEK_LLM_API_KEY` 对应 APIKey，`IFLYTEK_LLM_API_SECRET` 对应 APISecret。
+
+火山按控制台/官方 Header 说明填写：`VOLCENGINE_ASR_APP_ID` 对应 APP ID，`VOLCENGINE_ASR_ACCESS_TOKEN` 对应 Access Token。
 
 `.env` 已被忽略，不要提交真实凭证。
 
@@ -166,8 +169,8 @@ VOICECODER_ASR_PROVIDER=tencent
 ```bash
 VOICECODER_ASR_PROVIDER=iflytek_llm
 IFLYTEK_LLM_APP_ID=<讯飞 AppID>
-IFLYTEK_LLM_ACCESS_KEY_ID=<讯飞 APIKey>
-IFLYTEK_LLM_ACCESS_KEY_SECRET=<讯飞 APISecret>
+IFLYTEK_LLM_API_KEY=<讯飞 APIKey>
+IFLYTEK_LLM_API_SECRET=<讯飞 APISecret>
 IFLYTEK_LLM_ENDPOINT=wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1
 IFLYTEK_LLM_LANG=autodialect
 IFLYTEK_LLM_ROLE_TYPE=2
@@ -217,8 +220,8 @@ IFLYTEK_LLM_FEATURE_IDS=feature_id_1,feature_id_2
 
 ```bash
 VOICECODER_ASR_PROVIDER=volcengine
-VOLCENGINE_ASR_APP_KEY=<火山控制台 API 名称>
-VOLCENGINE_ASR_ACCESS_KEY=<火山控制台 API Key>
+VOLCENGINE_ASR_APP_ID=<火山 APP ID>
+VOLCENGINE_ASR_ACCESS_TOKEN=<火山 Access Token>
 VOLCENGINE_ASR_ENDPOINT=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
 VOLCENGINE_ASR_RESOURCE_ID=volc.bigasr.sauc.duration
 VOLCENGINE_ASR_LANGUAGE=zh-CN
@@ -231,7 +234,7 @@ VOLCENGINE_ASR_END_WINDOW_SIZE=400
 
 验收步骤：
 
-1. 确认火山引擎 ASR 服务已开通，API 名称和 API Key 来自同一个服务页。
+1. 确认火山引擎 ASR 服务已开通，APP ID 和 Access Token 来自同一个服务页。
 2. 启动 Tauri 客户端。
 3. 点击麦克风按钮并授权。
 4. 观察语音面板显示 `volcengine`，并且 provider note 显示火山配置就绪。
@@ -262,13 +265,13 @@ VOLCENGINE_ASR_END_WINDOW_SIZE=400
 - 麦克风权限失败：检查系统麦克风权限，重新启动 Tauri 客户端后再试。
 - 腾讯云鉴权失败：检查 `TENCENTCLOUD_APP_ID`、`TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 是否来自同一个账号和服务。
 - WebSocket 连接失败：检查网络、腾讯云服务开通状态、账户余额和接口地域/域名。
-- 讯飞鉴权失败：检查 `IFLYTEK_LLM_APP_ID`、`IFLYTEK_LLM_ACCESS_KEY_ID`、`IFLYTEK_LLM_ACCESS_KEY_SECRET` 是否来自讯飞实时语音转写大模型服务页。
+- 讯飞鉴权失败：检查 `IFLYTEK_LLM_APP_ID`、`IFLYTEK_LLM_API_KEY`、`IFLYTEK_LLM_API_SECRET` 是否来自讯飞实时语音转写大模型服务页。
 - 讯飞返回 `35013`：检查 `utc` 时区格式，当前后端生成 `YYYY-MM-DDTHH:MM:SS+0000`。
 - 讯飞返回 `35014` / `100012`：检查本机系统时间是否准确。
 - 讯飞返回 `35030`：签名重复或过期，重启客户端后重试。
 - 讯飞返回 `37005`：服务端长时间未收到音频，确认麦克风权限和音频分片发送是否正常。
 - 讯飞返回 `100001`：音频发送过快，检查讯飞 provider 的前端分片和 adapter pacing 是否仍为 40ms / 1280 bytes。
-- 火山鉴权失败：检查 `VOLCENGINE_ASR_APP_KEY` 是否填 API 名称，`VOLCENGINE_ASR_ACCESS_KEY` 是否填 API Key。
+- 火山鉴权失败：检查 `VOLCENGINE_ASR_APP_ID` 是否填 APP ID，`VOLCENGINE_ASR_ACCESS_TOKEN` 是否填 Access Token。
 - 火山反应慢：优先确认 `VOLCENGINE_ASR_END_WINDOW_SIZE=400` 和 `VOLCENGINE_ASR_ENABLE_ACCELERATE_TEXT=true`；如果仍慢，再临时测试 `VOLCENGINE_ASR_ENABLE_NONSTREAM=false`，但这可能影响 speaker 聚类和最终文本稳定性。
 - 没有转写文本：确认使用 16kHz / 16bit / mono PCM 分片；腾讯/Mock/火山默认约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes，并在停止时发送尾包。
 - speaker 标签来回跳：这是腾讯实时 speaker diarization 的实测不稳定表现，不影响 Phase 2 的语音输入主链路。

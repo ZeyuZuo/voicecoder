@@ -20,8 +20,8 @@ iflytek_llm > tencent > mock
 
 ```env
 VOICECODER_ASR_PROVIDER=volcengine
-VOLCENGINE_ASR_APP_KEY=<火山控制台 API 名称>
-VOLCENGINE_ASR_ACCESS_KEY=<火山控制台 API Key>
+VOLCENGINE_ASR_APP_ID=<火山 APP ID>
+VOLCENGINE_ASR_ACCESS_TOKEN=<火山 Access Token>
 VOLCENGINE_ASR_ENDPOINT=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
 VOLCENGINE_ASR_RESOURCE_ID=volc.bigasr.sauc.duration
 VOLCENGINE_ASR_ENABLE_NONSTREAM=true
@@ -31,7 +31,7 @@ VOLCENGINE_ASR_SSD_VERSION=200
 VOLCENGINE_ASR_END_WINDOW_SIZE=400
 ```
 
-`APP_KEY` 对应控制台里的 API 名称；`ACCESS_KEY` 对应控制台里的 API Key。
+`VOLCENGINE_ASR_APP_ID` 对应火山官方 Header 说明中的 APP ID；`VOLCENGINE_ASR_ACCESS_TOKEN` 对应 Access Token。底层协议仍会把它们分别发送到 `X-Api-App-Key` 和 `X-Api-Access-Key`。
 
 ## 协议
 

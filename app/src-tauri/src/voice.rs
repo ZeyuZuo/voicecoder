@@ -591,7 +591,9 @@ mod tests {
         } else {
             assert!(matches!(
                 status.auto_provider,
-                VoiceProviderKind::Mock | VoiceProviderKind::Tencent
+                VoiceProviderKind::Mock
+                    | VoiceProviderKind::Tencent
+                    | VoiceProviderKind::IflytekLlm
             ));
         }
 
