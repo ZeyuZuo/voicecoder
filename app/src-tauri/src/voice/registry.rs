@@ -1,6 +1,10 @@
 use super::{
-    iflytek::IflytekLlmAsrProvider, mock::MockAsrProvider, read_local_env,
-    tencent::TencentAsrConfig, tencent::TencentAsrProvider, volcengine::VolcengineAsrProvider,
+    iflytek::{IflytekLlmAsrProvider, IflytekLlmConfig},
+    mock::MockAsrProvider,
+    read_local_env,
+    tencent::TencentAsrConfig,
+    tencent::TencentAsrProvider,
+    volcengine::VolcengineAsrProvider,
     AsrProvider, VoiceProviderDiagnostic, VoiceProviderKind,
 };
 
@@ -33,7 +37,9 @@ impl ProviderRegistry {
     pub(crate) fn resolve_provider(provider: VoiceProviderKind) -> VoiceProviderKind {
         match provider {
             VoiceProviderKind::Auto => Self::provider_override_from_env().unwrap_or_else(|| {
-                if TencentAsrConfig::is_available() {
+                if IflytekLlmConfig::missing_required_env().is_empty() {
+                    VoiceProviderKind::IflytekLlm
+                } else if TencentAsrConfig::is_available() {
                     VoiceProviderKind::Tencent
                 } else {
                     VoiceProviderKind::Mock
