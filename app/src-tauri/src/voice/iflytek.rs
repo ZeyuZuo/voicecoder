@@ -639,6 +639,7 @@ fn parse_iflytek_transcript_events(
     let segment_started_at_ms = value_to_u32(st.get("bg"));
     let segment_ended_at_ms = value_to_u32(st.get("ed"));
     let is_final = value_to_string(st.get("type")).as_deref() == Some("0");
+    log_iflytek_speaker_diagnostics(&data, st);
     let mut transcripts = Vec::new();
     let mut builder = IflytekTranscriptBuilder::new(
         segment_key,
@@ -716,6 +717,77 @@ fn parse_iflytek_transcript_events(
     }
 
     transcripts
+}
+
+fn log_iflytek_speaker_diagnostics(data: &Value, st: &Value) {
+    let rt_count = st
+        .get("rt")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    eprintln!(
+        "[voice][iflytek_llm] st seg_id={} type={} bg={} ed={} keys={:?} rt_count={}",
+        value_to_string(data.get("seg_id"))
+            .or_else(|| value_to_string(st.get("seg_id")))
+            .unwrap_or_else(|| "-".to_string()),
+        value_to_string(st.get("type")).unwrap_or_else(|| "-".to_string()),
+        value_to_string(st.get("bg")).unwrap_or_else(|| "-".to_string()),
+        value_to_string(st.get("ed")).unwrap_or_else(|| "-".to_string()),
+        value_object_keys(st),
+        rt_count
+    );
+
+    let Some(rt_items) = st.get("rt").and_then(Value::as_array) else {
+        return;
+    };
+
+    for (rt_index, rt_item) in rt_items.iter().take(4).enumerate() {
+        let Some(ws_items) = rt_item.get("ws").and_then(Value::as_array) else {
+            eprintln!(
+                "[voice][iflytek_llm] rt index={} keys={:?} ws_count=0",
+                rt_index,
+                value_object_keys(rt_item)
+            );
+            continue;
+        };
+        eprintln!(
+            "[voice][iflytek_llm] rt index={} keys={:?} ws_count={}",
+            rt_index,
+            value_object_keys(rt_item),
+            ws_items.len()
+        );
+
+        for (ws_index, ws_item) in ws_items.iter().take(8).enumerate() {
+            let Some(cw_items) = ws_item.get("cw").and_then(Value::as_array) else {
+                eprintln!(
+                    "[voice][iflytek_llm] ws index={}.{} keys={:?} cw_count=0",
+                    rt_index,
+                    ws_index,
+                    value_object_keys(ws_item)
+                );
+                continue;
+            };
+
+            for (cw_index, cw_item) in cw_items.iter().take(3).enumerate() {
+                let normalized = cw_item
+                    .get("rl")
+                    .and_then(normalized_iflytek_speaker_id)
+                    .unwrap_or_else(|| "<inherit-or-none>".to_string());
+                eprintln!(
+                    "[voice][iflytek_llm] cw index={}.{}.{} keys={:?} wp={} wb={} we={} rl={} normalized={}",
+                    rt_index,
+                    ws_index,
+                    cw_index,
+                    value_object_keys(cw_item),
+                    summarized_value(cw_item.get("wp")),
+                    summarized_value(cw_item.get("wb")),
+                    summarized_value(cw_item.get("we")),
+                    summarized_value(cw_item.get("rl")),
+                    normalized
+                );
+            }
+        }
+    }
 }
 
 impl IflytekTranscriptBuilder {
@@ -805,6 +877,36 @@ fn value_to_string(value: Option<&Value>) -> Option<String> {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
         _ => None,
+    }
+}
+
+fn value_object_keys(value: &Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    object.keys().cloned().collect()
+}
+
+fn summarized_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => {
+            let text = text.replace('\n', "\\n");
+            if text.chars().count() > 80 {
+                let preview = text.chars().take(80).collect::<String>();
+                format!("string({}):{}...", text.chars().count(), preview)
+            } else {
+                format!("string({}):{}", text.chars().count(), text)
+            }
+        }
+        Some(Value::Number(number)) => format!("number:{number}"),
+        Some(Value::Bool(value)) => format!("bool:{value}"),
+        Some(Value::Array(values)) => format!("array(len={})", values.len()),
+        Some(Value::Object(object)) => {
+            let keys = object.keys().cloned().collect::<Vec<_>>();
+            format!("object(keys={keys:?})")
+        }
+        Some(Value::Null) => "null".to_string(),
+        None => "none".to_string(),
     }
 }
 
