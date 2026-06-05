@@ -54,7 +54,7 @@
 - 已建立前后端语音事件协议。
 - 中间输入框麦克风按钮已接入语音状态。
 - 前端会通过 Web Audio 请求麦克风权限，采集音频并转换为 16kHz / 16bit / mono PCM。
-- 前端按 provider 推荐值分片发送给 Tauri 后端：腾讯/Mock 使用约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes。
+- 前端按 provider 推荐值分片发送给 Tauri 后端：腾讯/Mock/火山使用约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes。
 - 当前采集关闭浏览器 echo cancellation、noise suppression 和 auto gain control，尽量保留原始音色，便于后续 provider 做 speaker diarization。
 - 停止录音时会 flush 不足当前 provider 分片大小的尾包，避免最后一小段音频丢失。
 - final 转写句子会自动追加进中间输入框，语音结果进入真实 prompt 输入链路。
@@ -81,8 +81,10 @@
   - 腾讯返回的 speaker index 会映射为从 1 开始的 UI 标签，例如 `0 -> speaker-1`。
   - 后端保留 speaker 诊断日志，用于观察腾讯真实返回的 speaker id 集合。
 - 自动 Provider 策略：
-  - 本地存在腾讯云凭证时使用腾讯云。
+  - 本地存在讯飞大模型凭证时使用讯飞。
+  - 未配置讯飞但存在腾讯云凭证时使用腾讯云。
   - 未配置凭证时自动回退 Mock。
+  - 火山引擎暂不进入 `auto`，需要显式设置 `VOICECODER_ASR_PROVIDER=volcengine`。
 
 实测结论：
 
@@ -98,8 +100,9 @@
 - 优先评估讯飞实时语音转写：
   - 标准版支持 `roleType=2` 实时角色分离。
   - 大模型版支持 `role_type=2`，并可通过 `feature_ids` 做声纹分离。
+- 火山引擎豆包语音大模型已作为实验 provider 接入，默认使用 `bigmodel_async`、`enable_nonstream`、`enable_speaker_info` 和 `ssd_version=200`，用于横向比较内容识别和 speaker label 稳定性。
 - 如果需要稳定区分固定人员，优先考虑“声纹注册 + 实时转写”，而不是纯盲分。
-- 阿里、火山、百度更适合作为“录音后处理 / 文件转写 + 说话人分离”的备选，不建议直接押注实时盲分。
+- 阿里、百度更适合作为“录音后处理 / 文件转写 + 说话人分离”的备选，不建议直接押注实时盲分。
 
 验收步骤见 `docs/phase2-voice-acceptance.md`。
 

@@ -12,11 +12,13 @@
 
 下一步需要评估讯飞实时语音转写，尤其是支持 `role_type=2` 和 `feature_ids` 的大模型版。为了避免每换一家云服务都改主语音链路，需要把当前 ASR 代码正式收敛成 provider adapter 架构。
 
+讯飞大模型初步接入后，真实测试发现内容识别质量和说话人稳定性仍需要横向比较。下一步补充评估火山引擎豆包语音大模型流式 ASR，重点看 `enable_nonstream` 二遍识别和 `enable_speaker_info` 说话人聚类是否能改善当前多人单麦场景。
+
 ## 目标
 
 - 前端和 Tauri command 只依赖统一的语音事件、音频分片和 provider 诊断模型。
 - 每家 ASR 的鉴权、WebSocket URL、发送节奏、结束包、返回 JSON 解析和 speaker 归一化都封装在自己的 adapter 里。
-- Mock、腾讯、讯飞可以通过 `VOICECODER_ASR_PROVIDER` 切换。
+- Mock、腾讯、讯飞、火山可以通过 `VOICECODER_ASR_PROVIDER` 切换。
 - `auto` 选择策略集中在 registry，不散落在 UI 或 provider 实现里。
 - 普通测试不依赖真实云服务。
 
@@ -87,6 +89,19 @@ VoiceProviderDiagnostic
 - 声纹分离：可通过 `feature_ids` 指定已注册声纹
 - 适合作为当前多人识别不稳定问题的优先评估目标
 
+## 火山引擎 API 记录
+
+官方文档：火山引擎豆包语音大模型流式 ASR / Seed ASR 相关文档。
+
+- WebSocket 地址：`wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`
+- 鉴权 Header：`X-Api-App-Key`、`X-Api-Access-Key`、`X-Api-Resource-Id`、`X-Api-Connect-Id`
+- 默认 Resource ID：`volc.bigasr.sauc.duration`
+- 音频：16kHz / 16bit / mono PCM
+- 前端默认 200ms / 6400 bytes 分片，不影响腾讯或讯飞分片策略
+- 默认开启：`enable_nonstream=true`、`enable_speaker_info=true`、`enable_accelerate_text=true`
+- 说话人聚类：`ssd_version=200`
+- 当前实测：`speaker_id` 会间歇返回，adapter 能解析已有字段，但云端不保证每条 utterance 都带 speaker 标签
+
 ## 开发 Todo
 
 - [x] Step 1：抽出通用 provider/session/diagnostic 边界，保持 Mock 和腾讯行为不变。
@@ -98,7 +113,13 @@ VoiceProviderDiagnostic
 - [x] Step 7：实现讯飞大模型 WebSocket 鉴权、40ms pacing、结束包和错误处理。
 - [x] Step 8：实现讯飞返回 JSON parser，把角色编号归一化为 `speaker-*`。
 - [x] Step 9：增加 `VOICECODER_ASR_PROVIDER=iflytek_llm` 验收文档。
-- [ ] Step 10：真实多人测试后决定 `auto` 默认优先级。
+- [x] Step 10：真实多人测试后决定 `auto` 默认优先级：讯飞大模型 > 腾讯 > Mock。火山暂不进入 `auto`，只作为显式实验 provider。
+- [x] Step 11：补充火山引擎 ASR 配置、环境变量和验收文档。
+- [x] Step 12：实现火山引擎 WebSocket V1 二进制协议、鉴权 Header、音频发送和结束帧。
+- [x] Step 13：实现火山引擎返回 parser，处理实时结果、二遍最终结果和 transcript event。
+- [x] Step 14：实现火山 speaker label 归一化，解析 `speaker`、`speaker_id`、嵌套 `speaker_info` 和字符串化 `additions`。
+- [x] Step 15：增加火山 speaker 诊断日志、`bigmodel_async` 默认 endpoint 和 final frame 修复。
+- [ ] Step 16：横向比较腾讯、讯飞、火山真实多人测试结果，再重新评估 `auto` 默认优先级。
 
 ## Step 1 验收
 

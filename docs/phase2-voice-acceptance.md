@@ -1,6 +1,6 @@
 # Phase 2 Voice Acceptance
 
-目标：验证语音输入 MVP 在 Tauri 客户端内可用，并能在 Mock 和腾讯云 ASR 两条链路下稳定开始、转写、停止和释放资源。
+目标：验证语音输入 MVP 在 Tauri 客户端内可用，并能在 Mock、腾讯云、讯飞大模型和火山引擎 ASR 链路下稳定开始、转写、停止和释放资源。
 
 ## 1. 准备本地配置
 
@@ -23,17 +23,31 @@ IFLYTEK_LLM_LANG=autodialect
 IFLYTEK_LLM_ROLE_TYPE=2
 IFLYTEK_LLM_FEATURE_IDS=
 
+VOLCENGINE_ASR_APP_KEY=
+VOLCENGINE_ASR_ACCESS_KEY=
+VOLCENGINE_ASR_ENDPOINT=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+VOLCENGINE_ASR_RESOURCE_ID=volc.bigasr.sauc.duration
+VOLCENGINE_ASR_LANGUAGE=zh-CN
+VOLCENGINE_ASR_ENABLE_NONSTREAM=true
+VOLCENGINE_ASR_ENABLE_SPEAKER_INFO=true
+VOLCENGINE_ASR_ENABLE_ACCELERATE_TEXT=true
+VOLCENGINE_ASR_SSD_VERSION=200
+VOLCENGINE_ASR_END_WINDOW_SIZE=400
+
 VOICECODER_ASR_PROVIDER=auto
 ```
 
 `VOICECODER_ASR_PROVIDER` 可选值：
 
-- `auto`：有腾讯云凭证时使用腾讯云，否则回退 Mock。
+- `auto`：优先使用讯飞大模型，其次腾讯云，最后回退 Mock。
 - `mock`：强制使用 Mock。
 - `tencent`：强制使用腾讯云。
 - `iflytek_llm`：强制使用讯飞实时语音转写大模型。
+- `volcengine`：强制使用火山引擎豆包语音大模型流式 ASR。
 
 `IFLYTEK_LLM_FEATURE_IDS` 仅在已通过讯飞声纹注册拿到声纹 ID 时填写，多个声纹 ID 用英文逗号分隔。没有注册声纹时留空，配合 `IFLYTEK_LLM_ROLE_TYPE=2` 先测试实时角色盲分。
+
+`VOLCENGINE_ASR_APP_KEY` 对应火山控制台里的 API 名称，`VOLCENGINE_ASR_ACCESS_KEY` 对应 API Key。
 
 `.env` 已被忽略，不要提交真实凭证。
 
@@ -197,7 +211,52 @@ IFLYTEK_LLM_FEATURE_IDS=feature_id_1,feature_id_2
 - 记录错误码、连接失败信息或后端 `[voice][iflytek_llm]` 日志。
 - 保留一段成功转写和一段失败样例，供 Step 10 决定 `auto` 默认优先级。
 
-## 7. 常见失败判断
+## 7. 火山引擎真实转写验收
+
+在 `app/.env` 设置：
+
+```bash
+VOICECODER_ASR_PROVIDER=volcengine
+VOLCENGINE_ASR_APP_KEY=<火山控制台 API 名称>
+VOLCENGINE_ASR_ACCESS_KEY=<火山控制台 API Key>
+VOLCENGINE_ASR_ENDPOINT=wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+VOLCENGINE_ASR_RESOURCE_ID=volc.bigasr.sauc.duration
+VOLCENGINE_ASR_LANGUAGE=zh-CN
+VOLCENGINE_ASR_ENABLE_NONSTREAM=true
+VOLCENGINE_ASR_ENABLE_SPEAKER_INFO=true
+VOLCENGINE_ASR_ENABLE_ACCELERATE_TEXT=true
+VOLCENGINE_ASR_SSD_VERSION=200
+VOLCENGINE_ASR_END_WINDOW_SIZE=400
+```
+
+验收步骤：
+
+1. 确认火山引擎 ASR 服务已开通，API 名称和 API Key 来自同一个服务页。
+2. 启动 Tauri 客户端。
+3. 点击麦克风按钮并授权。
+4. 观察语音面板显示 `volcengine`，并且 provider note 显示火山配置就绪。
+5. 说一段中文或中英混合需求。
+6. 多人测试时，让两个人轮流说短句，观察 `speaker-*` 是否稳定切换。
+7. 点击停止，等待最终转写结果进入输入框。
+
+通过标准：
+
+- 能连接火山 WebSocket，不出现鉴权或连接错误。
+- 音频按火山 provider 默认 200ms / 6400 bytes 分片发送，不影响腾讯或讯飞分片策略。
+- 停止时发送火山 V1 负 sequence 结束帧，并等待最终帧或超时收尾。
+- 能看到实时转写文本。
+- final 句子进入转写列表，并自动追加到中间输入框。
+- 火山 speaker 标签会映射为 `speaker-*`，例如 `speaker=0 -> speaker-1`、`speaker=1 -> speaker-2`。
+- `speaker_id` 只作为实验性诊断能力；实测可能不是每条 utterance 都返回。
+
+测试记录建议：
+
+- 记录 `VOLCENGINE_ASR_ENABLE_NONSTREAM` 开关对延迟和最终文本的影响。
+- 记录内容识别是否比腾讯/讯飞稳定。
+- 记录 speaker 是否稳定、是否混人、是否把同一人拆成多个 speaker。
+- 记录后端 `[voice][volcengine]` 诊断日志，尤其是 `speaker_candidate` 和 `normalized` 字段。
+
+## 8. 常见失败判断
 
 - 语音面板显示 `mock`：当前没有完整腾讯云凭证，或设置了 `VOICECODER_ASR_PROVIDER=mock`。
 - 麦克风权限失败：检查系统麦克风权限，重新启动 Tauri 客户端后再试。
@@ -209,12 +268,15 @@ IFLYTEK_LLM_FEATURE_IDS=feature_id_1,feature_id_2
 - 讯飞返回 `35030`：签名重复或过期，重启客户端后重试。
 - 讯飞返回 `37005`：服务端长时间未收到音频，确认麦克风权限和音频分片发送是否正常。
 - 讯飞返回 `100001`：音频发送过快，检查讯飞 provider 的前端分片和 adapter pacing 是否仍为 40ms / 1280 bytes。
-- 没有转写文本：确认使用 16kHz / 16bit / mono PCM 分片；腾讯/Mock 默认约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes，并在停止时发送尾包。
+- 火山鉴权失败：检查 `VOLCENGINE_ASR_APP_KEY` 是否填 API 名称，`VOLCENGINE_ASR_ACCESS_KEY` 是否填 API Key。
+- 火山反应慢：优先确认 `VOLCENGINE_ASR_END_WINDOW_SIZE=400` 和 `VOLCENGINE_ASR_ENABLE_ACCELERATE_TEXT=true`；如果仍慢，再临时测试 `VOLCENGINE_ASR_ENABLE_NONSTREAM=false`，但这可能影响 speaker 聚类和最终文本稳定性。
+- 没有转写文本：确认使用 16kHz / 16bit / mono PCM 分片；腾讯/Mock/火山默认约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes，并在停止时发送尾包。
 - speaker 标签来回跳：这是腾讯实时 speaker diarization 的实测不稳定表现，不影响 Phase 2 的语音输入主链路。
 - 讯飞 `speaker-*` 标签来回跳：先区分盲分和声纹分离模式；盲分不稳定时，再测试配置 `IFLYTEK_LLM_FEATURE_IDS` 的声纹分离。
+- 火山 `speaker-*` 标签来回跳：先确认 `VOLCENGINE_ASR_ENABLE_SPEAKER_INFO=true` 和 `VOLCENGINE_ASR_SSD_VERSION=200`，再记录失败样例供 Step 16 横向比较。
 - 客户端出现 `CryptoProvider` panic：检查 Rust TLS 依赖特性，当前项目显式使用 rustls `ring` provider。
 
-## 8. 当前 Phase 2 边界
+## 9. 当前 Phase 2 边界
 
 Phase 2 只负责语音输入、实时转写和转写展示。
 
