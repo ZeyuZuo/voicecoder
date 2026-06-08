@@ -13,6 +13,7 @@ import { useGitBranch } from "../hooks/useGitBranch";
 import { useVoiceSession } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
 import { shortPath } from "../utils/project";
+import { useVoiceRequirementSession } from "../utils/requirementState";
 
 export function Composer() {
   const {
@@ -30,6 +31,7 @@ export function Composer() {
   const visibleProjects = useMemo(() => projects.slice(0, 6), [projects]);
   const gitBranch = useGitBranch(currentProject);
   const voice = useVoiceSession();
+  useVoiceRequirementSession(voice);
 
   const submitDisabled = prompt.trim().length === 0;
   const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
