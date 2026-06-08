@@ -39,7 +39,8 @@ VOLCENGINE_ASR_END_WINDOW_SIZE=400
 - 消息协议：火山 V1 二进制帧。
 - 初始帧：JSON full request。
 - 音频帧：PCM binary payload。
-- 结束帧：audio-only request，使用负 sequence 和 last-sequence flag。
+- 结束帧：audio-only request，使用负 sequence，并同时设置 sequence flag 和 last-sequence flag。
+- 服务端 error frame：按 `Header + Error code + Error message size + Error message` 解析，不能按普通 response payload size 处理。
 
 ## Speaker 解析
 

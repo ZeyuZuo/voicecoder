@@ -1,5 +1,9 @@
 # Phase 2 Voice Acceptance
 
+状态：已完成
+
+完成日期：2026-06-08
+
 目标：验证语音输入 MVP 在 Tauri 客户端内可用，并能在 Mock、腾讯云、讯飞大模型和火山引擎 ASR 链路下稳定开始、转写、停止和释放资源。
 
 ## 1. 准备本地配置
@@ -261,7 +265,7 @@ VOLCENGINE_ASR_END_WINDOW_SIZE=400
 
 ## 8. 常见失败判断
 
-- 语音面板显示 `mock`：当前没有完整腾讯云凭证，或设置了 `VOICECODER_ASR_PROVIDER=mock`。
+- 语音面板显示 `mock`：当前没有完整讯飞、腾讯或火山凭证，或设置了 `VOICECODER_ASR_PROVIDER=mock`。
 - 麦克风权限失败：检查系统麦克风权限，重新启动 Tauri 客户端后再试。
 - 腾讯云鉴权失败：检查 `TENCENTCLOUD_APP_ID`、`TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 是否来自同一个账号和服务。
 - WebSocket 连接失败：检查网络、腾讯云服务开通状态、账户余额和接口地域/域名。
@@ -276,14 +280,14 @@ VOLCENGINE_ASR_END_WINDOW_SIZE=400
 - 没有转写文本：确认使用 16kHz / 16bit / mono PCM 分片；腾讯/Mock/火山默认约 200ms / 6400 bytes，讯飞大模型使用 40ms / 1280 bytes，并在停止时发送尾包。
 - speaker 标签来回跳：这是腾讯实时 speaker diarization 的实测不稳定表现，不影响 Phase 2 的语音输入主链路。
 - 讯飞 `speaker-*` 标签来回跳：先区分盲分和声纹分离模式；盲分不稳定时，再测试配置 `IFLYTEK_LLM_FEATURE_IDS` 的声纹分离。
-- 火山 `speaker-*` 标签来回跳：先确认 `VOLCENGINE_ASR_ENABLE_SPEAKER_INFO=true` 和 `VOLCENGINE_ASR_SSD_VERSION=200`，再记录失败样例供 Step 16 横向比较。
+- 火山 `speaker-*` 标签来回跳：先确认 `VOLCENGINE_ASR_ENABLE_SPEAKER_INFO=true` 和 `VOLCENGINE_ASR_SSD_VERSION=200`，再记录失败样例供后续真实多人场景分析。
 - 客户端出现 `CryptoProvider` panic：检查 Rust TLS 依赖特性，当前项目显式使用 rustls `ring` provider。
 
 ## 9. 当前 Phase 2 边界
 
-Phase 2 只负责语音输入、实时转写和转写展示。
+Phase 2 已完成，只负责语音输入、实时转写和转写展示。
 
-不进入 Phase 2：
+以下能力进入 Phase 3 及后续阶段：
 
 - 把语音整理成结构化需求。
 - AI 主动追问。

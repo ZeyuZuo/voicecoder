@@ -5,7 +5,7 @@
 当前产品方向已经收敛：
 
 - 前端 App Shell 已经具备可继续开发的基础形态，暂时不再投入大量 UI 打磨。
-- 下一阶段优先实现语音输入链路，让“说需求”成为产品的核心差异点。
+- Phase 2 语音输入链路和 ASR Provider Adapter 已完成，下一阶段进入“语音转需求状态机”。
 - 前端后续只围绕真实功能补必要控件和状态，不再先做空入口。
 - 所有本地能力优先通过 Tauri 后端封装，保持跨平台桌面软件结构。
 
@@ -45,7 +45,9 @@
 
 判断：前端壳子已经够用了。接下来应该让产品获得真实能力，而不是继续装修空面板。
 
-## 当前状态：Phase 2 语音输入 MVP 已跑通
+## 当前状态：Phase 2 语音输入 MVP 已完成
+
+完成日期：2026-06-08
 
 目标：先把麦克风输入、实时转写、录音状态和转写结果跑通，为后续需求整理和多人讨论打基础。
 
@@ -80,6 +82,18 @@
   - `speaker_id=-1` 作为未稳定识别处理，不展示为用户 speaker。
   - 腾讯返回的 speaker index 会映射为从 1 开始的 UI 标签，例如 `0 -> speaker-1`。
   - 后端保留 speaker 诊断日志，用于观察腾讯真实返回的 speaker id 集合。
+- 讯飞大模型 ASR Provider 已接入：
+  - WebSocket 鉴权、签名 URL、40ms / 1280 bytes pacing 和结束包。
+  - 实时转写大模型返回解析。
+  - `rl` 角色编号归一化为 `speaker-*`。
+  - `rl=0` 沿用上一位 speaker。
+  - 同一结果内 speaker 切换时拆成多条统一 transcript event。
+- 火山引擎 ASR Provider 已接入：
+  - WebSocket V1 二进制协议、鉴权 Header、初始化帧、音频帧和结束帧。
+  - `bigmodel_async` 默认 endpoint。
+  - 实时结果、二遍最终结果和 transcript event 解析。
+  - `speaker`、`speaker_id`、嵌套 `speaker_info` 和字符串化 `additions` 的 speaker label 归一化。
+  - server error frame 按官方协议解析错误码和错误消息。
 - 自动 Provider 策略：
   - 本地存在讯飞大模型凭证时使用讯飞。
   - 未配置讯飞但存在腾讯云凭证时使用腾讯云。
@@ -93,16 +107,8 @@
   - 云端会返回大量 `speaker_id=-1`。
   - 同一个人可能在 `speaker_id=0` 和 `speaker_id=1` 之间摇摆。
   - 因此 speaker 标签不能作为产品强可信能力。
+- 讯飞大模型和火山引擎已作为可切换 provider 接入，用于后续真实多人场景继续横向观察内容识别和 speaker label 稳定性。
 - Phase 2 保留 speaker 解析和诊断日志，但默认产品能力应聚焦“可靠语音输入”，不要依赖腾讯实时 speaker 结果做关键逻辑。
-
-下一步 provider 方向：
-
-- 优先评估讯飞实时语音转写：
-  - 标准版支持 `roleType=2` 实时角色分离。
-  - 大模型版支持 `role_type=2`，并可通过 `feature_ids` 做声纹分离。
-- 火山引擎豆包语音大模型已作为实验 provider 接入，默认使用 `bigmodel_async`、`enable_nonstream`、`enable_speaker_info` 和 `ssd_version=200`，用于横向比较内容识别和 speaker label 稳定性。
-- 如果需要稳定区分固定人员，优先考虑“声纹注册 + 实时转写”，而不是纯盲分。
-- 阿里、百度更适合作为“录音后处理 / 文件转写 + 说话人分离”的备选，不建议直接押注实时盲分。
 
 验收步骤见 `docs/phase2-voice-acceptance.md`。
 
@@ -148,7 +154,7 @@
 - 点击语音按钮后可以开始录音。
 - 停止后麦克风释放，并等待 ASR final 结果后关闭 WebSocket。
 - Mock Provider 可以稳定模拟一段转写流程。
-- 腾讯云 Provider 可以在真实麦克风下得到实时文本。
+- 腾讯云、讯飞大模型和火山引擎 Provider 可以在真实麦克风下得到实时文本。
 - final 转写可以进入输入框，成为后续发送或需求整理的文本来源。
 - 前端不接触 SecretKey。
 - 出现麦克风权限失败、鉴权失败、网络断开时有明确 UI 反馈。
@@ -272,13 +278,11 @@
 
 建议下一步按这个顺序推进：
 
-1. 语音按钮状态和 Mock ASR Provider。
-2. Tauri 后端语音模块骨架。
-3. 腾讯云 ASR WebSocket 签名和连接实验。
-4. 麦克风音频采集、重采样和分片发送。
-5. 实时转写结果进入对话流。
-6. 语音转需求总结。
-7. 确认需求后接 Coding Agent MVP。
+1. 建立需求状态模型：原始输入、当前理解、待澄清问题、已确认约束、验收标准。
+2. 把文本输入和语音 final transcript 统一进入需求流。
+3. 增加需求总结和澄清问题生成入口。
+4. 支持用户编辑、确认整理后的 Coding Prompt。
+5. 确认需求后进入 Coding Agent MVP。
 
 ## 风险
 

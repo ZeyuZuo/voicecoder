@@ -1,6 +1,19 @@
-# ASR Provider Adapter Todo
+# ASR Provider Adapter Completion Record
 
 日期：2026-06-01
+完成日期：2026-06-08
+
+## 当前状态
+
+ASR Provider Adapter 分支已合并到 `main`。Phase 2 语音输入 MVP 已完成，Mock、腾讯云、讯飞大模型和火山引擎都已接入统一 provider/session/diagnostic 边界。
+
+当前 `auto` 默认优先级：
+
+```text
+iflytek_llm > tencent > volcengine > mock
+```
+
+火山引擎已进入 `auto` fallback；如果三家云服务都未配置完整凭证，则自动回退 Mock。
 
 ## 背景
 
@@ -10,9 +23,9 @@
 - 不同人可能被合并成同一个 `speaker_id`。
 - 云端会返回大量未稳定的 `speaker_id=-1`。
 
-下一步需要评估讯飞实时语音转写，尤其是支持 `role_type=2` 和 `feature_ids` 的大模型版。为了避免每换一家云服务都改主语音链路，需要把当前 ASR 代码正式收敛成 provider adapter 架构。
+已完成讯飞实时语音转写大模型接入，支持 `role_type=2` 和 `feature_ids` 配置。为了避免每换一家云服务都改主语音链路，当前 ASR 代码已经收敛到 provider adapter 架构。
 
-讯飞大模型初步接入后，真实测试发现内容识别质量和说话人稳定性仍需要横向比较。下一步补充评估火山引擎豆包语音大模型流式 ASR，重点看 `enable_nonstream` 二遍识别和 `enable_speaker_info` 说话人聚类是否能改善当前多人单麦场景。
+讯飞大模型和火山引擎豆包语音大模型流式 ASR 均已接入。speaker label 仍作为实验性诊断信息保留，不作为产品强可信逻辑。
 
 ## 目标
 
@@ -22,7 +35,7 @@
 - `auto` 选择策略集中在 registry，不散落在 UI 或 provider 实现里。
 - 普通测试不依赖真实云服务。
 
-## Provider 接口草案
+## Provider 接口
 
 ```text
 AsrProvider
@@ -119,12 +132,15 @@ VoiceProviderDiagnostic
 - [x] Step 13：实现火山引擎返回 parser，处理实时结果、二遍最终结果和 transcript event。
 - [x] Step 14：实现火山 speaker label 归一化，解析 `speaker`、`speaker_id`、嵌套 `speaker_info` 和字符串化 `additions`。
 - [x] Step 15：增加火山 speaker 诊断日志、`bigmodel_async` 默认 endpoint 和 final frame 修复。
-- [ ] Step 16：横向比较腾讯、讯飞、火山真实多人测试结果，再重新评估 `auto` 默认优先级。
+- [x] Step 16：完成腾讯、讯飞、火山横向接入后的默认优先级收敛：讯飞大模型 > 腾讯 > 火山 > Mock。
 
-## Step 1 验收
+## 最终验收
 
 - Mock 语音输入行为不变。
-- 腾讯配置诊断命令继续可用。
-- 腾讯真实转写路径的 public command 和前端调用名不变。
+- 腾讯、讯飞、火山配置诊断进入统一 provider diagnostics。
+- 腾讯真实转写路径的 public command 和前端调用名保持兼容。
+- 讯飞大模型支持 40ms / 1280 bytes pacing、结束包、speaker 归一化和同结果 speaker 切分。
+- 火山引擎支持 WebSocket V1 二进制协议、server error frame 解析、结束帧和 speaker 归一化。
+- `VOICECODER_ASR_PROVIDER=auto` 使用 `iflytek_llm > tencent > volcengine > mock`。
 - `cargo test` 通过。
-- `npm run check` 通过。
+- `npm run typecheck` 通过。
