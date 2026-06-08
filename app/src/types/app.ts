@@ -90,6 +90,58 @@ export type VoiceSessionSnapshot = {
   receivedAudioChunks: number;
 };
 
+export type RequirementStatus =
+  | "idle"
+  | "collecting"
+  | "summarizing"
+  | "need_clarification"
+  | "awaiting_confirm"
+  | "confirmed"
+  | "ready_to_code";
+
+export type RequirementUtteranceSource = "voice" | "clarification_answer";
+
+export type RequirementUtterance = {
+  id: string;
+  source: RequirementUtteranceSource;
+  speakerId?: string;
+  text: string;
+  createdAt: string;
+  transcriptId?: string;
+};
+
+export type RequirementQuestion = {
+  id: string;
+  question: string;
+  reason: string;
+  blocksCoding: boolean;
+  answer?: string;
+};
+
+export type RequirementState = {
+  id: string;
+  status: RequirementStatus;
+  utterances: RequirementUtterance[];
+  summary: string;
+  confirmedFacts: string[];
+  constraints: string[];
+  openQuestions: RequirementQuestion[];
+  answeredQuestions: RequirementQuestion[];
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+  codingPrompt?: string;
+  updatedAt: string;
+};
+
+export type VoiceRequirementSession = {
+  id: string;
+  voiceSessionIds: string[];
+  requirementState: RequirementState;
+  startedAt: string;
+  endedAt?: string;
+};
+
 export type FileTreeEntry = {
   name: string;
   path: string;
