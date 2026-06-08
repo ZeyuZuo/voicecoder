@@ -1,0 +1,97 @@
+use super::{
+    iflytek::{IflytekLlmAsrProvider, IflytekLlmConfig},
+    mock::MockAsrProvider,
+    read_local_env,
+    tencent::TencentAsrConfig,
+    tencent::TencentAsrProvider,
+    volcengine::VolcengineAsrConfig,
+    volcengine::VolcengineAsrProvider,
+    AsrProvider, VoiceProviderDiagnostic, VoiceProviderKind,
+};
+
+pub(crate) struct ProviderRegistry;
+
+impl ProviderRegistry {
+    pub(crate) fn provider_for_kind(
+        provider: VoiceProviderKind,
+    ) -> Result<Box<dyn AsrProvider + Send>, String> {
+        match provider {
+            VoiceProviderKind::Auto => {
+                Err("auto provider must be resolved before session start".to_string())
+            }
+            VoiceProviderKind::Mock => Ok(Box::new(MockAsrProvider)),
+            VoiceProviderKind::Tencent => Ok(Box::new(TencentAsrProvider)),
+            VoiceProviderKind::IflytekLlm => Ok(Box::new(IflytekLlmAsrProvider)),
+            VoiceProviderKind::Volcengine => Ok(Box::new(VolcengineAsrProvider)),
+        }
+    }
+
+    pub(crate) fn diagnostics() -> Vec<VoiceProviderDiagnostic> {
+        vec![
+            MockAsrProvider.diagnostic(),
+            TencentAsrProvider.diagnostic(),
+            IflytekLlmAsrProvider.diagnostic(),
+            VolcengineAsrProvider.diagnostic(),
+        ]
+    }
+
+    pub(crate) fn resolve_provider(provider: VoiceProviderKind) -> VoiceProviderKind {
+        match provider {
+            VoiceProviderKind::Auto => Self::provider_override_from_env().unwrap_or_else(|| {
+                if IflytekLlmConfig::missing_required_env().is_empty() {
+                    VoiceProviderKind::IflytekLlm
+                } else if TencentAsrConfig::is_available() {
+                    VoiceProviderKind::Tencent
+                } else if VolcengineAsrConfig::missing_required_env().is_empty() {
+                    VoiceProviderKind::Volcengine
+                } else {
+                    VoiceProviderKind::Mock
+                }
+            }),
+            explicit_provider => explicit_provider,
+        }
+    }
+
+    pub(crate) fn provider_override_from_env() -> Option<VoiceProviderKind> {
+        read_local_env("VOICECODER_ASR_PROVIDER")
+            .and_then(|value| Self::parse_provider_override(&value))
+    }
+
+    fn parse_provider_override(value: &str) -> Option<VoiceProviderKind> {
+        match value.trim().to_lowercase().as_str() {
+            "mock" => Some(VoiceProviderKind::Mock),
+            "tencent" => Some(VoiceProviderKind::Tencent),
+            "iflytek_llm" => Some(VoiceProviderKind::IflytekLlm),
+            "volcengine" => Some(VoiceProviderKind::Volcengine),
+            "auto" => None,
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_override_parser_accepts_known_values() {
+        assert_eq!(
+            ProviderRegistry::parse_provider_override("mock"),
+            Some(VoiceProviderKind::Mock)
+        );
+        assert_eq!(
+            ProviderRegistry::parse_provider_override(" Tencent "),
+            Some(VoiceProviderKind::Tencent)
+        );
+        assert_eq!(
+            ProviderRegistry::parse_provider_override("iflytek_llm"),
+            Some(VoiceProviderKind::IflytekLlm)
+        );
+        assert_eq!(
+            ProviderRegistry::parse_provider_override("volcengine"),
+            Some(VoiceProviderKind::Volcengine)
+        );
+        assert_eq!(ProviderRegistry::parse_provider_override("auto"), None);
+        assert_eq!(ProviderRegistry::parse_provider_override("unknown"), None);
+    }
+}

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { VoiceAudioChunkPayload } from "../types/app";
 
 const TARGET_SAMPLE_RATE = 16000;
-const CHUNK_SIZE_BYTES = 6400;
+const DEFAULT_CHUNK_SIZE_BYTES = 6400;
 
 export type VoiceCaptureController = {
   stop: () => void;
@@ -10,6 +10,7 @@ export type VoiceCaptureController = {
 
 type CreateVoiceCaptureOptions = {
   sessionId: string;
+  chunkSizeBytes?: number;
   onError: (message: string) => void;
 };
 
@@ -28,7 +29,7 @@ export async function requestVoiceInputStream(): Promise<MediaStream> {
   });
 }
 
-export async function createVoiceCapture(stream: MediaStream, { sessionId, onError }: CreateVoiceCaptureOptions): Promise<VoiceCaptureController> {
+export async function createVoiceCapture(stream: MediaStream, { sessionId, chunkSizeBytes = DEFAULT_CHUNK_SIZE_BYTES, onError }: CreateVoiceCaptureOptions): Promise<VoiceCaptureController> {
   const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
   if (!AudioContextClass) {
     stopMediaStream(stream);
@@ -89,8 +90,8 @@ export async function createVoiceCapture(stream: MediaStream, { sessionId, onErr
       pcmBuffer.push(byte);
     }
 
-    while (pcmBuffer.length >= CHUNK_SIZE_BYTES) {
-      const data = pcmBuffer.splice(0, CHUNK_SIZE_BYTES);
+    while (pcmBuffer.length >= chunkSizeBytes) {
+      const data = pcmBuffer.splice(0, chunkSizeBytes);
       sendAudioChunk(data);
     }
   };

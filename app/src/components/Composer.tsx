@@ -35,7 +35,8 @@ export function Composer() {
   const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
   const voiceStatusLabel = getVoiceStatusLabel(voice.status);
   const voiceProvider = voice.sessionSnapshot?.provider ?? voice.providerStatus?.autoProvider ?? voice.provider;
-  const missingTencentEnv = voice.tencentConfigCheck?.missingEnv ?? voice.providerStatus?.missingTencentEnv ?? [];
+  const providerDiagnostic = voice.providerStatus?.diagnostics.find((diagnostic) => diagnostic.provider === voiceProvider);
+  const missingProviderEnv = providerDiagnostic?.missingEnv ?? [];
 
   useEffect(() => {
     const changedFinalSegments = voice.segments.filter((segment) => appendedVoiceSegments.current.get(segment.id) !== segment.text);
@@ -113,11 +114,14 @@ export function Composer() {
           </div>
           {voice.providerStatus ? (
             <p className="voice-provider-note">
-              {getVoiceProviderNote(voice.providerStatus.autoProvider, voice.providerStatus.providerOverride, voice.tencentConfigCheck?.ok)}
+              {getVoiceProviderNote(voice.providerStatus.autoProvider, voice.providerStatus.providerOverride, providerDiagnostic?.configured)}
             </p>
           ) : null}
-          {voiceProvider === "tencent" && missingTencentEnv.length ? (
-            <p className="voice-provider-note">缺少腾讯云配置：{missingTencentEnv.join("、")}</p>
+          {missingProviderEnv.length ? (
+            <p className="voice-provider-note">缺少{getProviderLabel(voiceProvider)}配置：{missingProviderEnv.join("、")}</p>
+          ) : null}
+          {providerDiagnostic?.error && !missingProviderEnv.length ? (
+            <p className="voice-provider-note">{providerDiagnostic.error}</p>
           ) : null}
           {voice.error ? <p className="voice-error">{voice.error}</p> : null}
           {voice.status === "error" && voice.sessionSnapshot?.active ? (
@@ -242,12 +246,28 @@ function getVoiceStatusLabel(status: ReturnType<typeof useVoiceSession>["status"
   return labels[status];
 }
 
-function getVoiceProviderNote(provider: string, override: string | undefined, tencentReady: boolean | undefined) {
+function getVoiceProviderNote(provider: string, override: string | undefined, configured: boolean | undefined) {
   const source = override ? `已指定 ${override}` : "自动选择";
 
-  if (provider === "tencent") {
-    return `${source} · 腾讯云${tencentReady ? "配置就绪" : "配置待检查"}`;
+  if (provider === "mock") {
+    return `${source} · Mock 转写`;
   }
 
-  return `${source} · Mock 转写`;
+  return `${source} · ${getProviderLabel(provider)}${configured ? "配置就绪" : "配置待检查"}`;
+}
+
+function getProviderLabel(provider: string) {
+  if (provider === "tencent") {
+    return "腾讯云";
+  }
+
+  if (provider === "iflytek_llm") {
+    return "讯飞大模型";
+  }
+
+  if (provider === "mock") {
+    return "Mock";
+  }
+
+  return provider;
 }

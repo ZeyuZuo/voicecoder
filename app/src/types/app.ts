@@ -37,7 +37,7 @@ export type VoiceTranscriptSegment = {
   createdAt: string;
 };
 
-export type VoiceProviderKind = "auto" | "mock" | "tencent";
+export type VoiceProviderKind = "auto" | "mock" | "tencent" | "iflytek_llm" | "volcengine";
 
 export type VoiceSessionStartedEvent = {
   sessionId: string;
@@ -71,20 +71,15 @@ export type VoiceAudioChunkPayload = {
 export type VoiceProviderStatus = {
   autoProvider: Exclude<VoiceProviderKind, "auto">;
   providerOverride?: VoiceProviderKind;
-  tencentConfigured: boolean;
-  missingTencentEnv: string[];
+  diagnostics: VoiceProviderDiagnostic[];
 };
 
-export type TencentAsrConfigCheck = {
-  ok: boolean;
+export type VoiceProviderDiagnostic = {
+  provider: Exclude<VoiceProviderKind, "auto">;
+  configured: boolean;
   missingEnv: string[];
-  host?: string;
-  appId?: string;
-  engineModelType?: string;
-  sentenceStrategy?: number;
-  voiceFormat?: number;
-  needVad?: number;
-  signedUrlPreview?: string;
+  endpoint?: string;
+  details: Record<string, string>;
   error?: string;
 };
 
