@@ -40,7 +40,7 @@ SERVICE_CHOICES=auto,mock,tencent,iflytek_llm,volcengine
 
 `VOICECODER_ASR_PROVIDER` 可选值：
 
-- `auto`：优先使用讯飞大模型，其次腾讯云，最后回退 Mock。
+- `auto`：优先使用讯飞大模型，其次腾讯云，再次火山引擎，最后回退 Mock。
 - `mock`：强制使用 Mock。
 - `tencent`：强制使用腾讯云。
 - `iflytek_llm`：强制使用讯飞实时语音转写大模型。

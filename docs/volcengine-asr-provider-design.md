@@ -4,10 +4,10 @@
 
 ## 目标
 
-火山引擎 provider 只作为显式实验 provider 接入，不进入当前 `auto` 默认链路。`auto` 继续保持：
+火山引擎 provider 已进入当前 `auto` 默认链路，优先级为：
 
 ```text
-iflytek_llm > tencent > mock
+iflytek_llm > tencent > volcengine > mock
 ```
 
 ## Provider 边界

@@ -113,7 +113,7 @@ VoiceProviderDiagnostic
 - [x] Step 7：实现讯飞大模型 WebSocket 鉴权、40ms pacing、结束包和错误处理。
 - [x] Step 8：实现讯飞返回 JSON parser，把角色编号归一化为 `speaker-*`。
 - [x] Step 9：增加 `VOICECODER_ASR_PROVIDER=iflytek_llm` 验收文档。
-- [x] Step 10：真实多人测试后决定 `auto` 默认优先级：讯飞大模型 > 腾讯 > Mock。火山暂不进入 `auto`，只作为显式实验 provider。
+- [x] Step 10：真实多人测试后决定 `auto` 默认优先级：讯飞大模型 > 腾讯 > 火山 > Mock。
 - [x] Step 11：补充火山引擎 ASR 配置、环境变量和验收文档。
 - [x] Step 12：实现火山引擎 WebSocket V1 二进制协议、鉴权 Header、音频发送和结束帧。
 - [x] Step 13：实现火山引擎返回 parser，处理实时结果、二遍最终结果和 transcript event。

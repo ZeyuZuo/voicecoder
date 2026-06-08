@@ -689,7 +689,7 @@ fn encode_volcengine_audio_request(sequence: i32, payload: &[u8], is_final: bool
     encode_volcengine_frame(
         MESSAGE_TYPE_CLIENT_AUDIO_ONLY_REQUEST,
         if is_final {
-            MESSAGE_FLAG_LAST_SEQUENCE
+            MESSAGE_FLAG_SEQUENCE | MESSAGE_FLAG_LAST_SEQUENCE
         } else {
             MESSAGE_FLAG_SEQUENCE
         },
@@ -729,16 +729,26 @@ fn decode_volcengine_message(bytes: &[u8]) -> Result<VolcengineProtocolMessage, 
     let flags = bytes[1] & 0x0f;
     let serialization = bytes[2] >> 4;
     let mut offset = header_size;
-    let sequence = if flags == MESSAGE_FLAG_SEQUENCE || flags == MESSAGE_FLAG_LAST_SEQUENCE {
+    let sequence = if volcengine_flags_include_sequence(flags) {
         let sequence = read_i32_be(bytes, &mut offset)?;
         Some(sequence)
     } else {
         None
     };
 
+    if message_type == MESSAGE_TYPE_SERVER_ERROR {
+        let (payload, error) = decode_volcengine_error(bytes, serialization, &mut offset)?;
+        return Ok(VolcengineProtocolMessage {
+            message_type,
+            sequence,
+            payload,
+            error: Some(error),
+        });
+    }
+
     let has_payload = matches!(
         message_type,
-        MESSAGE_TYPE_SERVER_FULL_RESPONSE | MESSAGE_TYPE_SERVER_ACK | MESSAGE_TYPE_SERVER_ERROR
+        MESSAGE_TYPE_SERVER_FULL_RESPONSE | MESSAGE_TYPE_SERVER_ACK
     ) && bytes.len() >= offset + 4;
     let payload = if has_payload {
         let payload_size = read_u32_be(bytes, &mut offset)? as usize;
@@ -750,28 +760,7 @@ fn decode_volcengine_message(bytes: &[u8]) -> Result<VolcengineProtocolMessage, 
             ));
         }
         let payload_bytes = &bytes[offset..offset + payload_size];
-        if payload_bytes.is_empty() {
-            None
-        } else if serialization == SERIALIZATION_JSON {
-            serde_json::from_slice::<Value>(payload_bytes).ok()
-        } else {
-            std::str::from_utf8(payload_bytes)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(text).ok())
-        }
-    } else {
-        None
-    };
-
-    let error = if message_type == MESSAGE_TYPE_SERVER_ERROR {
-        payload
-            .as_ref()
-            .and_then(|payload| {
-                value_to_string(payload.get("message"))
-                    .or_else(|| value_to_string(payload.get("error")))
-                    .or_else(|| value_to_string(payload.get("desc")))
-            })
-            .or_else(|| Some("火山引擎 ASR 返回错误。".to_string()))
+        decode_volcengine_payload(serialization, payload_bytes)
     } else {
         None
     };
@@ -780,8 +769,71 @@ fn decode_volcengine_message(bytes: &[u8]) -> Result<VolcengineProtocolMessage, 
         message_type,
         sequence,
         payload,
-        error,
+        error: None,
     })
+}
+
+fn decode_volcengine_error(
+    bytes: &[u8],
+    serialization: u8,
+    offset: &mut usize,
+) -> Result<(Option<Value>, String), String> {
+    let error_code = read_u32_be(bytes, offset)?;
+    let error_size = read_u32_be(bytes, offset)? as usize;
+    if bytes.len() < *offset + error_size {
+        return Err(format!(
+            "火山引擎 ASR 错误帧长度不匹配：expected={} actual={}",
+            error_size,
+            bytes.len().saturating_sub(*offset)
+        ));
+    }
+
+    let error_bytes = &bytes[*offset..*offset + error_size];
+    *offset += error_size;
+    let payload = decode_volcengine_payload(serialization, error_bytes);
+    let message = payload
+        .as_ref()
+        .and_then(volcengine_error_message_from_payload)
+        .or_else(|| decode_volcengine_text(error_bytes))
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or_else(|| "火山引擎 ASR 返回错误。".to_string());
+
+    Ok((
+        payload,
+        format!("火山引擎 ASR 返回错误码 {error_code}：{message}"),
+    ))
+}
+
+fn decode_volcengine_payload(serialization: u8, payload_bytes: &[u8]) -> Option<Value> {
+    if payload_bytes.is_empty() {
+        return None;
+    }
+
+    if serialization == SERIALIZATION_JSON {
+        return serde_json::from_slice::<Value>(payload_bytes)
+            .ok()
+            .or_else(|| decode_volcengine_text(payload_bytes).map(Value::String));
+    }
+
+    decode_volcengine_text(payload_bytes).and_then(|text| {
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .or(Some(Value::String(text)))
+    })
+}
+
+fn decode_volcengine_text(bytes: &[u8]) -> Option<String> {
+    std::str::from_utf8(bytes).ok().map(str::to_string)
+}
+
+fn volcengine_error_message_from_payload(payload: &Value) -> Option<String> {
+    match payload {
+        Value::String(text) => Some(text.clone()),
+        Value::Object(_) => value_to_string(payload.get("message"))
+            .or_else(|| value_to_string(payload.get("error")))
+            .or_else(|| value_to_string(payload.get("desc"))),
+        _ => None,
+    }
 }
 
 fn read_i32_be(bytes: &[u8], offset: &mut usize) -> Result<i32, String> {
@@ -795,6 +847,10 @@ fn read_i32_be(bytes: &[u8], offset: &mut usize) -> Result<i32, String> {
     );
     *offset += 4;
     Ok(value)
+}
+
+fn volcengine_flags_include_sequence(flags: u8) -> bool {
+    flags & MESSAGE_FLAG_SEQUENCE != 0
 }
 
 fn read_u32_be(bytes: &[u8], offset: &mut usize) -> Result<u32, String> {
@@ -1021,7 +1077,7 @@ mod tests {
         let frame = encode_volcengine_audio_request(-7, &[], true);
 
         assert_eq!(frame[0], 0x11);
-        assert_eq!(frame[1], 0x22);
+        assert_eq!(frame[1], 0x23);
         assert_eq!(i32::from_be_bytes(frame[4..8].try_into().unwrap()), -7);
         assert_eq!(u32::from_be_bytes(frame[8..12].try_into().unwrap()), 0);
     }
@@ -1048,6 +1104,54 @@ mod tests {
         assert_eq!(
             message.payload.unwrap().pointer("/result/text").unwrap(),
             &Value::String("你好".to_string())
+        );
+    }
+
+    #[test]
+    fn decodes_volcengine_combined_sequence_flags() {
+        let payload = json!({
+            "result": {
+                "text": "最终结果",
+                "definite": true
+            }
+        });
+        let frame = encode_volcengine_frame(
+            MESSAGE_TYPE_SERVER_FULL_RESPONSE,
+            MESSAGE_FLAG_SEQUENCE | MESSAGE_FLAG_LAST_SEQUENCE,
+            45_000_000,
+            serde_json::to_vec(&payload).unwrap(),
+        );
+
+        let message = decode_volcengine_message(&frame).unwrap();
+
+        assert_eq!(message.message_type, MESSAGE_TYPE_SERVER_FULL_RESPONSE);
+        assert_eq!(message.sequence, Some(45_000_000));
+        assert_eq!(
+            message.payload.unwrap().pointer("/result/text").unwrap(),
+            &Value::String("最终结果".to_string())
+        );
+    }
+
+    #[test]
+    fn decodes_volcengine_error_frame_code_and_message() {
+        let error_message = br#"{"message":"final audio frame invalid"}"#;
+        let mut frame = vec![
+            (PROTOCOL_VERSION << 4) | HEADER_SIZE_WORDS,
+            MESSAGE_TYPE_SERVER_ERROR << 4,
+            (SERIALIZATION_JSON << 4) | COMPRESSION_NONE,
+            0,
+        ];
+        frame.extend_from_slice(&45_000_000_u32.to_be_bytes());
+        frame.extend_from_slice(&(error_message.len() as u32).to_be_bytes());
+        frame.extend_from_slice(error_message);
+
+        let message = decode_volcengine_message(&frame).unwrap();
+
+        assert_eq!(message.message_type, MESSAGE_TYPE_SERVER_ERROR);
+        assert_eq!(message.sequence, None);
+        assert_eq!(
+            message.error.as_deref(),
+            Some("火山引擎 ASR 返回错误码 45000000：final audio frame invalid")
         );
     }
 

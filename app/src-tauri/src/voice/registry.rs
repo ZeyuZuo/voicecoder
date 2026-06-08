@@ -4,6 +4,7 @@ use super::{
     read_local_env,
     tencent::TencentAsrConfig,
     tencent::TencentAsrProvider,
+    volcengine::VolcengineAsrConfig,
     volcengine::VolcengineAsrProvider,
     AsrProvider, VoiceProviderDiagnostic, VoiceProviderKind,
 };
@@ -41,6 +42,8 @@ impl ProviderRegistry {
                     VoiceProviderKind::IflytekLlm
                 } else if TencentAsrConfig::is_available() {
                     VoiceProviderKind::Tencent
+                } else if VolcengineAsrConfig::missing_required_env().is_empty() {
+                    VoiceProviderKind::Volcengine
                 } else {
                     VoiceProviderKind::Mock
                 }

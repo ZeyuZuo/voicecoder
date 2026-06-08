@@ -594,6 +594,7 @@ mod tests {
                 VoiceProviderKind::Mock
                     | VoiceProviderKind::Tencent
                     | VoiceProviderKind::IflytekLlm
+                    | VoiceProviderKind::Volcengine
             ));
         }
 
