@@ -4,7 +4,7 @@ use super::{
     VoiceTranscriptEvent, TRANSCRIPT_EVENT,
 };
 use base64::{engine::general_purpose, Engine as _};
-use chrono::Utc;
+use chrono::Local;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
@@ -87,6 +87,7 @@ struct IflytekRealtimeResponse {
     code: Option<String>,
     data: Option<Value>,
     desc: Option<String>,
+    res_type: Option<String>,
     sid: Option<String>,
 }
 
@@ -341,9 +342,16 @@ fn spawn_iflytek_llm_provider(
 
             let websocket = connect_async(&connection_url).await;
             let Ok((socket, _response)) = websocket else {
+                let redacted_url = config.redact_signed_url(&connection_url);
                 let message = websocket
                     .err()
-                    .map(|error| format!("讯飞大模型 ASR WebSocket 连接失败：{error}"))
+                    .map(|error| {
+                        eprintln!(
+                            "[voice][iflytek_llm] connect failed url={} error={}",
+                            redacted_url, error
+                        );
+                        format_iflytek_connect_error(&error.to_string())
+                    })
                     .unwrap_or_else(|| "讯飞大模型 ASR WebSocket 连接失败。".to_string());
                 emit_error(
                     &app,
@@ -424,6 +432,16 @@ fn spawn_iflytek_llm_provider(
     });
 
     audio_sender
+}
+
+fn format_iflytek_connect_error(error: &str) -> String {
+    if error.contains("invalid response status") {
+        return format!(
+            "讯飞大模型 ASR WebSocket 连接失败：{error}。握手响应不是标准 HTTP 状态行，常见原因是代理/TUN/DNS/网关把请求转到了错误服务，或当前网络无法直连讯飞 endpoint。"
+        );
+    }
+
+    format!("讯飞大模型 ASR WebSocket 连接失败：{error}")
 }
 
 async fn run_iflytek_send_loop<S>(
@@ -587,21 +605,11 @@ fn handle_iflytek_message(
         return IflytekMessageAction::Stop(VoiceStoppedReason::Error);
     };
 
-    if response.action.as_deref() == Some("error") {
+    if let Some(error_message) = iflytek_response_error_message(&response) {
         emit_error(
             app,
             Some(session_id.to_string()),
-            format_iflytek_error(&response),
-            Some("iflytek_api_error"),
-        );
-        return IflytekMessageAction::Stop(VoiceStoppedReason::Error);
-    }
-
-    if response.code.as_deref().is_some_and(|code| code != "0") {
-        emit_error(
-            app,
-            Some(session_id.to_string()),
-            format_iflytek_error(&response),
+            error_message,
             Some("iflytek_api_error"),
         );
         return IflytekMessageAction::Stop(VoiceStoppedReason::Error);
@@ -619,13 +627,54 @@ fn handle_iflytek_message(
 }
 
 fn format_iflytek_error(response: &IflytekRealtimeResponse) -> String {
-    let code = response.code.as_deref().unwrap_or("未知错误码");
+    let data = normalized_iflytek_data(response.data.as_ref());
+    let code = response
+        .code
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| {
+            data.as_ref()
+                .and_then(|data| value_to_string(data.get("code")))
+        })
+        .unwrap_or_else(|| "未知错误码".to_string());
     let desc = response
         .desc
-        .as_deref()
-        .unwrap_or("讯飞大模型 ASR 返回错误。");
+        .clone()
+        .or_else(|| {
+            data.as_ref()
+                .and_then(|data| value_to_string(data.get("desc")))
+        })
+        .or_else(|| {
+            data.as_ref()
+                .and_then(|data| value_to_string(data.get("message")))
+        })
+        .unwrap_or_else(|| "讯飞大模型 ASR 返回错误。".to_string());
     let sid = response.sid.as_deref().unwrap_or("-");
     format!("讯飞大模型 ASR 返回错误码 {code}：{desc}（sid: {sid}）")
+}
+
+fn iflytek_response_error_message(response: &IflytekRealtimeResponse) -> Option<String> {
+    if response.action.as_deref() == Some("error") {
+        return Some(format_iflytek_error(response));
+    }
+
+    if response.code.as_deref().is_some_and(|code| code != "0") {
+        return Some(format_iflytek_error(response));
+    }
+
+    let data = normalized_iflytek_data(response.data.as_ref());
+    let data_is_abnormal = data
+        .as_ref()
+        .and_then(|data| data.get("normal"))
+        .and_then(Value::as_bool)
+        == Some(false);
+    let is_failure_result = response.res_type.as_deref() == Some("frc");
+
+    if data_is_abnormal || is_failure_result {
+        return Some(format_iflytek_error(response));
+    }
+
+    None
 }
 
 fn parse_iflytek_transcript_events(
@@ -994,7 +1043,7 @@ fn encode(value: &str) -> String {
 }
 
 fn current_iflytek_utc() -> String {
-    Utc::now().format("%Y-%m-%dT%H:%M:%S+0000").to_string()
+    Local::now().format("%Y-%m-%dT%H:%M:%S%z").to_string()
 }
 
 fn create_iflytek_request_id(session_id: &str) -> String {
@@ -1080,6 +1129,29 @@ mod tests {
             data.to_string()
         ))));
         assert!(!iflytek_data_is_final(Some(&json!({ "ls": false }))));
+    }
+
+    #[test]
+    fn detects_iflytek_llm_failure_result_frame() {
+        let response = IflytekRealtimeResponse {
+            action: None,
+            code: None,
+            data: Some(json!({
+                "normal": false,
+                "code": "35013",
+                "desc": "utc time invalid"
+            })),
+            desc: None,
+            res_type: Some("frc".to_string()),
+            sid: Some("sid-test".to_string()),
+        };
+
+        let message =
+            iflytek_response_error_message(&response).expect("failure frame should be an error");
+
+        assert!(message.contains("35013"));
+        assert!(message.contains("utc time invalid"));
+        assert!(message.contains("sid-test"));
     }
 
     #[test]

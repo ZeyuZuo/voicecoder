@@ -55,8 +55,13 @@ export async function createVoiceCapture(stream: MediaStream, { sessionId, chunk
 
     sequence += 1;
     void invoke("send_voice_audio_chunk", { chunk: payload }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (stopped && isClosedSessionError(message)) {
+        return;
+      }
+
       stop();
-      onError(error instanceof Error ? error.message : String(error));
+      onError(message);
     });
   };
 
@@ -141,6 +146,10 @@ function stopMediaStream(stream: MediaStream) {
   for (const track of stream.getTracks()) {
     track.stop();
   }
+}
+
+function isClosedSessionError(message: string) {
+  return message.includes("没有正在运行的语音会话") || message.includes("语音分片不属于当前会话");
 }
 
 declare global {

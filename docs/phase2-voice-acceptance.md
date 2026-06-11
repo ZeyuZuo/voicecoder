@@ -266,7 +266,9 @@ VOLCENGINE_ASR_END_WINDOW_SIZE=400
 - 腾讯云鉴权失败：检查 `TENCENTCLOUD_APP_ID`、`TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 是否来自同一个账号和服务。
 - WebSocket 连接失败：检查网络、腾讯云服务开通状态、账户余额和接口地域/域名。
 - 讯飞鉴权失败：检查 `IFLYTEK_LLM_APP_ID`、`IFLYTEK_LLM_API_KEY`、`IFLYTEK_LLM_API_SECRET` 是否来自讯飞实时语音转写大模型服务页。
-- 讯飞返回 `35013`：检查 `utc` 时区格式，当前后端生成 `YYYY-MM-DDTHH:MM:SS+0000`。
+- 讯飞连接报 `invalid response status`：运行 `npm run diagnose:iflytek` 查看原始握手响应；讯飞大模型网关可能用五位业务码伪装 HTTP 状态码，导致 WebSocket 库无法解析。
+- 讯飞返回 `35010` / `AccessKeyId Not Exists`：检查 `IFLYTEK_LLM_API_KEY` 是否填写实时语音转写大模型服务页对应的 AccessKeyId/APIKey，不要混用普通实时语音转写或其它讯飞服务的 key。
+- 讯飞返回 `35013`：检查 `utc` 时区格式，当前后端生成 `YYYY-MM-DDTHH:MM:SS+0800` 这类本机时区格式。
 - 讯飞返回 `35014` / `100012`：检查本机系统时间是否准确。
 - 讯飞返回 `35030`：签名重复或过期，重启客户端后重试。
 - 讯飞返回 `37005`：服务端长时间未收到音频，确认麦克风权限和音频分片发送是否正常。
