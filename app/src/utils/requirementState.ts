@@ -52,6 +52,12 @@ export type VoiceRequirementController = {
   confirmRequirement: () => void;
 };
 
+export type VoiceInputPermission = {
+  canUseMic: boolean;
+  canFinishTurn: boolean;
+  transcriptSource?: RequirementUtterance["source"];
+};
+
 export function createRequirementState(now: string): RequirementState {
   return {
     id: createId("requirement"),
@@ -89,14 +95,16 @@ export function requirementSessionReducer(
       return createVoiceRequirementSession(action.voiceSessionId, action.now);
     }
 
-    const nextStatus = session.requirementState.status === "clarifying" ? "clarifying" : "collecting";
+    const permission = getVoiceInputPermission(session.requirementState);
+    if (!permission.canUseMic) {
+      return session;
+    }
 
     return {
       ...session,
       voiceSessionIds: appendUnique(session.voiceSessionIds, action.voiceSessionId),
       requirementState: {
         ...session.requirementState,
-        status: nextStatus,
         pendingAction: undefined,
         codingPrompt: undefined,
         updatedAt: action.now
@@ -183,6 +191,11 @@ export function requirementSessionReducer(
     return session;
   }
 
+  const permission = getVoiceInputPermission(session.requirementState);
+  if (!permission.transcriptSource) {
+    return session;
+  }
+
   if (!session.voiceSessionIds.includes(action.segment.sessionId)) {
     return session;
   }
@@ -192,7 +205,7 @@ export function requirementSessionReducer(
     return session;
   }
 
-  const utterance = transcriptSegmentToUtterance(action.segment, text, action.source ?? getUtteranceSourceForState(session.requirementState));
+  const utterance = transcriptSegmentToUtterance(action.segment, text, action.source ?? permission.transcriptSource);
   const utterances = upsertUtteranceByTranscriptId(session.requirementState.utterances, utterance);
   const nextAnsweredQuestions = upsertAnsweredQuestionForUtterance(session.requirementState, utterance);
 
@@ -342,6 +355,37 @@ export function useVoiceRequirementSession(voice: {
   );
 }
 
+export function getVoiceInputPermission(state: RequirementState | undefined): VoiceInputPermission {
+  if (!state) {
+    return {
+      canUseMic: true,
+      canFinishTurn: false,
+      transcriptSource: "voice"
+    };
+  }
+
+  if (state.status === "collecting") {
+    return {
+      canUseMic: true,
+      canFinishTurn: state.utterances.some((utterance) => utterance.source === "voice"),
+      transcriptSource: "voice"
+    };
+  }
+
+  if (state.status === "clarifying") {
+    return {
+      canUseMic: true,
+      canFinishTurn: Boolean(state.activeQuestionId && state.answeredQuestions.some((question) => question.id === state.activeQuestionId)),
+      transcriptSource: "clarification_answer"
+    };
+  }
+
+  return {
+    canUseMic: false,
+    canFinishTurn: false
+  };
+}
+
 function transcriptSegmentToUtterance(
   segment: VoiceTranscriptSegment,
   text: string,
@@ -489,10 +533,6 @@ function getNextClarificationQuestions(state: RequirementState) {
 function createLocalCodingPrompt(state: RequirementState) {
   const document = state.requirementDocument || state.summary;
   return `请根据以下已确认需求进行实现：\n\n${document}`;
-}
-
-function getUtteranceSourceForState(state: RequirementState): RequirementUtterance["source"] {
-  return state.status === "clarifying" ? "clarification_answer" : "voice";
 }
 
 function clearSummaryTimer(timer: ReturnType<typeof setTimeout> | undefined) {

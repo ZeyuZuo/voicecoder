@@ -70,6 +70,8 @@ idle
   -> processing
   -> clarifying
   -> processing
+  -> clarifying
+  -> processing
   -> ready_to_confirm
   -> confirmed
 ```
@@ -88,10 +90,43 @@ idle
 - `confirmed` 之前不得触发 Coding Agent。
 - `clarifying` 状态只问影响目标、范围、验收、交互行为或关键约束的问题，不问可由 Coding Agent 自行判断的细节。
 - `clarifying -> processing -> clarifying` 可以循环多次；只有需求明确后才进入 `ready_to_confirm`。
-- 用户可以在 `ready_to_confirm` 继续点击语音补充需求，状态回到 `collecting`。
+- `ready_to_confirm` 下不允许继续语音输入；用户只能确认生成文档。后续如需修改，应另做明确的“重新补充需求”操作，不属于当前 MVP 主路径。
 - 用户回答澄清问题属于本轮需求会话的语音补充信息，不是独立的文本需求入口。
 - 普通文本输入模式不进入这套状态机；这套状态机只在用户点击语音按钮后接管本轮语音需求会话。
 - `confirmed` 后生成的 Coding Prompt 只是 Phase 3 产物，不在 Phase 3 自动交给 Coding Agent 执行。
+
+## 输入语义边界
+
+每一条 ASR final transcript 必须根据当前需求状态标记来源：
+
+- `collecting`：`source="voice"`，表示用户自由描述需求。
+- `clarifying`：`source="clarification_answer"`，表示用户正在回答当前澄清问题。
+- `processing`：不允许录音和追加 transcript。
+- `ready_to_confirm`：不允许录音和追加 transcript。
+- `confirmed`：不允许录音和追加 transcript。
+
+`start_voice_session` 只在没有需求会话时创建 `VoiceRequirementSession` 并进入 `collecting`。如果需求会话已经存在，点击麦克风只能开始当前状态允许的下一段语音 turn，不能重置状态，也不能把 `clarifying` 或 `ready_to_confirm` 拉回 `collecting`。
+
+## 防误操作规则
+
+```ts
+type VoiceInputPermission = {
+  canUseMic: boolean;
+  canFinishTurn: boolean;
+  transcriptSource?: "voice" | "clarification_answer";
+};
+```
+
+规则：
+
+- `idle`：允许麦克风，创建语音需求会话，进入 `collecting`。
+- `collecting`：允许麦克风，final transcript 作为 `voice`；有内容后允许“我说完了”。
+- `processing`：禁止麦克风，禁止“我说完了 / 回答完了”。
+- `clarifying`：允许麦克风，final transcript 作为 `clarification_answer`；有回答后允许“回答完了”。
+- `ready_to_confirm`：禁止麦克风，只允许确认生成需求文档。
+- `confirmed`：禁止麦克风，只展示需求文档和 Coding Prompt 草稿。
+
+这些规则必须集中在一个 helper 中，组件只能消费 helper 结果，不能在多个组件里散落判断。
 
 ## 数据模型草案
 
@@ -278,17 +313,19 @@ Content-Type: application/json
 - 用户点击“我说完了”。
 - 用户点击“整理需求”。
 
-### 2. 澄清问题生成
+### 2. 需求处理与澄清判断
 
 输入：
 
 - 当前 `RequirementState`。
-- 最近上下文。
+- 本轮新增的 `RequirementUtterance[]`。
 
 输出：
 
 ```json
 {
+  "summary": "",
+  "requirementDocumentDraft": "",
   "questions": [
     {
       "question": "",
@@ -306,6 +343,8 @@ Content-Type: application/json
 - 只问会影响实现、验收、范围或交互行为的问题。
 - 不问“你想要更好看一点吗”这种泛泛问题。
 - 澄清问题的回答必须继续进入本轮语音需求会话。
+- `readyToConfirm=true` 且没有 blocking questions 时，前端进入 `ready_to_confirm`。
+- 否则前端进入 `clarifying`。
 
 ### 3. 完整需求文档和确认版 Prompt 生成
 
@@ -361,7 +400,7 @@ Content-Type: application/json
 - `collecting` 下的“我说完了”：停止本轮自由描述并进入 `processing`。
 - `clarifying` 下的“回答完了”：停止本轮语音回答并进入 `processing`。
 - 澄清问题：用户继续点击麦克风用语音回答当前问题，回答写回本轮需求会话。
-- `ready_to_confirm` 下的“确认需求”：生成并展示完整需求文档和 Coding Prompt，进入 `confirmed`。
+- `ready_to_confirm` 下禁用麦克风，只显示“确认需求”：生成并展示完整需求文档和 Coding Prompt，进入 `confirmed`。
 
 第一版不需要复杂视觉打磨，但必须像一个语音访谈工作台，而不是把状态面板附着在普通 prompt 文本框下面。普通 prompt 文本框不作为 Phase 3 的输入入口；Coding Prompt 只作为确认后的只读产物展示给 Phase 4。
 
@@ -370,7 +409,7 @@ Content-Type: application/json
 ```text
 get_llm_provider_status() -> LlmProviderStatus
 summarize_requirement_state(request) -> RequirementStatePatch
-clarify_requirement_state(request) -> RequirementClarificationResult
+process_requirement_turn(request) -> RequirementProcessingResult
 finalize_requirement_document(request) -> RequirementFinalizationResult
 ```
 
@@ -397,12 +436,12 @@ LlmProviderDiagnostic
 - [ ] Step 6：实现真实 `openai_compatible` LLM provider，支持 base URL、API key、model、temperature、timeout。
 - [ ] Step 7：新增 `get_llm_provider_status` 命令，前端可显示 LLM 配置状态和缺失环境变量。
 - [ ] Step 8：实现 `summarize_requirement_state` 命令，输入当前状态和新增 utterances，输出结构化 patch。
-- [ ] Step 9：实现 `clarify_requirement_state` 命令，最多生成 3 个 blocking questions。
+- [ ] Step 9：实现 `process_requirement_turn` 命令，统一返回 summary、需求草稿、澄清问题和 readyToConfirm。
 - [ ] Step 10：实现 `finalize_requirement_document` 命令，生成完整需求文档和确认版 Coding Prompt。
 - [ ] Step 11：增加 LLM JSON 输出 schema 校验和错误恢复，避免坏响应污染当前状态。
 - [ ] Step 12：增加 debounce / batching 策略，避免每条 transcript 都调用 LLM。
 - [ ] Step 13：把“我说完了 / 回答完了”接到 `processing`，支持 `clarifying -> processing -> clarifying` 的确认循环，但不自动确认、不自动编码。
-- [ ] Step 14：补充单元测试：状态机 reducer、LLM JSON parser、provider diagnostics、OpenAI-compatible 响应 parser。
+- [ ] Step 14：补充单元测试：状态机 reducer、防误操作规则、LLM JSON parser、provider diagnostics、OpenAI-compatible 响应 parser。
 - [ ] Step 15：补充 Phase 3 验收文档，记录真实 LLM provider 的配置和验收流程。
 
 ## 验收标准
@@ -413,6 +452,7 @@ LlmProviderDiagnostic
 - 用户边说话，系统能按时间间隔或批量阈值周期性更新“当前理解”。
 - 用户停止语音输入后，系统能提出不超过 3 个关键澄清问题。
 - 用户用语音回答澄清问题后，需求状态和需求文档会被更新。
+- `ready_to_confirm` 下点击麦克风不会回到 `collecting`，也不会追加新的 transcript。
 - 系统能形成一份面向用户确认的完整需求文档。
 - 用户确认前不会触发 Coding Agent。
 - 用户确认后能生成可用于 Phase 4 的 Coding Prompt。

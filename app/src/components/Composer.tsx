@@ -15,7 +15,7 @@ import type { VoiceSessionController } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
 import type { RequirementStatus } from "../types/app";
 import { shortPath } from "../utils/project";
-import type { VoiceRequirementController } from "../utils/requirementState";
+import { getVoiceInputPermission, type VoiceRequirementController } from "../utils/requirementState";
 
 type ComposerProps = {
   requirement: VoiceRequirementController;
@@ -40,10 +40,11 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
 
   const submitDisabled = voiceMode || prompt.trim().length === 0;
   const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
-  const requirementStatus = requirement.session?.requirementState.status;
-  const voiceInputMode = getVoiceInputMode(voice.status, requirementStatus);
-  const canFinishRequirement = voiceMode && Boolean(requirement.session?.requirementState.utterances.length) && voiceInputMode.canFinishTurn;
-  const voiceButtonDisabled = voice.status === "transcribing" || voiceInputMode.disableMic;
+  const requirementState = requirement.session?.requirementState;
+  const voiceInputPermission = getVoiceInputPermission(requirementState);
+  const voiceInputMode = getVoiceInputMode(voice.status, requirementState?.status);
+  const canFinishRequirement = voiceMode && voiceInputPermission.canFinishTurn && voiceInputMode.canFinishTurn;
+  const voiceButtonDisabled = voice.status === "transcribing" || !voiceInputPermission.canUseMic;
 
   const finishRequirement = async () => {
     if (voice.recording || voice.busy) {
@@ -210,10 +211,10 @@ function getVoiceInputMode(status: VoiceSessionController["status"], requirement
   if (requirementStatus === "ready_to_confirm") {
     return {
       title: "需求已足够明确",
-      hint: "可以确认生成需求文档，也可以点麦克风继续补充。",
-      finishLabel: "继续整理",
+      hint: "请确认生成需求文档。确认前不会进入编码。",
+      finishLabel: "等待确认",
       canFinishTurn: false,
-      disableMic: false
+      disableMic: true
     };
   }
 
