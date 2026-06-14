@@ -13,6 +13,7 @@ import { useMemo, useState } from "react";
 import { useGitBranch } from "../hooks/useGitBranch";
 import type { VoiceSessionController } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
+import type { RequirementStatus } from "../types/app";
 import { shortPath } from "../utils/project";
 import type { VoiceRequirementController } from "../utils/requirementState";
 
@@ -39,15 +40,17 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
 
   const submitDisabled = voiceMode || prompt.trim().length === 0;
   const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
-  const canFinishRequirement = voiceMode && requirement.session?.requirementState.utterances.length;
   const requirementStatus = requirement.session?.requirementState.status;
+  const voiceInputMode = getVoiceInputMode(voice.status, requirementStatus);
+  const canFinishRequirement = voiceMode && Boolean(requirement.session?.requirementState.utterances.length) && voiceInputMode.canFinishTurn;
+  const voiceButtonDisabled = voice.status === "transcribing" || voiceInputMode.disableMic;
 
   const finishRequirement = async () => {
     if (voice.recording || voice.busy) {
       await voice.stop();
     }
 
-    requirement.finishCollection();
+    requirement.finishUserTurn();
   };
 
   return (
@@ -57,8 +60,8 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
           <div className="voice-composer-status">
             <span className={`voice-dot ${voice.recording ? "is-recording" : ""}`} />
             <div>
-              <strong>{getVoiceModeTitle(voice.status, requirementStatus)}</strong>
-              <small>{getVoiceModeHint(voice.status, requirementStatus)}</small>
+              <strong>{voiceInputMode.title}</strong>
+              <small>{voiceInputMode.hint}</small>
             </div>
           </div>
         ) : (
@@ -85,7 +88,7 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
             ) : (
               <button className="tool-button" disabled={!canFinishRequirement} onClick={finishRequirement}>
                 <Square size={14} />
-                <span>我说完了</span>
+                <span>{voiceInputMode.finishLabel}</span>
               </button>
             )}
           </div>
@@ -93,7 +96,7 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
             <button
               className={`icon-button quiet voice-button ${voice.recording ? "is-recording" : ""}`}
               aria-label={voiceButtonLabel}
-              disabled={voice.status === "transcribing"}
+              disabled={voiceButtonDisabled}
               onClick={voice.toggle}
             >
               <Mic size={18} />
@@ -183,42 +186,82 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
   );
 }
 
-function getVoiceModeTitle(status: VoiceSessionController["status"], requirementStatus: string | undefined) {
-  if (status === "recording") {
-    return "正在听你说需求";
-  }
-
-  if (status === "transcribing") {
-    return "正在等待最后的转写";
-  }
-
-  if (requirementStatus === "requirement_ready") {
-    return "需求草稿已整理";
-  }
-
-  if (requirementStatus === "confirmed") {
-    return "需求已确认";
-  }
-
-  if (status === "error") {
-    return "语音输入出错";
-  }
-
-  return "语音需求模式";
-}
-
-function getVoiceModeHint(status: VoiceSessionController["status"], requirementStatus: string | undefined) {
-  if (status === "recording") {
-    return "继续自然描述，系统会逐步整理当前理解。";
+function getVoiceInputMode(status: VoiceSessionController["status"], requirementStatus: RequirementStatus | undefined) {
+  if (requirementStatus === "processing") {
+    return {
+      title: "正在整理这一轮内容",
+      hint: "稍等一下，系统会判断需求是否还需要补充。",
+      finishLabel: "整理中",
+      canFinishTurn: false,
+      disableMic: true
+    };
   }
 
   if (requirementStatus === "clarifying") {
-    return "系统有问题需要补充，继续用语音回答即可。";
+    return {
+      title: status === "recording" ? "正在听你回答问题" : "回答补充问题",
+      hint: "点击麦克风回答上方问题，回答完后点“回答完了”。",
+      finishLabel: "回答完了",
+      canFinishTurn: true,
+      disableMic: false
+    };
   }
 
-  if (requirementStatus === "requirement_ready") {
-    return "检查中间的需求文档，确认后进入下一阶段。";
+  if (requirementStatus === "ready_to_confirm") {
+    return {
+      title: "需求已足够明确",
+      hint: "可以确认生成需求文档，也可以点麦克风继续补充。",
+      finishLabel: "继续整理",
+      canFinishTurn: false,
+      disableMic: false
+    };
   }
 
-  return "点击麦克风继续说，或点“我说完了”整理需求。";
+  if (requirementStatus === "confirmed") {
+    return {
+      title: "需求已确认",
+      hint: "需求文档已生成，后续可交给编码阶段。",
+      finishLabel: "已确认",
+      canFinishTurn: false,
+      disableMic: true
+    };
+  }
+
+  if (status === "transcribing") {
+    return {
+      title: "正在等待最后的转写",
+      hint: "收到最后一段语音后会继续整理。",
+      finishLabel: "我说完了",
+      canFinishTurn: false,
+      disableMic: true
+    };
+  }
+
+  if (status === "error") {
+    return {
+      title: "语音输入出错",
+      hint: "检查语音 provider 后，可以点击麦克风重试。",
+      finishLabel: "我说完了",
+      canFinishTurn: false,
+      disableMic: false
+    };
+  }
+
+  if (status === "recording") {
+    return {
+      title: "正在听你说需求",
+      hint: "继续自然描述，系统会逐步整理当前理解。",
+      finishLabel: "我说完了",
+      canFinishTurn: true,
+      disableMic: false
+    };
+  }
+
+  return {
+    title: "语音需求模式",
+    hint: "点击麦克风继续说，或点“我说完了”整理需求。",
+    finishLabel: "我说完了",
+    canFinishTurn: true,
+    disableMic: false
+  };
 }

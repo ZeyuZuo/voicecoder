@@ -66,30 +66,31 @@ LLM 更新需求状态
 
 ```text
 idle
-  -> voice_collecting
-  -> live_summarizing
-  -> finishing
+  -> collecting
+  -> processing
   -> clarifying
-  -> requirement_ready
+  -> processing
+  -> ready_to_confirm
   -> confirmed
 ```
 
 状态含义：
 
 - `idle`：没有正在整理的需求。
-- `voice_collecting`：正在通过语音收集本轮需求。
-- `live_summarizing`：仍在语音采集中，同时正在调用 LLM 更新当前理解。
-- `finishing`：用户点击“我说完了”，系统停止采集并生成完整需求文档草稿。
-- `clarifying`：LLM 判断存在阻塞实现或验收的问题，需要用户继续用语音回答。
-- `requirement_ready`：需求文档已经足够完整，等待用户确认。
+- `collecting`：用户正在通过语音自由描述本轮需求。
+- `processing`：用户点击“我说完了”或“回答完了”后，系统正在整理当前回合并判断需求是否明确。
+- `clarifying`：LLM 判断存在阻塞实现或验收的问题，需要用户继续用语音回答当前问题。
+- `ready_to_confirm`：需求已经足够明确，等待用户确认生成需求文档。
 - `confirmed`：用户已确认需求，系统可以生成 Coding Prompt 供 Phase 4 使用。
 
 约束：
 
 - `confirmed` 之前不得触发 Coding Agent。
 - `clarifying` 状态只问影响目标、范围、验收、交互行为或关键约束的问题，不问可由 Coding Agent 自行判断的细节。
-- 用户可以重新点击语音输入继续补充需求，状态应回到 `voice_collecting` 或 `live_summarizing`。
+- `clarifying -> processing -> clarifying` 可以循环多次；只有需求明确后才进入 `ready_to_confirm`。
+- 用户可以在 `ready_to_confirm` 继续点击语音补充需求，状态回到 `collecting`。
 - 用户回答澄清问题属于本轮需求会话的语音补充信息，不是独立的文本需求入口。
+- 普通文本输入模式不进入这套状态机；这套状态机只在用户点击语音按钮后接管本轮语音需求会话。
 - `confirmed` 后生成的 Coding Prompt 只是 Phase 3 产物，不在 Phase 3 自动交给 Coding Agent 执行。
 
 ## 数据模型草案
@@ -126,11 +127,10 @@ type RequirementState = {
   id: string;
   status:
     | "idle"
-    | "voice_collecting"
-    | "live_summarizing"
-    | "finishing"
+    | "collecting"
+    | "processing"
     | "clarifying"
-    | "requirement_ready"
+    | "ready_to_confirm"
     | "confirmed";
   utterances: RequirementUtterance[];
   summary: string;
@@ -139,11 +139,12 @@ type RequirementState = {
   constraints: string[];
   openQuestions: RequirementQuestion[];
   answeredQuestions: RequirementQuestion[];
+  activeQuestionId?: string;
   acceptanceCriteria: string[];
   outOfScope: string[];
   risks: string[];
   codingPrompt?: string;
-  pendingAction?: "summarize" | "finish" | "clarify" | "finalize";
+  pendingAction?: "summarize" | "process" | "finalize";
   updatedAt: string;
 };
 ```
@@ -345,7 +346,7 @@ Content-Type: application/json
 - 录音状态、ASR provider、LLM provider、当前需求阶段。
 - 实时转写和最近几条 final transcript。
 - 当前理解。
-- 需求文档草稿。
+- 小云朵形式的阶段性理解。
 - 待澄清问题。
 - 已确认约束。
 - 验收标准。
@@ -357,9 +358,10 @@ Content-Type: application/json
 
 - 麦克风按钮：开始或继续本轮语音需求采集。
 - “整理需求”：手动触发增量总结。
-- “我说完了”：停止收集并触发澄清判断。
-- 澄清问题：用户继续点击麦克风用语音回答，回答写回本轮需求会话。
-- “确认需求”：确认当前需求文档并生成 Coding Prompt，进入 `confirmed`。
+- `collecting` 下的“我说完了”：停止本轮自由描述并进入 `processing`。
+- `clarifying` 下的“回答完了”：停止本轮语音回答并进入 `processing`。
+- 澄清问题：用户继续点击麦克风用语音回答当前问题，回答写回本轮需求会话。
+- `ready_to_confirm` 下的“确认需求”：生成并展示完整需求文档和 Coding Prompt，进入 `confirmed`。
 
 第一版不需要复杂视觉打磨，但必须像一个语音访谈工作台，而不是把状态面板附着在普通 prompt 文本框下面。普通 prompt 文本框不作为 Phase 3 的输入入口；Coding Prompt 只作为确认后的只读产物展示给 Phase 4。
 
@@ -387,7 +389,7 @@ LlmProviderDiagnostic
 
 ## 开发 Todo
 
-- [ ] Step 1：更新 Phase 3 TypeScript 类型：`VoiceRequirementSession`、`RequirementUtterance`、`RequirementState`、`RequirementQuestion`、`requirementDocument`、`pendingAction`。
+- [ ] Step 1：更新 Phase 3 TypeScript 类型：`VoiceRequirementSession`、`RequirementUtterance`、`RequirementState`、`RequirementQuestion`、`requirementDocument`、`activeQuestionId`、`pendingAction`。
 - [ ] Step 2：实现前端 requirement reducer，让语音 final transcript 只进入当前 active `VoiceRequirementSession`。
 - [ ] Step 3：点击麦克风后切换到语音需求采集工作台，隐藏或禁用普通文本输入。
 - [ ] Step 4：实现语音工作台 UI，展示实时转写、当前理解、需求文档草稿、澄清问题、验收标准和 Coding Prompt 只读草稿。
@@ -399,7 +401,7 @@ LlmProviderDiagnostic
 - [ ] Step 10：实现 `finalize_requirement_document` 命令，生成完整需求文档和确认版 Coding Prompt。
 - [ ] Step 11：增加 LLM JSON 输出 schema 校验和错误恢复，避免坏响应污染当前状态。
 - [ ] Step 12：增加 debounce / batching 策略，避免每条 transcript 都调用 LLM。
-- [ ] Step 13：把“我说完了”接到完整整理和澄清判断，但不自动确认、不自动编码。
+- [ ] Step 13：把“我说完了 / 回答完了”接到 `processing`，支持 `clarifying -> processing -> clarifying` 的确认循环，但不自动确认、不自动编码。
 - [ ] Step 14：补充单元测试：状态机 reducer、LLM JSON parser、provider diagnostics、OpenAI-compatible 响应 parser。
 - [ ] Step 15：补充 Phase 3 验收文档，记录真实 LLM provider 的配置和验收流程。
 

@@ -78,10 +78,10 @@ function VoiceRequirementWorkspace({
   const voiceProvider = voice.sessionSnapshot?.provider ?? voice.providerStatus?.autoProvider ?? voice.provider;
   const providerDiagnostic = voice.providerStatus?.diagnostics.find((diagnostic) => diagnostic.provider === voiceProvider);
   const missingProviderEnv = providerDiagnostic?.missingEnv ?? [];
-  const canConfirm = state?.status === "requirement_ready" && !state.openQuestions.some((question) => question.blocksCoding);
+  const canConfirm = state?.status === "ready_to_confirm" && !state.openQuestions.some((question) => question.blocksCoding);
   const [documentExpanded, setDocumentExpanded] = useState(false);
   const showClarification = state?.status === "clarifying" && state.openQuestions.length > 0;
-  const showRequirementConfirm = state?.status === "requirement_ready";
+  const showRequirementConfirm = state?.status === "ready_to_confirm";
   const showRequirementDocument = state?.status === "confirmed" && Boolean(state.requirementDocument);
 
   return (
@@ -130,7 +130,7 @@ function VoiceRequirementWorkspace({
           <Cloud size={22} />
         </div>
         <div className="voice-thought-cloud-copy">
-          <span>{state?.pendingAction === "summarize" ? "整理中" : "当前理解"}</span>
+          <span>{state?.pendingAction ? "整理中" : "当前理解"}</span>
           <p>{state?.summary || "先听你完整描述几句。"}</p>
         </div>
       </aside>
@@ -200,11 +200,10 @@ function getVoiceStatusLabel(status: VoiceSessionController["status"]) {
 function getRequirementStatusLabel(status: NonNullable<VoiceRequirementController["session"]>["requirementState"]["status"]) {
   const labels = {
     idle: "空闲",
-    voice_collecting: "收集中",
-    live_summarizing: "整理中",
-    finishing: "收尾中",
+    collecting: "收集中",
+    processing: "整理中",
     clarifying: "待补充",
-    requirement_ready: "待确认",
+    ready_to_confirm: "待确认",
     confirmed: "已确认"
   };
 
