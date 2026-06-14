@@ -92,12 +92,14 @@ export type VoiceSessionSnapshot = {
 
 export type RequirementStatus =
   | "idle"
-  | "collecting"
-  | "summarizing"
-  | "need_clarification"
-  | "awaiting_confirm"
-  | "confirmed"
-  | "ready_to_code";
+  | "voice_collecting"
+  | "live_summarizing"
+  | "finishing"
+  | "clarifying"
+  | "requirement_ready"
+  | "confirmed";
+
+export type RequirementPendingAction = "summarize" | "finish" | "clarify" | "finalize";
 
 export type RequirementUtteranceSource = "voice" | "clarification_answer";
 
@@ -123,6 +125,7 @@ export type RequirementState = {
   status: RequirementStatus;
   utterances: RequirementUtterance[];
   summary: string;
+  requirementDocument: string;
   confirmedFacts: string[];
   constraints: string[];
   openQuestions: RequirementQuestion[];
@@ -131,6 +134,7 @@ export type RequirementState = {
   outOfScope: string[];
   risks: string[];
   codingPrompt?: string;
+  pendingAction?: RequirementPendingAction;
   updatedAt: string;
 };
 

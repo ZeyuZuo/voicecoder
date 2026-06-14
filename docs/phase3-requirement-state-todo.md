@@ -10,16 +10,17 @@ Phase 2 已经完成语音输入 MVP：
 - Mock、腾讯云、讯飞大模型、火山引擎 ASR 已接入统一 provider adapter。
 - final transcript 会自动进入中间输入框。
 
-Phase 3 的入口是语音输入按钮。用户点击麦克风按钮后，系统创建一段语音需求采集会话，持续记录本轮说话内容、实时整理当前理解，并在用户停止语音输入后主动追问不明确的需求。只有用户确认后，系统才生成 Coding Prompt，交给后续 Coding Agent 阶段。
+Phase 3 的入口是语音输入按钮。用户点击麦克风按钮后，系统进入语音专用需求采集模式，隐藏或禁用普通文本输入，只允许用户通过语音描述需求、补充信息和回答澄清问题。系统持续记录本轮说话内容，按时间间隔实时整理当前理解，并在用户点击“我说完了”后生成较完整的需求文档。如果需求仍不明确，系统必须主动追问关键问题；用户继续用语音回答，直到需求文档足够完整。只有用户确认后，系统才生成可交给后续 Coding Agent 阶段的 Coding Prompt。
 
 ## 目标
 
 - 用户点击语音输入按钮后才进入需求采集流程。
-- ASR final transcript 进入本轮语音需求会话，成为需求整理的主输入。
+- 进入语音需求采集模式后，普通文本输入不再作为需求入口。
+- ASR final transcript 进入本轮语音需求会话，成为需求整理的唯一主输入。
 - 系统实时维护结构化需求状态，而不是只保存一段长文本。
-- LLM 可以增量总结需求、识别不明确点、生成澄清问题和确认版 Coding Prompt。
+- LLM 通过真实 OpenAI-compatible API 增量总结需求、识别不明确点、生成澄清问题、生成需求文档和确认版 Coding Prompt。
 - 用户确认之前，系统不得自动触发编码。
-- LLM 调用必须通过 provider adapter 抽象，第一版实现 `openai_compatible`，后续可扩展其他 LLM provider。
+- LLM 调用必须通过 provider adapter 抽象，第一版实现真实 `openai_compatible` provider。
 - API key、base URL 和模型配置只在 Tauri 后端读取，不能进入前端代码。
 
 ## 非目标
@@ -28,6 +29,7 @@ Phase 3 的入口是语音输入按钮。用户点击麦克风按钮后，系统
 - Phase 3 不实现完整 diff、review、terminal、browser 闭环。
 - Phase 3 不依赖 speaker diarization 的准确性做关键逻辑；speaker 只作为上下文和诊断信息。
 - Phase 3 不把普通文本框作为主需求输入入口；主入口是语音输入按钮。
+- Phase 3 不实现 mock LLM provider；开发和验收直接使用真实 OpenAI-compatible API。
 - Phase 3 不先做复杂设置页，开发期继续用 `.env` 配置。
 
 ## 核心流程
@@ -35,21 +37,23 @@ Phase 3 的入口是语音输入按钮。用户点击麦克风按钮后，系统
 ```text
 用户点击语音输入按钮
   ↓
+进入语音专用需求采集模式，隐藏或禁用普通文本输入
+  ↓
 创建 VoiceRequirementSession
   ↓
 ASR final transcript
   ↓
 RequirementUtterance 追加到需求流
   ↓
-LLM 增量总结
+LLM 按时间间隔或批量阈值增量总结
   ↓
-维护 RequirementState
+页面展示当前理解和原始语音记录
   ↓
-用户说完 / 点击整理
+用户点击“我说完了”
   ↓
-LLM 生成澄清问题
+LLM 生成完整需求文档草稿和澄清问题
   ↓
-用户回答澄清问题
+如果有阻塞问题，用户继续用语音回答澄清问题
   ↓
 LLM 更新需求状态
   ↓
@@ -62,30 +66,31 @@ LLM 更新需求状态
 
 ```text
 idle
-  -> collecting
-  -> summarizing
-  -> need_clarification
-  -> awaiting_confirm
+  -> voice_collecting
+  -> live_summarizing
+  -> finishing
+  -> clarifying
+  -> requirement_ready
   -> confirmed
-  -> ready_to_code
 ```
 
 状态含义：
 
 - `idle`：没有正在整理的需求。
-- `collecting`：正在收集本轮语音输入。
-- `summarizing`：正在调用 LLM 更新当前理解。
-- `need_clarification`：LLM 判断存在阻塞编码的问题，需要追问用户。
-- `awaiting_confirm`：需求已经足够明确，等待用户确认。
-- `confirmed`：用户已确认需求。
-- `ready_to_code`：已生成 Coding Prompt，可交给 Phase 4。
+- `voice_collecting`：正在通过语音收集本轮需求。
+- `live_summarizing`：仍在语音采集中，同时正在调用 LLM 更新当前理解。
+- `finishing`：用户点击“我说完了”，系统停止采集并生成完整需求文档草稿。
+- `clarifying`：LLM 判断存在阻塞实现或验收的问题，需要用户继续用语音回答。
+- `requirement_ready`：需求文档已经足够完整，等待用户确认。
+- `confirmed`：用户已确认需求，系统可以生成 Coding Prompt 供 Phase 4 使用。
 
 约束：
 
 - `confirmed` 之前不得触发 Coding Agent。
-- `need_clarification` 状态只问影响实现的问题，不问可由 Coding Agent 自行判断的细节。
-- 用户可以重新点击语音输入继续补充需求，状态应回到 `collecting` 或 `summarizing`。
-- 用户回答澄清问题属于本轮需求会话的补充信息，不是独立的文本需求入口。
+- `clarifying` 状态只问影响目标、范围、验收、交互行为或关键约束的问题，不问可由 Coding Agent 自行判断的细节。
+- 用户可以重新点击语音输入继续补充需求，状态应回到 `voice_collecting` 或 `live_summarizing`。
+- 用户回答澄清问题属于本轮需求会话的语音补充信息，不是独立的文本需求入口。
+- `confirmed` 后生成的 Coding Prompt 只是 Phase 3 产物，不在 Phase 3 自动交给 Coding Agent 执行。
 
 ## 数据模型草案
 
@@ -121,14 +126,15 @@ type RequirementState = {
   id: string;
   status:
     | "idle"
-    | "collecting"
-    | "summarizing"
-    | "need_clarification"
-    | "awaiting_confirm"
-    | "confirmed"
-    | "ready_to_code";
+    | "voice_collecting"
+    | "live_summarizing"
+    | "finishing"
+    | "clarifying"
+    | "requirement_ready"
+    | "confirmed";
   utterances: RequirementUtterance[];
   summary: string;
+  requirementDocument: string;
   confirmedFacts: string[];
   constraints: string[];
   openQuestions: RequirementQuestion[];
@@ -137,6 +143,7 @@ type RequirementState = {
   outOfScope: string[];
   risks: string[];
   codingPrompt?: string;
+  pendingAction?: "summarize" | "finish" | "clarify" | "finalize";
   updatedAt: string;
 };
 ```
@@ -178,9 +185,6 @@ openai_compatible
 - `deepseek`
 - `volcengine`
 - `local_openai_compatible`
-- `mock`
-
-第一版仍建议加 `mock`，用于不依赖真实 LLM 的 UI 和状态机测试。
 
 ### 配置
 
@@ -254,6 +258,7 @@ Content-Type: application/json
 ```json
 {
   "summary": "",
+  "requirementDocument": "",
   "confirmedFacts": [],
   "constraints": [],
   "openQuestions": [],
@@ -268,7 +273,8 @@ Content-Type: application/json
 
 - 新增 final transcript 达到 2-3 条。
 - 距离上次总结超过 5-8 秒。
-- 用户停止语音输入。
+- 用户持续停顿超过 2-3 秒且存在新增 final transcript。
+- 用户点击“我说完了”。
 - 用户点击“整理需求”。
 
 ### 2. 澄清问题生成
@@ -298,19 +304,22 @@ Content-Type: application/json
 - 最多生成 3 个问题。
 - 只问会影响实现、验收、范围或交互行为的问题。
 - 不问“你想要更好看一点吗”这种泛泛问题。
+- 澄清问题的回答必须继续进入本轮语音需求会话。
 
-### 3. 确认版需求生成
+### 3. 完整需求文档和确认版 Prompt 生成
 
 输入：
 
 - 当前 `RequirementState`。
-- 用户对澄清问题的回答。
+- 原始语音记录。
+- 已回答的澄清问题。
 
 输出：
 
 ```json
 {
   "summary": "",
+  "requirementDocument": "",
   "confirmedFacts": [],
   "constraints": [],
   "acceptanceCriteria": [],
@@ -322,17 +331,23 @@ Content-Type: application/json
 
 约束：
 
+- `requirementDocument` 应面向用户确认，结构清晰，不应只是 Coding Agent 指令。
 - `codingPrompt` 应明确目标、范围、验收标准和不做什么。
 - `codingPrompt` 不应包含 ASR 原始噪声文本。
 - 如果仍有阻塞问题，不能返回 `readyToCode=true`。
 
 ## 前端 UI 草案
 
-在中间对话区或右侧工作区新增需求状态面板：
+点击麦克风后，Composer 从普通文本输入切换为语音需求采集工作台。语音模式下不展示可编辑的普通 prompt 文本框。
 
+工作台展示：
+
+- 录音状态、ASR provider、LLM provider、当前需求阶段。
+- 实时转写和最近几条 final transcript。
 - 当前理解。
-- 已确认约束。
+- 需求文档草稿。
 - 待澄清问题。
+- 已确认约束。
 - 验收标准。
 - 不做范围。
 - 风险提示。
@@ -343,11 +358,10 @@ Content-Type: application/json
 - 麦克风按钮：开始或继续本轮语音需求采集。
 - “整理需求”：手动触发增量总结。
 - “我说完了”：停止收集并触发澄清判断。
-- “回答问题”：把用户对澄清问题的回答写回本轮需求会话。
-- “确认需求”：进入 `confirmed`。
-- “生成 Coding Prompt”：进入 `ready_to_code`。
+- 澄清问题：用户继续点击麦克风用语音回答，回答写回本轮需求会话。
+- “确认需求”：确认当前需求文档并生成 Coding Prompt，进入 `confirmed`。
 
-第一版可以把面板做成朴素工具面板，不需要复杂视觉打磨。普通 prompt 文本框不作为 Phase 3 的主输入入口；它可以保留给后续确认稿编辑或 Phase 4 Coding Prompt 展示。
+第一版不需要复杂视觉打磨，但必须像一个语音访谈工作台，而不是把状态面板附着在普通 prompt 文本框下面。普通 prompt 文本框不作为 Phase 3 的输入入口；Coding Prompt 只作为确认后的只读产物展示给 Phase 4。
 
 ## 后端命令草案
 
@@ -355,7 +369,7 @@ Content-Type: application/json
 get_llm_provider_status() -> LlmProviderStatus
 summarize_requirement_state(request) -> RequirementStatePatch
 clarify_requirement_state(request) -> RequirementClarificationResult
-finalize_requirement_state(request) -> RequirementFinalizationResult
+finalize_requirement_document(request) -> RequirementFinalizationResult
 ```
 
 诊断模型：
@@ -373,35 +387,36 @@ LlmProviderDiagnostic
 
 ## 开发 Todo
 
-- [ ] Step 1：新增 Phase 3 TypeScript 类型：`VoiceRequirementSession`、`RequirementUtterance`、`RequirementState`、`RequirementQuestion`。
-- [ ] Step 2：实现前端 requirement reducer，让语音 final transcript 进入当前 `VoiceRequirementSession`。
-- [ ] Step 3：增加需求状态面板，展示 summary、open questions、acceptance criteria 和 coding prompt 草稿。
-- [ ] Step 4：新增 Rust `llm` 模块，抽出 `LlmProvider`、`LlmProviderDiagnostic` 和 provider registry。
-- [ ] Step 5：实现 `mock` LLM provider，用固定 JSON 响应联调 UI 和状态机。
-- [ ] Step 6：实现 `openai_compatible` LLM provider，支持 base URL、API key、model、temperature、timeout。
+- [ ] Step 1：更新 Phase 3 TypeScript 类型：`VoiceRequirementSession`、`RequirementUtterance`、`RequirementState`、`RequirementQuestion`、`requirementDocument`、`pendingAction`。
+- [ ] Step 2：实现前端 requirement reducer，让语音 final transcript 只进入当前 active `VoiceRequirementSession`。
+- [ ] Step 3：点击麦克风后切换到语音需求采集工作台，隐藏或禁用普通文本输入。
+- [ ] Step 4：实现语音工作台 UI，展示实时转写、当前理解、需求文档草稿、澄清问题、验收标准和 Coding Prompt 只读草稿。
+- [ ] Step 5：新增 Rust `llm` 模块，抽出 `LlmProvider`、`LlmProviderDiagnostic` 和 provider registry。
+- [ ] Step 6：实现真实 `openai_compatible` LLM provider，支持 base URL、API key、model、temperature、timeout。
 - [ ] Step 7：新增 `get_llm_provider_status` 命令，前端可显示 LLM 配置状态和缺失环境变量。
 - [ ] Step 8：实现 `summarize_requirement_state` 命令，输入当前状态和新增 utterances，输出结构化 patch。
 - [ ] Step 9：实现 `clarify_requirement_state` 命令，最多生成 3 个 blocking questions。
-- [ ] Step 10：实现 `finalize_requirement_state` 命令，生成确认版需求和 Coding Prompt。
+- [ ] Step 10：实现 `finalize_requirement_document` 命令，生成完整需求文档和确认版 Coding Prompt。
 - [ ] Step 11：增加 LLM JSON 输出 schema 校验和错误恢复，避免坏响应污染当前状态。
 - [ ] Step 12：增加 debounce / batching 策略，避免每条 transcript 都调用 LLM。
-- [ ] Step 13：把“停止语音输入”后的行为接到澄清判断，但不自动确认、不自动编码。
-- [ ] Step 14：补充单元测试：状态机 reducer、LLM JSON parser、provider diagnostics、mock provider。
-- [ ] Step 15：补充 Phase 3 验收文档，记录真实 LLM provider 和 mock provider 的验收流程。
+- [ ] Step 13：把“我说完了”接到完整整理和澄清判断，但不自动确认、不自动编码。
+- [ ] Step 14：补充单元测试：状态机 reducer、LLM JSON parser、provider diagnostics、OpenAI-compatible 响应 parser。
+- [ ] Step 15：补充 Phase 3 验收文档，记录真实 LLM provider 的配置和验收流程。
 
 ## 验收标准
 
-- 语音 final transcript 会进入需求流，而不是只追加到 prompt 文本框。
+- 点击语音按钮后进入语音专用需求采集模式，普通文本输入不再作为需求入口。
+- 语音 final transcript 会进入需求流，而不是追加到 prompt 文本框。
 - 未点击语音输入按钮时，不会创建 Phase 3 需求会话。
-- 用户边说话，系统能周期性更新“当前理解”。
+- 用户边说话，系统能按时间间隔或批量阈值周期性更新“当前理解”。
 - 用户停止语音输入后，系统能提出不超过 3 个关键澄清问题。
-- 用户回答澄清问题后，需求状态会被更新。
+- 用户用语音回答澄清问题后，需求状态和需求文档会被更新。
+- 系统能形成一份面向用户确认的完整需求文档。
 - 用户确认前不会触发 Coding Agent。
 - 用户确认后能生成可用于 Phase 4 的 Coding Prompt。
-- LLM provider 配置缺失时，UI 有明确诊断，不影响 Mock 流程。
+- LLM provider 配置缺失时，UI 有明确诊断，不能静默降级到假结果。
 - API key 不进入前端代码、前端状态、日志或文档。
-- `mock` LLM provider 可在无网络、无真实 API key 时完成状态机联调。
-- 普通测试不依赖真实 LLM 服务。
+- Phase 3 验收使用真实 OpenAI-compatible API。
 
 ## 风险
 
@@ -410,3 +425,4 @@ LlmProviderDiagnostic
 - 增量总结可能漂移，需要保留 utterance 原文用于回溯。
 - OpenAI-compatible provider 的兼容程度不同，`response_format`、streaming、错误格式可能不一致。
 - 如果 LLM 输出非法 JSON，必须失败得清楚，不能静默改坏需求状态。
+- 不做 mock LLM 会让本地验收依赖真实 API key 和网络；普通测试应集中覆盖纯状态机和 JSON parser，不测试真实模型质量。

@@ -25,6 +25,14 @@ type VoiceSessionState = {
   error?: string;
 };
 
+export type VoiceSessionController = VoiceSessionState & {
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  toggle: () => void;
+  recording: boolean;
+  busy: boolean;
+};
+
 const DEFAULT_AUDIO_CHUNK_SIZE_BYTES = 6400;
 const IFLYTEK_LLM_AUDIO_CHUNK_SIZE_BYTES = 1280;
 
@@ -35,7 +43,7 @@ const initialVoiceState: VoiceSessionState = {
   segments: []
 };
 
-export function useVoiceSession() {
+export function useVoiceSession(): VoiceSessionController {
   const [state, setState] = useState<VoiceSessionState>(initialVoiceState);
   const captureRef = useRef<VoiceCaptureController | null>(null);
   const sessionRequestRef = useRef(0);

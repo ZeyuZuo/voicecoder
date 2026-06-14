@@ -1,11 +1,16 @@
-import { useEffect, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type {
+  RequirementQuestion,
   RequirementState,
   RequirementUtterance,
   VoiceRequirementSession,
+  VoiceSessionStatus,
   VoiceTranscriptSegment
 } from "../types/app";
 import { createId } from "./project";
+
+const LIVE_SUMMARY_UTTERANCE_BATCH = 3;
+const LIVE_SUMMARY_DEBOUNCE_MS = 7000;
 
 export type RequirementSessionAction =
   | {
@@ -17,14 +22,43 @@ export type RequirementSessionAction =
       type: "append_voice_transcript";
       segment: VoiceTranscriptSegment;
       now: string;
+      source?: RequirementUtterance["source"];
+    }
+  | {
+      type: "mark_live_summarizing";
+      now: string;
+    }
+  | {
+      type: "apply_live_summary";
+      now: string;
+    }
+  | {
+      type: "finish_collection";
+      now: string;
+    }
+  | {
+      type: "mark_finishing";
+      now: string;
+    }
+  | {
+      type: "confirm_requirement";
+      now: string;
     };
+
+export type VoiceRequirementController = {
+  session?: VoiceRequirementSession;
+  active: boolean;
+  finishCollection: () => void;
+  confirmRequirement: () => void;
+};
 
 export function createRequirementState(now: string): RequirementState {
   return {
     id: createId("requirement"),
-    status: "collecting",
+    status: "voice_collecting",
     utterances: [],
     summary: "",
+    requirementDocument: "",
     confirmedFacts: [],
     constraints: [],
     openQuestions: [],
@@ -59,14 +93,103 @@ export function requirementSessionReducer(
       voiceSessionIds: appendUnique(session.voiceSessionIds, action.voiceSessionId),
       requirementState: {
         ...session.requirementState,
-        status: "collecting",
+        status: "voice_collecting",
+        pendingAction: undefined,
         updatedAt: action.now
       },
       endedAt: undefined
     };
   }
 
+  if (!session) {
+    return undefined;
+  }
+
+  if (action.type === "mark_live_summarizing") {
+    return {
+      ...session,
+      requirementState: {
+        ...session.requirementState,
+        status: "live_summarizing",
+        pendingAction: "summarize",
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "apply_live_summary") {
+    const nextState = createLocalRequirementUnderstanding(session.requirementState, action.now);
+
+    return {
+      ...session,
+      requirementState: {
+        ...nextState,
+        status: session.requirementState.status === "live_summarizing" ? "voice_collecting" : nextState.status,
+        pendingAction: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "mark_finishing") {
+    return {
+      ...session,
+      requirementState: {
+        ...session.requirementState,
+        status: "finishing",
+        pendingAction: "finish",
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "finish_collection") {
+    const nextState = createLocalRequirementUnderstanding(session.requirementState, action.now);
+    const needsClarification = nextState.utterances.length > 0 && nextState.acceptanceCriteria.length === 0;
+    const openQuestions: RequirementQuestion[] = needsClarification
+      ? [
+          {
+            id: createId("question"),
+            question: "这次需求完成后，最重要的验收标准是什么？",
+            reason: "缺少验收标准会影响后续实现范围和测试方式。",
+            blocksCoding: true
+          }
+        ]
+      : nextState.openQuestions;
+
+    return {
+      ...session,
+      endedAt: action.now,
+      requirementState: {
+        ...nextState,
+        openQuestions,
+        status: openQuestions.some((question) => question.blocksCoding) ? "clarifying" : "requirement_ready",
+        pendingAction: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "confirm_requirement") {
+    const nextState = createLocalRequirementUnderstanding(session.requirementState, action.now);
+
+    return {
+      ...session,
+      requirementState: {
+        ...nextState,
+        status: "confirmed",
+        codingPrompt: createLocalCodingPrompt(nextState),
+        pendingAction: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
   if (!action.segment.isFinal) {
+    return session;
+  }
+
+  if (!session.voiceSessionIds.includes(action.segment.sessionId)) {
     return session;
   }
 
@@ -75,17 +198,17 @@ export function requirementSessionReducer(
     return session;
   }
 
-  const nextSession = session ?? createVoiceRequirementSession(action.segment.sessionId, action.now);
-  const utterance = transcriptSegmentToUtterance(action.segment, text);
-  const utterances = upsertUtteranceByTranscriptId(nextSession.requirementState.utterances, utterance);
+  const utterance = transcriptSegmentToUtterance(action.segment, text, action.source ?? getUtteranceSourceForState(session.requirementState));
+  const utterances = upsertUtteranceByTranscriptId(session.requirementState.utterances, utterance);
 
   return {
-    ...nextSession,
-    voiceSessionIds: appendUnique(nextSession.voiceSessionIds, action.segment.sessionId),
+    ...session,
     requirementState: {
-      ...nextSession.requirementState,
-      status: "collecting",
+      ...session.requirementState,
+      status: session.requirementState.status === "clarifying" ? "voice_collecting" : session.requirementState.status,
       utterances,
+      codingPrompt: undefined,
+      pendingAction: undefined,
       updatedAt: action.now
     }
   };
@@ -93,9 +216,18 @@ export function requirementSessionReducer(
 
 export function useVoiceRequirementSession(voice: {
   sessionId?: string;
+  status: VoiceSessionStatus;
   segments: VoiceTranscriptSegment[];
-}) {
+}): VoiceRequirementController {
   const [session, dispatch] = useReducer(requirementSessionReducer, undefined);
+  const sessionRef = useRef<VoiceRequirementSession | undefined>(undefined);
+  const processedSegmentTextsRef = useRef<Map<string, string>>(new Map());
+  const lastSummarizedUtteranceCountRef = useRef(0);
+  const summaryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>();
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   useEffect(() => {
     if (!voice.sessionId) {
@@ -111,6 +243,16 @@ export function useVoiceRequirementSession(voice: {
 
   useEffect(() => {
     for (const segment of voice.segments) {
+      if (!segment.isFinal) {
+        continue;
+      }
+
+      const processedText = processedSegmentTextsRef.current.get(segment.id);
+      if (processedText === segment.text) {
+        continue;
+      }
+
+      processedSegmentTextsRef.current.set(segment.id, segment.text);
       dispatch({
         type: "append_voice_transcript",
         segment,
@@ -119,13 +261,100 @@ export function useVoiceRequirementSession(voice: {
     }
   }, [voice.segments]);
 
-  return session;
+  const applyLiveSummary = useCallback(() => {
+    const currentSession = sessionRef.current;
+    if (!currentSession?.requirementState.utterances.length) {
+      return;
+    }
+
+    dispatch({
+      type: "mark_live_summarizing",
+      now: nowString()
+    });
+
+    window.setTimeout(() => {
+      const latestSession = sessionRef.current;
+      if (!latestSession) {
+        return;
+      }
+
+      lastSummarizedUtteranceCountRef.current = latestSession.requirementState.utterances.length;
+      dispatch({
+        type: "apply_live_summary",
+        now: nowString()
+      });
+    }, 420);
+  }, []);
+
+  useEffect(() => {
+    if (!session || session.requirementState.status === "confirmed") {
+      return;
+    }
+
+    const utteranceCount = session.requirementState.utterances.length;
+    const unsummarizedCount = utteranceCount - lastSummarizedUtteranceCountRef.current;
+    if (unsummarizedCount <= 0 || session.requirementState.pendingAction) {
+      return;
+    }
+
+    if (unsummarizedCount >= LIVE_SUMMARY_UTTERANCE_BATCH) {
+      clearSummaryTimer(summaryTimerRef.current);
+      summaryTimerRef.current = undefined;
+      applyLiveSummary();
+      return;
+    }
+
+    clearSummaryTimer(summaryTimerRef.current);
+    summaryTimerRef.current = setTimeout(applyLiveSummary, LIVE_SUMMARY_DEBOUNCE_MS);
+
+    return () => {
+      clearSummaryTimer(summaryTimerRef.current);
+    };
+  }, [applyLiveSummary, session]);
+
+  const finishCollection = useCallback(() => {
+    clearSummaryTimer(summaryTimerRef.current);
+    summaryTimerRef.current = undefined;
+    lastSummarizedUtteranceCountRef.current = sessionRef.current?.requirementState.utterances.length ?? 0;
+    dispatch({
+      type: "mark_finishing",
+      now: nowString()
+    });
+
+    window.setTimeout(() => {
+      dispatch({
+        type: "finish_collection",
+        now: nowString()
+      });
+    }, 360);
+  }, []);
+
+  const confirmRequirement = useCallback(() => {
+    dispatch({
+      type: "confirm_requirement",
+      now: nowString()
+    });
+  }, []);
+
+  return useMemo(
+    () => ({
+      session,
+      active: Boolean(session),
+      finishCollection,
+      confirmRequirement
+    }),
+    [confirmRequirement, finishCollection, session]
+  );
 }
 
-function transcriptSegmentToUtterance(segment: VoiceTranscriptSegment, text: string): RequirementUtterance {
+function transcriptSegmentToUtterance(
+  segment: VoiceTranscriptSegment,
+  text: string,
+  source: RequirementUtterance["source"]
+): RequirementUtterance {
   return {
     id: `utterance_${segment.id}`,
-    source: "voice",
+    source,
     speakerId: segment.speakerId,
     text,
     createdAt: segment.createdAt,
@@ -155,6 +384,77 @@ function upsertUtteranceByTranscriptId(utterances: RequirementUtterance[], utter
 
 function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
+}
+
+function createLocalRequirementUnderstanding(state: RequirementState, now: string): RequirementState {
+  const texts = state.utterances.map((utterance) => utterance.text.trim()).filter(Boolean);
+  const summary = createLocalSummary(texts);
+  const acceptanceCriteria = state.acceptanceCriteria.length
+    ? state.acceptanceCriteria
+    : deriveAcceptanceCriteria(texts);
+
+  return {
+    ...state,
+    summary,
+    requirementDocument: createLocalRequirementDocument(summary, texts, acceptanceCriteria),
+    confirmedFacts: texts.slice(0, 4),
+    acceptanceCriteria,
+    updatedAt: now
+  };
+}
+
+function createLocalSummary(texts: string[]) {
+  if (!texts.length) {
+    return "等待语音输入。";
+  }
+
+  const joined = texts.join(" ");
+  return joined.length > 180 ? `${joined.slice(0, 180)}...` : joined;
+}
+
+function createLocalRequirementDocument(summary: string, texts: string[], acceptanceCriteria: string[]) {
+  if (!texts.length) {
+    return "";
+  }
+
+  const sections = [
+    `目标：${summary}`,
+    `原始语音要点：\n${texts.slice(-6).map((text) => `- ${text}`).join("\n")}`
+  ];
+
+  if (acceptanceCriteria.length) {
+    sections.push(`验收标准：\n${acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`);
+  }
+
+  return sections.join("\n\n");
+}
+
+function deriveAcceptanceCriteria(texts: string[]) {
+  const joined = texts.join(" ");
+  if (!joined) {
+    return [];
+  }
+
+  if (/验收|测试|通过|完成|效果|标准/.test(joined)) {
+    return ["按用户语音描述的关键行为完成实现，并保留可验证的验收结果。"];
+  }
+
+  return [];
+}
+
+function createLocalCodingPrompt(state: RequirementState) {
+  const document = state.requirementDocument || state.summary;
+  return `请根据以下已确认需求进行实现：\n\n${document}`;
+}
+
+function getUtteranceSourceForState(state: RequirementState): RequirementUtterance["source"] {
+  return state.status === "clarifying" ? "clarification_answer" : "voice";
+}
+
+function clearSummaryTimer(timer: ReturnType<typeof setTimeout> | undefined) {
+  if (timer) {
+    clearTimeout(timer);
+  }
 }
 
 function nowString() {
