@@ -103,6 +103,16 @@ export type LlmProviderDiagnostic = {
   error?: string;
 };
 
+export type LlmConnectionTestResult = {
+  ok: boolean;
+  provider: Exclude<LlmProviderKind, "auto">;
+  model?: string;
+  endpoint?: string;
+  durationMs: number;
+  response?: unknown;
+  error?: string;
+};
+
 export type VoiceSessionSnapshot = {
   active: boolean;
   sessionId?: string;
@@ -139,6 +149,23 @@ export type RequirementQuestion = {
   answer?: string;
 };
 
+export type RequirementProcessingResult = {
+  summary: string;
+  requirementDocumentDraft: string;
+  confirmedFacts: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+  questions: Array<Omit<RequirementQuestion, "id"> & { id?: string }>;
+  readyToConfirm: boolean;
+};
+
+export type RequirementSummaryResult = {
+  summary: string;
+  uncertainties: string[];
+};
+
 export type RequirementState = {
   id: string;
   status: RequirementStatus;
@@ -155,6 +182,7 @@ export type RequirementState = {
   risks: string[];
   codingPrompt?: string;
   pendingAction?: RequirementPendingAction;
+  error?: string;
   updatedAt: string;
 };
 

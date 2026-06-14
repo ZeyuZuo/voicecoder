@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type {
+  RequirementProcessingResult,
   RequirementQuestion,
   RequirementState,
+  RequirementSummaryResult,
   RequirementUtterance,
   VoiceRequirementSession,
   VoiceSessionStatus,
@@ -9,8 +11,7 @@ import type {
 } from "../types/app";
 import { createId } from "./project";
 
-const LIVE_SUMMARY_UTTERANCE_BATCH = 3;
-const LIVE_SUMMARY_DEBOUNCE_MS = 7000;
+const LIVE_SUMMARY_INTERVAL_MS = 30000;
 
 export type RequirementSessionAction =
   | {
@@ -31,14 +32,30 @@ export type RequirementSessionAction =
   | {
       type: "apply_live_summary";
       now: string;
+      requirementId: string;
+      result: RequirementSummaryResult;
+    }
+  | {
+      type: "apply_live_summary_error";
+      now: string;
+      requirementId: string;
+      error: string;
     }
   | {
       type: "mark_processing";
       now: string;
     }
   | {
-      type: "process_user_turn";
+      type: "apply_process_result";
       now: string;
+      requirementId: string;
+      result: RequirementProcessingResult;
+    }
+  | {
+      type: "apply_process_error";
+      now: string;
+      requirementId: string;
+      error: string;
     }
   | {
       type: "confirm_requirement";
@@ -73,6 +90,7 @@ export function createRequirementState(now: string): RequirementState {
     acceptanceCriteria: [],
     outOfScope: [],
     risks: [],
+    error: undefined,
     updatedAt: now
   };
 }
@@ -123,19 +141,46 @@ export function requirementSessionReducer(
       requirementState: {
         ...session.requirementState,
         pendingAction: "summarize",
+        error: undefined,
         updatedAt: action.now
       }
     };
   }
 
   if (action.type === "apply_live_summary") {
-    const nextState = createLocalRequirementUnderstanding(session.requirementState, action.now);
+    if (
+      action.requirementId !== session.requirementState.id ||
+      !["collecting", "clarifying"].includes(session.requirementState.status)
+    ) {
+      return session;
+    }
 
     return {
       ...session,
       requirementState: {
-        ...nextState,
+        ...session.requirementState,
+        summary: action.result.summary,
+        risks: mergeUnique(session.requirementState.risks, action.result.uncertainties),
         pendingAction: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "apply_live_summary_error") {
+    if (
+      action.requirementId !== session.requirementState.id ||
+      !["collecting", "clarifying"].includes(session.requirementState.status)
+    ) {
+      return session;
+    }
+
+    return {
+      ...session,
+      requirementState: {
+        ...session.requirementState,
+        pendingAction: undefined,
+        error: action.error,
         updatedAt: action.now
       }
     };
@@ -148,40 +193,74 @@ export function requirementSessionReducer(
         ...session.requirementState,
         status: "processing",
         pendingAction: "process",
+        error: undefined,
         updatedAt: action.now
       }
     };
   }
 
-  if (action.type === "process_user_turn") {
-    const nextState = createLocalRequirementUnderstanding(session.requirementState, action.now);
-    const needsClarification = nextState.utterances.length > 0 && nextState.acceptanceCriteria.length === 0;
-    const openQuestions: RequirementQuestion[] = needsClarification ? getNextClarificationQuestions(nextState) : [];
+  if (action.type === "apply_process_result") {
+    if (action.requirementId !== session.requirementState.id) {
+      return session;
+    }
+
+    const openQuestions = action.result.questions.map((question) => ({
+      id: question.id || createId("question"),
+      question: question.question,
+      reason: question.reason,
+      blocksCoding: question.blocksCoding,
+      answer: question.answer
+    }));
+    const hasBlockingQuestion = openQuestions.some((question) => question.blocksCoding);
 
     return {
       ...session,
       endedAt: action.now,
       requirementState: {
-        ...nextState,
+        ...session.requirementState,
+        summary: action.result.summary,
+        requirementDocument: action.result.requirementDocumentDraft,
+        confirmedFacts: action.result.confirmedFacts,
+        constraints: action.result.constraints,
+        acceptanceCriteria: action.result.acceptanceCriteria,
+        outOfScope: action.result.outOfScope,
+        risks: action.result.risks,
         openQuestions,
         activeQuestionId: openQuestions.find((question) => question.blocksCoding)?.id,
-        status: openQuestions.some((question) => question.blocksCoding) ? "clarifying" : "ready_to_confirm",
+        status: action.result.readyToConfirm && !hasBlockingQuestion ? "ready_to_confirm" : "clarifying",
         pendingAction: undefined,
+        error: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "apply_process_error") {
+    if (action.requirementId !== session.requirementState.id) {
+      return session;
+    }
+
+    return {
+      ...session,
+      requirementState: {
+        ...session.requirementState,
+        status: session.requirementState.openQuestions.some((question) => question.blocksCoding) ? "clarifying" : "collecting",
+        pendingAction: undefined,
+        error: action.error,
         updatedAt: action.now
       }
     };
   }
 
   if (action.type === "confirm_requirement") {
-    const nextState = createLocalRequirementUnderstanding(session.requirementState, action.now);
-
     return {
       ...session,
       requirementState: {
-        ...nextState,
+        ...session.requirementState,
         status: "confirmed",
-        codingPrompt: createLocalCodingPrompt(nextState),
+        codingPrompt: createCodingPromptFromConfirmedRequirement(session.requirementState),
         pendingAction: undefined,
+        error: undefined,
         updatedAt: action.now
       }
     };
@@ -217,6 +296,7 @@ export function requirementSessionReducer(
       answeredQuestions: nextAnsweredQuestions,
       codingPrompt: undefined,
       pendingAction: undefined,
+      error: undefined,
       updatedAt: action.now
     }
   };
@@ -232,6 +312,8 @@ export function useVoiceRequirementSession(voice: {
   const processedSegmentTextsRef = useRef<Map<string, string>>(new Map());
   const lastSummarizedUtteranceCountRef = useRef(0);
   const summaryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>();
+  const liveSummaryRequestRef = useRef(0);
+  const processRequestRef = useRef(0);
 
   useEffect(() => {
     sessionRef.current = session;
@@ -280,22 +362,49 @@ export function useVoiceRequirementSession(voice: {
       now: nowString()
     });
 
-    window.setTimeout(() => {
-      const latestSession = sessionRef.current;
-      if (!latestSession) {
-        return;
-      }
+    const requestId = liveSummaryRequestRef.current + 1;
+    liveSummaryRequestRef.current = requestId;
+    const requirementId = currentSession.requirementState.id;
 
-      lastSummarizedUtteranceCountRef.current = latestSession.requirementState.utterances.length;
-      dispatch({
-        type: "apply_live_summary",
-        now: nowString()
+    void invokeTauri<RequirementSummaryResult>("summarize_requirement_state", {
+      request: {
+        state: currentSession.requirementState
+      }
+    })
+      .then((result) => {
+        if (liveSummaryRequestRef.current !== requestId) {
+          return;
+        }
+
+        const latestSession = sessionRef.current;
+        if (!latestSession || latestSession.requirementState.id !== requirementId) {
+          return;
+        }
+
+        lastSummarizedUtteranceCountRef.current = latestSession.requirementState.utterances.length;
+        dispatch({
+          type: "apply_live_summary",
+          requirementId,
+          result,
+          now: nowString()
+        });
+      })
+      .catch((error) => {
+        if (liveSummaryRequestRef.current !== requestId) {
+          return;
+        }
+
+        dispatch({
+          type: "apply_live_summary_error",
+          requirementId,
+          error: toErrorMessage(error),
+          now: nowString()
+        });
       });
-    }, 420);
   }, []);
 
   useEffect(() => {
-    if (!session || session.requirementState.status === "confirmed") {
+    if (!session || session.requirementState.status === "processing" || session.requirementState.status === "ready_to_confirm" || session.requirementState.status === "confirmed") {
       return;
     }
 
@@ -305,15 +414,8 @@ export function useVoiceRequirementSession(voice: {
       return;
     }
 
-    if (unsummarizedCount >= LIVE_SUMMARY_UTTERANCE_BATCH) {
-      clearSummaryTimer(summaryTimerRef.current);
-      summaryTimerRef.current = undefined;
-      applyLiveSummary();
-      return;
-    }
-
     clearSummaryTimer(summaryTimerRef.current);
-    summaryTimerRef.current = setTimeout(applyLiveSummary, LIVE_SUMMARY_DEBOUNCE_MS);
+    summaryTimerRef.current = setTimeout(applyLiveSummary, LIVE_SUMMARY_INTERVAL_MS);
 
     return () => {
       clearSummaryTimer(summaryTimerRef.current);
@@ -323,18 +425,56 @@ export function useVoiceRequirementSession(voice: {
   const finishUserTurn = useCallback(() => {
     clearSummaryTimer(summaryTimerRef.current);
     summaryTimerRef.current = undefined;
-    lastSummarizedUtteranceCountRef.current = sessionRef.current?.requirementState.utterances.length ?? 0;
+    const currentSession = sessionRef.current;
+    if (!currentSession) {
+      return;
+    }
+
+    liveSummaryRequestRef.current += 1;
+    const requirementId = currentSession.requirementState.id;
+    lastSummarizedUtteranceCountRef.current = currentSession.requirementState.utterances.length;
     dispatch({
       type: "mark_processing",
       now: nowString()
     });
 
-    window.setTimeout(() => {
-      dispatch({
-        type: "process_user_turn",
-        now: nowString()
+    const requestId = processRequestRef.current + 1;
+    processRequestRef.current = requestId;
+    const processingState: RequirementState = {
+      ...currentSession.requirementState,
+      status: "processing",
+      pendingAction: "process"
+    };
+
+    void invokeTauri<RequirementProcessingResult>("process_requirement_turn", {
+      request: {
+        state: processingState
+      }
+    })
+      .then((result) => {
+        if (processRequestRef.current !== requestId) {
+          return;
+        }
+
+        dispatch({
+          type: "apply_process_result",
+          requirementId,
+          result,
+          now: nowString()
+        });
+      })
+      .catch((error) => {
+        if (processRequestRef.current !== requestId) {
+          return;
+        }
+
+        dispatch({
+          type: "apply_process_error",
+          requirementId,
+          error: toErrorMessage(error),
+          now: nowString()
+        });
       });
-    }, 360);
   }, []);
 
   const confirmRequirement = useCallback(() => {
@@ -449,88 +589,14 @@ function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
 }
 
-function createLocalRequirementUnderstanding(state: RequirementState, now: string): RequirementState {
-  const texts = state.utterances.map((utterance) => utterance.text.trim()).filter(Boolean);
-  const clarificationAnswers = state.utterances
-    .filter((utterance) => utterance.source === "clarification_answer")
-    .map((utterance) => utterance.text.trim())
-    .filter(Boolean);
-  const summary = createLocalSummary(texts);
-  const acceptanceCriteria = state.acceptanceCriteria.length
-    ? state.acceptanceCriteria
-    : deriveAcceptanceCriteria(texts, clarificationAnswers);
-
-  return {
-    ...state,
-    summary,
-    requirementDocument: createLocalRequirementDocument(summary, texts, acceptanceCriteria),
-    confirmedFacts: texts.slice(0, 4),
-    acceptanceCriteria,
-    updatedAt: now
-  };
+function mergeUnique(current: string[], incoming: string[]) {
+  return incoming.reduce((values, value) => {
+    const trimmed = value.trim();
+    return trimmed && !values.includes(trimmed) ? [...values, trimmed] : values;
+  }, current);
 }
 
-function createLocalSummary(texts: string[]) {
-  if (!texts.length) {
-    return "等待语音输入。";
-  }
-
-  const joined = texts.join(" ");
-  return joined.length > 180 ? `${joined.slice(0, 180)}...` : joined;
-}
-
-function createLocalRequirementDocument(summary: string, texts: string[], acceptanceCriteria: string[]) {
-  if (!texts.length) {
-    return "";
-  }
-
-  const sections = [
-    `目标：${summary}`,
-    `原始语音要点：\n${texts.slice(-6).map((text) => `- ${text}`).join("\n")}`
-  ];
-
-  if (acceptanceCriteria.length) {
-    sections.push(`验收标准：\n${acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`);
-  }
-
-  return sections.join("\n\n");
-}
-
-function deriveAcceptanceCriteria(texts: string[], clarificationAnswers: string[]) {
-  const latestClarificationAnswer = clarificationAnswers[clarificationAnswers.length - 1];
-  if (latestClarificationAnswer) {
-    return [`用户补充的关键验收标准：${latestClarificationAnswer}`];
-  }
-
-  const joined = texts.join(" ");
-  if (!joined) {
-    return [];
-  }
-
-  if (/验收|测试|通过|完成|效果|标准/.test(joined)) {
-    return ["按用户语音描述的关键行为完成实现，并保留可验证的验收结果。"];
-  }
-
-  return [];
-}
-
-function getNextClarificationQuestions(state: RequirementState) {
-  const existingBlockingQuestions = state.openQuestions.filter((question) => question.blocksCoding);
-  if (existingBlockingQuestions.length) {
-    return existingBlockingQuestions.slice(0, 3);
-  }
-
-  return [
-    {
-      id: createId("question"),
-      question: "这次需求完成后，最重要的验收标准是什么？",
-      reason: "缺少验收标准会影响后续实现范围和测试方式。",
-      blocksCoding: true
-    }
-  ];
-}
-
-function createLocalCodingPrompt(state: RequirementState) {
+function createCodingPromptFromConfirmedRequirement(state: RequirementState) {
   const document = state.requirementDocument || state.summary;
   return `请根据以下已确认需求进行实现：\n\n${document}`;
 }
@@ -543,4 +609,25 @@ function clearSummaryTimer(timer: ReturnType<typeof setTimeout> | undefined) {
 
 function nowString() {
   return Date.now().toString();
+}
+
+async function invokeTauri<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  const tauri = await import("@tauri-apps/api/core");
+  if (!tauri.isTauri()) {
+    throw new Error("真实 LLM 需要在 Tauri 客户端中使用。");
+  }
+
+  return tauri.invoke<T>(command, args);
+}
+
+function toErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "LLM 处理失败，请检查 provider 配置和网络。";
 }

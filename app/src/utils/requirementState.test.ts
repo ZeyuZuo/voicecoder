@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { RequirementState, VoiceRequirementSession, VoiceTranscriptSegment } from "../types/app";
+import type {
+  RequirementProcessingResult,
+  RequirementState,
+  VoiceRequirementSession,
+  VoiceTranscriptSegment
+} from "../types/app";
 import {
   createVoiceRequirementSession,
   getVoiceInputPermission,
@@ -88,7 +93,18 @@ test("unclear processing result enters clarification loop", () => {
     now: "2"
   });
   const processing = requirementSessionReducer(withTranscript, {
-    type: "process_user_turn",
+    type: "apply_process_result",
+    requirementId: withTranscript?.requirementState.id ?? "",
+    result: processingResult({
+      readyToConfirm: false,
+      questions: [
+        {
+          question: "这个语音需求功能最重要的验收标准是什么？",
+          reason: "缺少验收标准会影响实现范围。",
+          blocksCoding: true
+        }
+      ]
+    }),
     now: "3"
   });
 
@@ -115,12 +131,35 @@ test("clarification answer can resolve loop into ready to confirm", () => {
     now: "2"
   });
   const processed = requirementSessionReducer(withAnswer, {
-    type: "process_user_turn",
+    type: "apply_process_result",
+    requirementId: withAnswer?.requirementState.id ?? "",
+    result: processingResult({
+      readyToConfirm: true,
+      questions: [],
+      acceptanceCriteria: ["必须展示需求文档并且确认前不能编码"]
+    }),
     now: "3"
   });
 
   assert.equal(processed?.requirementState.status, "ready_to_confirm");
   assert.equal(processed?.requirementState.openQuestions.length, 0);
+});
+
+test("processing errors restore the previous voice input mode", () => {
+  const collecting = createVoiceRequirementSession("voice-1", "1");
+  const processing = requirementSessionReducer(collecting, {
+    type: "mark_processing",
+    now: "2"
+  });
+  const failed = requirementSessionReducer(processing, {
+    type: "apply_process_error",
+    requirementId: processing?.requirementState.id ?? "",
+    error: "LLM 请求失败",
+    now: "3"
+  });
+
+  assert.equal(failed?.requirementState.status, "collecting");
+  assert.equal(failed?.requirementState.error, "LLM 请求失败");
 });
 
 test("voice input permission is centralized by requirement state", () => {
@@ -210,5 +249,20 @@ function finalSegment(sessionId: string, id: string, text: string): VoiceTranscr
     text,
     isFinal: true,
     createdAt: "1"
+  };
+}
+
+function processingResult(overrides: Partial<RequirementProcessingResult> = {}): RequirementProcessingResult {
+  return {
+    summary: "实现语音需求确认流程",
+    requirementDocumentDraft: "目标：实现语音需求确认流程。",
+    confirmedFacts: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    outOfScope: [],
+    risks: [],
+    questions: [],
+    readyToConfirm: false,
+    ...overrides
   };
 }

@@ -280,6 +280,8 @@ Content-Type: application/json
 - 如果某些 provider 不支持 `response_format`，允许配置关闭严格 JSON mode。
 - 后端必须对 LLM 输出做 JSON parse 和 schema 校验。
 - JSON parse 失败时不能污染当前需求状态，应返回错误给 UI。
+- `complete_json` 统一处理 timeout、HTTP 错误、OpenAI-compatible error body、`choices[0].message.content` 提取、markdown JSON fence 清理和 JSON object 校验。
+- `test_llm_provider_connection` 使用同一条 `complete_json` 路径发起极小健康检查，要求模型返回 `{ "ok": true }`，不读取或修改前端需求状态。
 
 ## LLM 任务类型
 
@@ -308,11 +310,14 @@ Content-Type: application/json
 
 触发条件：
 
-- 新增 final transcript 达到 2-3 条。
-- 距离上次总结超过 5-8 秒。
-- 用户持续停顿超过 2-3 秒且存在新增 final transcript。
+- 第一版先采用 30 秒定时总结：有新增 final transcript 且没有其它 LLM 请求在运行时，每 30 秒尝试更新一次“小云朵”当前理解。
 - 用户点击“我说完了”。
-- 用户点击“整理需求”。
+
+约束：
+
+- 小云朵总结是旁路理解，只能更新 `summary` 和非阻塞不确定性提示。
+- 小云朵总结不能生成澄清问题，不能进入 `clarifying`，不能进入 `ready_to_confirm`。
+- 用户点击“我说完了 / 回答完了”后，前端应取消等待中的小云朵计时，进入正式 `process_requirement_turn`。
 
 ### 2. 需求处理与澄清判断
 
@@ -409,7 +414,8 @@ Content-Type: application/json
 
 ```text
 get_llm_provider_status() -> LlmProviderStatus
-summarize_requirement_state(request) -> RequirementStatePatch
+test_llm_provider_connection() -> LlmConnectionTestResult
+summarize_requirement_state(request) -> RequirementSummaryResult
 process_requirement_turn(request) -> RequirementProcessingResult
 finalize_requirement_document(request) -> RequirementFinalizationResult
 ```
@@ -445,15 +451,15 @@ LlmProviderStatus
 - [ ] Step 3：点击麦克风后切换到语音需求采集工作台，隐藏或禁用普通文本输入。
 - [ ] Step 4：实现语音工作台 UI，展示实时转写、当前理解、需求文档草稿、澄清问题、验收标准和 Coding Prompt 只读草稿。
 - [x] Step 5：新增 Rust `llm` 模块，抽出 `LlmProvider`、`LlmProviderDiagnostic` 和 provider registry。
-- [ ] Step 6：实现真实 `openai_compatible` LLM provider，支持 base URL、API key、model、temperature、timeout。
+- [x] Step 6：实现真实 `openai_compatible` LLM provider，支持 base URL、API key、model、temperature、timeout。
 - [x] Step 7：新增 `get_llm_provider_status` 命令，前端可显示 LLM 配置状态和缺失环境变量。
-- [ ] Step 8：实现 `summarize_requirement_state` 命令，输入当前状态和新增 utterances，输出结构化 patch。
-- [ ] Step 9：实现 `process_requirement_turn` 命令，统一返回 summary、需求草稿、澄清问题和 readyToConfirm。
+- [x] Step 8：实现 `summarize_requirement_state` 命令，输入当前状态和新增 utterances，输出结构化 patch。
+- [x] Step 9：实现 `process_requirement_turn` 命令，统一返回 summary、需求草稿、澄清问题和 readyToConfirm。
 - [ ] Step 10：实现 `finalize_requirement_document` 命令，生成完整需求文档和确认版 Coding Prompt。
-- [ ] Step 11：增加 LLM JSON 输出 schema 校验和错误恢复，避免坏响应污染当前状态。
-- [ ] Step 12：增加 debounce / batching 策略，避免每条 transcript 都调用 LLM。
-- [ ] Step 13：把“我说完了 / 回答完了”接到 `processing`，支持 `clarifying -> processing -> clarifying` 的确认循环，但不自动确认、不自动编码。
-- [ ] Step 14：补充单元测试：状态机 reducer、防误操作规则、LLM JSON parser、provider diagnostics、OpenAI-compatible 响应 parser。
+- [x] Step 11：增加 LLM JSON 输出 schema 校验和错误恢复，避免坏响应污染当前状态。
+- [x] Step 12：增加 debounce / batching 策略，避免每条 transcript 都调用 LLM。
+- [x] Step 13：把“我说完了 / 回答完了”接到 `processing`，支持 `clarifying -> processing -> clarifying` 的确认循环，但不自动确认、不自动编码。
+- [x] Step 14：补充单元测试：状态机 reducer、防误操作规则、LLM JSON parser、provider diagnostics、OpenAI-compatible 响应 parser。
 - [ ] Step 15：补充 Phase 3 验收文档，记录真实 LLM provider 的配置和验收流程。
 
 ## 验收标准

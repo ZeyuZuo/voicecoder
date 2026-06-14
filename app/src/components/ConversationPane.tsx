@@ -94,6 +94,7 @@ function VoiceRequirementWorkspace({
         </div>
 
         {voice.error ? <p className="voice-workspace-error">{voice.error}</p> : null}
+        {state?.error ? <p className="voice-workspace-error">{state.error}</p> : null}
         {missingProviderEnv.length ? (
           <p className="voice-workspace-note">缺少{getProviderLabel(voiceProvider)}配置：{missingProviderEnv.join("、")}</p>
         ) : null}
