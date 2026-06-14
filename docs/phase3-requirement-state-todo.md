@@ -233,6 +233,7 @@ VOICECODER_LLM_API_KEY=
 VOICECODER_LLM_MODEL=
 VOICECODER_LLM_TEMPERATURE=0.2
 VOICECODER_LLM_TIMEOUT_SECS=30
+VOICECODER_LLM_STRICT_JSON_MODE=true
 ```
 
 约定：
@@ -426,15 +427,26 @@ LlmProviderDiagnostic
   └─ error
 ```
 
+`get_llm_provider_status` 额外返回当前 resolved provider 的可用性：
+
+```text
+LlmProviderStatus
+  ├─ auto_provider
+  ├─ provider_override
+  ├─ active_provider_configured
+  ├─ active_provider_error
+  └─ diagnostics
+```
+
 ## 开发 Todo
 
 - [ ] Step 1：更新 Phase 3 TypeScript 类型：`VoiceRequirementSession`、`RequirementUtterance`、`RequirementState`、`RequirementQuestion`、`requirementDocument`、`activeQuestionId`、`pendingAction`。
 - [ ] Step 2：实现前端 requirement reducer，让语音 final transcript 只进入当前 active `VoiceRequirementSession`。
 - [ ] Step 3：点击麦克风后切换到语音需求采集工作台，隐藏或禁用普通文本输入。
 - [ ] Step 4：实现语音工作台 UI，展示实时转写、当前理解、需求文档草稿、澄清问题、验收标准和 Coding Prompt 只读草稿。
-- [ ] Step 5：新增 Rust `llm` 模块，抽出 `LlmProvider`、`LlmProviderDiagnostic` 和 provider registry。
+- [x] Step 5：新增 Rust `llm` 模块，抽出 `LlmProvider`、`LlmProviderDiagnostic` 和 provider registry。
 - [ ] Step 6：实现真实 `openai_compatible` LLM provider，支持 base URL、API key、model、temperature、timeout。
-- [ ] Step 7：新增 `get_llm_provider_status` 命令，前端可显示 LLM 配置状态和缺失环境变量。
+- [x] Step 7：新增 `get_llm_provider_status` 命令，前端可显示 LLM 配置状态和缺失环境变量。
 - [ ] Step 8：实现 `summarize_requirement_state` 命令，输入当前状态和新增 utterances，输出结构化 patch。
 - [ ] Step 9：实现 `process_requirement_turn` 命令，统一返回 summary、需求草稿、澄清问题和 readyToConfirm。
 - [ ] Step 10：实现 `finalize_requirement_document` 命令，生成完整需求文档和确认版 Coding Prompt。

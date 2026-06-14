@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::{fs, path::Path};
 
+mod env_config;
+mod llm;
 mod voice;
 
 #[derive(Serialize)]
@@ -123,6 +125,7 @@ pub fn run() {
             voice::start_voice_session,
             voice::send_voice_audio_chunk,
             voice::get_voice_provider_status,
+            llm::get_llm_provider_status,
             voice::check_tencent_asr_config,
             voice::get_voice_session_snapshot,
             voice::stop_voice_session,

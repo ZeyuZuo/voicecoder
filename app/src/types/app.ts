@@ -83,6 +83,26 @@ export type VoiceProviderDiagnostic = {
   error?: string;
 };
 
+export type LlmProviderKind = "auto" | "openai_compatible";
+
+export type LlmProviderStatus = {
+  autoProvider: Exclude<LlmProviderKind, "auto">;
+  providerOverride?: LlmProviderKind;
+  activeProviderConfigured: boolean;
+  activeProviderError?: string;
+  diagnostics: LlmProviderDiagnostic[];
+};
+
+export type LlmProviderDiagnostic = {
+  provider: Exclude<LlmProviderKind, "auto">;
+  configured: boolean;
+  missingEnv: string[];
+  endpoint?: string;
+  model?: string;
+  details: Record<string, string>;
+  error?: string;
+};
+
 export type VoiceSessionSnapshot = {
   active: boolean;
   sessionId?: string;
