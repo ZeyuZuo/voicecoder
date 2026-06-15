@@ -8,6 +8,7 @@ const DEFAULT_LLM_TEMPERATURE: f32 = 0.2;
 const DEFAULT_LLM_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_STRICT_JSON_MODE: bool = true;
 const MAX_PROCESSING_QUESTIONS: usize = 3;
+const MAX_LIVE_GAPS: usize = 3;
 
 type LlmCompletionFuture<'a> =
     Pin<Box<dyn Future<Output = Result<LlmJsonResponse, String>> + Send + 'a>>;
@@ -92,12 +93,19 @@ pub struct RequirementSummaryRequest {
 pub struct RequirementProcessingResult {
     summary: String,
     requirement_document_draft: String,
+    #[serde(default)]
     confirmed_facts: Vec<String>,
+    #[serde(default)]
     constraints: Vec<String>,
+    #[serde(default)]
     acceptance_criteria: Vec<String>,
+    #[serde(default)]
     out_of_scope: Vec<String>,
+    #[serde(default)]
     risks: Vec<String>,
+    #[serde(default)]
     questions: Vec<RequirementQuestionPayload>,
+    #[serde(default = "default_ready_to_confirm")]
     ready_to_confirm: bool,
 }
 
@@ -105,6 +113,19 @@ pub struct RequirementProcessingResult {
 #[serde(rename_all = "camelCase")]
 pub struct RequirementSummaryResult {
     summary: String,
+    #[serde(default)]
+    confirmed_facts: Vec<String>,
+    #[serde(default)]
+    constraints: Vec<String>,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    out_of_scope: Vec<String>,
+    #[serde(default)]
+    risks: Vec<String>,
+    #[serde(default)]
+    open_gaps: Vec<RequirementGapPayload>,
+    #[serde(default)]
     uncertainties: Vec<String>,
 }
 
@@ -118,7 +139,11 @@ pub struct RequirementStatePayload {
     requirement_document: String,
     confirmed_facts: Vec<String>,
     constraints: Vec<String>,
+    #[serde(default)]
+    open_gaps: Vec<RequirementGapPayload>,
+    #[serde(default)]
     open_questions: Vec<RequirementQuestionPayload>,
+    #[serde(default)]
     answered_questions: Vec<RequirementQuestionPayload>,
     active_question_id: Option<String>,
     acceptance_criteria: Vec<String>,
@@ -148,6 +173,33 @@ pub struct RequirementQuestionPayload {
     reason: String,
     blocks_coding: bool,
     answer: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequirementGapPayload {
+    id: Option<String>,
+    question: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default = "default_gap_severity")]
+    severity: RequirementGapSeverity,
+    #[serde(default = "default_gap_status")]
+    status: RequirementGapStatus,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementGapSeverity {
+    Blocking,
+    Helpful,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementGapStatus {
+    Open,
+    Resolved,
 }
 
 pub(crate) struct LlmProviderRegistry;
@@ -416,7 +468,21 @@ pub async fn summarize_requirement_state(
             "state": request.state,
             "outputSchema": {
                 "summary": "string, <= 120 Chinese characters when possible",
-                "uncertainties": ["string"]
+                "confirmedFacts": ["string"],
+                "constraints": ["string"],
+                "acceptanceCriteria": ["string"],
+                "outOfScope": ["string"],
+                "risks": ["string"],
+                "openGaps": [
+                    {
+                        "id": "string optional stable id",
+                        "question": "string",
+                        "reason": "string",
+                        "severity": "blocking | helpful",
+                        "status": "open | resolved"
+                    }
+                ],
+                "uncertainties": ["legacy string array, prefer openGaps"]
             }
         }),
         temperature: Some(0.1),
@@ -578,20 +644,36 @@ fn extract_openai_error_message(response_text: &str) -> String {
 }
 
 fn parse_requirement_summary_result(value: Value) -> Result<RequirementSummaryResult, String> {
-    let result = serde_json::from_value::<RequirementSummaryResult>(value)
+    let mut result = serde_json::from_value::<RequirementSummaryResult>(value)
         .map_err(|error| format!("LLM 总结结果结构不正确：{error}"))?;
     if result.summary.trim().is_empty() {
         return Err("LLM 总结结果缺少 summary。".to_string());
     }
-    Ok(RequirementSummaryResult {
-        summary: limit_text(result.summary, 300),
-        uncertainties: result
-            .uncertainties
+    result.summary = limit_text(result.summary, 300);
+    result.confirmed_facts = clean_string_list(result.confirmed_facts, 8, 180);
+    result.constraints = clean_string_list(result.constraints, 8, 180);
+    result.acceptance_criteria = clean_string_list(result.acceptance_criteria, 8, 180);
+    result.out_of_scope = clean_string_list(result.out_of_scope, 8, 180);
+    result.risks = clean_string_list(result.risks, 6, 180);
+    result.open_gaps = normalize_requirement_gaps(result.open_gaps);
+    if result.open_gaps.is_empty() && !result.uncertainties.is_empty() {
+        let uncertainties = std::mem::take(&mut result.uncertainties);
+        result.open_gaps = uncertainties
             .into_iter()
-            .map(|item| limit_text(item, 160))
-            .filter(|item| !item.trim().is_empty())
-            .take(5)
-            .collect(),
+            .map(|question| RequirementGapPayload {
+                id: None,
+                question,
+                reason: "实时理解中仍不明确。".to_string(),
+                severity: RequirementGapSeverity::Helpful,
+                status: RequirementGapStatus::Open,
+            })
+            .collect();
+        result.open_gaps = normalize_requirement_gaps(result.open_gaps);
+        result.uncertainties = Vec::new();
+    }
+    Ok(RequirementSummaryResult {
+        uncertainties: Vec::new(),
+        ..result
     })
 }
 
@@ -608,32 +690,31 @@ fn parse_requirement_processing_result(
     result.out_of_scope = clean_string_list(result.out_of_scope, 12, 240);
     result.risks = clean_string_list(result.risks, 8, 240);
     result.questions = normalize_processing_questions(result.questions);
+    result.ready_to_confirm = true;
 
     if result.summary.trim().is_empty() {
         return Err("LLM 需求处理结果缺少 summary。".to_string());
     }
 
-    if result.ready_to_confirm
-        && result
-            .questions
-            .iter()
-            .any(|question| question.blocks_coding)
-    {
-        return Err("LLM 不能同时返回 readyToConfirm=true 和阻塞问题。".to_string());
-    }
-
-    if !result.ready_to_confirm
-        && !result
-            .questions
-            .iter()
-            .any(|question| question.blocks_coding)
-    {
-        return Err(
-            "LLM 判断需求不明确时，必须返回至少一个 blocksCoding=true 的问题。".to_string(),
-        );
+    if result.requirement_document_draft.trim().is_empty() {
+        return Err("LLM 需求处理结果缺少 requirementDocumentDraft。".to_string());
     }
 
     Ok(result)
+}
+
+fn normalize_requirement_gaps(gaps: Vec<RequirementGapPayload>) -> Vec<RequirementGapPayload> {
+    gaps.into_iter()
+        .filter(|gap| !gap.question.trim().is_empty())
+        .take(MAX_LIVE_GAPS)
+        .map(|gap| RequirementGapPayload {
+            id: gap.id,
+            question: limit_text(gap.question, 140),
+            reason: limit_text(gap.reason, 180),
+            severity: gap.severity,
+            status: gap.status,
+        })
+        .collect()
 }
 
 fn normalize_processing_questions(
@@ -666,41 +747,44 @@ fn limit_text(value: String, max_chars: usize) -> String {
     value.trim().chars().take(max_chars).collect()
 }
 
+fn default_ready_to_confirm() -> bool {
+    true
+}
+
+fn default_gap_severity() -> RequirementGapSeverity {
+    RequirementGapSeverity::Blocking
+}
+
+fn default_gap_status() -> RequirementGapStatus {
+    RequirementGapStatus::Open
+}
+
 fn requirement_summary_system_prompt() -> String {
     [
         "你是 VoiceCoder 的实时需求理解助手。",
-        "你的任务是根据语音转写维护一段很短的“当前理解”，用于页面右侧小云朵展示。",
-        "只总结已经听到的信息；不要提出正式澄清问题，不要判断需求是否完整，不要推进状态机。",
+        "你的任务是根据语音转写维护一段很短的“当前理解”和最多 3 个实时缺口，用于页面右侧小云朵展示。",
+        "只总结已经听到的信息；不要生成需求文档，不要推进状态机。",
         "如果语音里有噪声、闲聊、重复或 ASR 错字，只保留和软件需求有关的内容。",
-        "输出必须是 JSON object，字段只能是 summary 和 uncertainties。",
+        "openGaps 只放会影响目标、范围、验收或关键交互的问题；用户后续已经补充的缺口不要继续返回。",
+        "如果需求已经足够清楚，openGaps 返回空数组。",
+        "输出必须是 JSON object，字段必须符合用户消息里的 outputSchema。不要输出 markdown 或解释。",
     ]
     .join("\n")
 }
 
 fn requirement_processing_system_prompt() -> String {
     [
-        "你是 VoiceCoder 的需求访谈与需求文档整理助手。",
-        "你需要根据完整语音转写、已回答的澄清问题和当前结构化状态，判断需求是否足够进入用户确认。",
-        "",
-        "核心状态机：collecting -> processing -> clarifying -> processing ... -> ready_to_confirm。",
-        "你只能通过 readyToConfirm 和 questions 影响下一步：",
-        "- readyToConfirm=true 且 questions 为空或没有 blocksCoding=true 时，前端进入 ready_to_confirm。",
-        "- readyToConfirm=false 时，必须返回 1-3 个 blocksCoding=true 的关键问题，前端进入 clarifying。",
-        "",
-        "避免无限澄清循环的规则：",
-        "- 不要重复询问 answeredQuestions 中已经回答过的问题。",
-        "- 如果用户已经给出可执行的方向，即使不完美，也应采用合理默认值并进入 readyToConfirm。",
-        "- 只问会阻塞实现、验收、范围或关键交互的问题。",
-        "- 不要询问颜色、文案、动效、技术实现偏好等 Coding Agent 可以合理判断的细节。",
-        "- 每一轮最多问 3 个问题，优先问一个最关键的问题。",
-        "- 如果当前问题已经被用户用 clarification_answer 回答，请把回答并入需求，不要继续卡在同一个问题。",
+        "你是 VoiceCoder 的最终需求文档整理助手。",
+        "用户已经点击“我说完了”，你需要根据完整语音转写和实时理解状态直接生成一份可交给后续 Coding Agent 的需求文档草稿。",
+        "当前产品不再进行显式澄清循环；不要阻塞生成，不要要求用户继续回答。",
         "",
         "需求明确的最低标准：",
         "- 能说清用户要做什么或改变什么。",
         "- 能说清主要交互或业务流程。",
         "- 能形成至少 1 条可验证的验收标准；如果用户没有明确验收标准，你可以从目标中提炼可验证标准。",
-        "- 已知范围和不做范围足以避免明显误实现；不确定但不阻塞的内容写入 risks，不要追问。",
+        "- 如果仍有未明确项，把它们写入 requirementDocumentDraft 的“未明确项 / 默认假设”部分，并给出保守默认。",
         "",
+        "questions 仅作为兼容字段保留，返回空数组。readyToConfirm 返回 true。",
         "输出必须是严格 JSON object，字段必须符合用户消息里的 outputSchema。不要输出 markdown 或解释。",
     ]
     .join("\n")
@@ -723,7 +807,7 @@ fn processing_output_schema() -> Value {
                 "answer": "string optional"
             }
         ],
-        "readyToConfirm": "boolean"
+        "readyToConfirm": "boolean true"
     })
 }
 
@@ -857,26 +941,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_conflicting_processing_result() {
+    fn processing_result_defaults_missing_lists() {
         let value = json!({
             "summary": "做一个语音需求整理流程",
             "requirementDocumentDraft": "目标：实现语音需求整理。",
-            "confirmedFacts": [],
-            "constraints": [],
-            "acceptanceCriteria": ["用户点击确认前不编码"],
-            "outOfScope": [],
-            "risks": [],
-            "questions": [
-                {
-                    "question": "最重要验收标准是什么？",
-                    "reason": "需要验收标准",
-                    "blocksCoding": true
-                }
-            ],
-            "readyToConfirm": true
+            "acceptanceCriteria": ["用户点击确认前不编码"]
         });
 
-        assert!(parse_requirement_processing_result(value).is_err());
+        let result = parse_requirement_processing_result(value).unwrap();
+        assert!(result.ready_to_confirm);
+        assert!(result.constraints.is_empty());
+        assert_eq!(result.acceptance_criteria.len(), 1);
+    }
+
+    #[test]
+    fn summary_result_normalizes_open_gaps() {
+        let value = json!({
+            "summary": "用户想做网页端贪吃蛇。",
+            "openGaps": [
+                {
+                    "question": "还缺少胜负判定。",
+                    "reason": "影响验收。",
+                    "severity": "blocking"
+                }
+            ]
+        });
+
+        let result = parse_requirement_summary_result(value).unwrap();
+        assert_eq!(result.open_gaps.len(), 1);
+        assert!(matches!(
+            result.open_gaps[0].status,
+            RequirementGapStatus::Open
+        ));
     }
 
     #[tokio::test]

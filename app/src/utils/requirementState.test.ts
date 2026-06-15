@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type {
   RequirementProcessingResult,
   RequirementState,
+  RequirementSummaryResult,
   VoiceRequirementSession,
   VoiceTranscriptSegment
 } from "../types/app";
@@ -22,31 +23,31 @@ test("final transcript does not create a requirement session before voice start"
   assert.equal(next, undefined);
 });
 
-test("starting voice from idle creates a collecting requirement session", () => {
+test("starting voice from idle creates a listening requirement session", () => {
   const next = requirementSessionReducer(undefined, {
     type: "start_voice_session",
     voiceSessionId: "voice-1",
     now: "1"
   });
 
-  assert.equal(next?.requirementState.status, "collecting");
+  assert.equal(next?.requirementState.status, "listening");
   assert.deepEqual(next?.voiceSessionIds, ["voice-1"]);
 });
 
-test("ready to confirm does not allow voice start to return to collecting", () => {
-  const session = sessionWithState("ready_to_confirm");
+test("document ready does not allow voice start to return to listening", () => {
+  const session = sessionWithState("document_ready");
   const next = requirementSessionReducer(session, {
     type: "start_voice_session",
     voiceSessionId: "voice-2",
     now: "2"
   });
 
-  assert.equal(next?.requirementState.status, "ready_to_confirm");
+  assert.equal(next?.requirementState.status, "document_ready");
   assert.deepEqual(next?.voiceSessionIds, ["voice-1"]);
 });
 
-test("ready to confirm ignores stray transcripts", () => {
-  const session = sessionWithState("ready_to_confirm");
+test("document ready ignores stray transcripts", () => {
+  const session = sessionWithState("document_ready");
   const next = requirementSessionReducer(session, {
     type: "append_voice_transcript",
     segment: finalSegment("voice-1", "seg-1", "不要追加"),
@@ -54,112 +55,109 @@ test("ready to confirm ignores stray transcripts", () => {
   });
 
   assert.equal(next?.requirementState.utterances.length, 0);
-  assert.equal(next?.requirementState.status, "ready_to_confirm");
+  assert.equal(next?.requirementState.status, "document_ready");
 });
 
-test("clarifying voice turn records transcript as clarification answer", () => {
-  const session = sessionWithState("clarifying", {
-    openQuestions: [
-      {
-        id: "q1",
-        question: "验收标准是什么？",
-        reason: "影响测试范围",
-        blocksCoding: true
-      }
-    ],
-    activeQuestionId: "q1"
-  });
-  const started = requirementSessionReducer(session, {
-    type: "start_voice_session",
-    voiceSessionId: "voice-2",
-    now: "2"
-  });
-  const next = requirementSessionReducer(started, {
-    type: "append_voice_transcript",
-    segment: finalSegment("voice-2", "seg-1", "必须生成需求文档"),
-    now: "3"
-  });
-
-  assert.equal(next?.requirementState.status, "clarifying");
-  assert.equal(next?.requirementState.utterances[0].source, "clarification_answer");
-  assert.equal(next?.requirementState.answeredQuestions[0].answer, "必须生成需求文档");
-});
-
-test("unclear processing result enters clarification loop", () => {
+test("listening voice turn records transcript as voice utterance", () => {
   const session = createVoiceRequirementSession("voice-1", "1");
-  const withTranscript = requirementSessionReducer(session, {
+  const next = requirementSessionReducer(session, {
     type: "append_voice_transcript",
-    segment: finalSegment("voice-1", "seg-1", "做一个语音需求功能"),
+    segment: finalSegment("voice-1", "seg-1", "帮我做一个网页端贪吃蛇"),
     now: "2"
   });
-  const processing = requirementSessionReducer(withTranscript, {
-    type: "apply_process_result",
-    requirementId: withTranscript?.requirementState.id ?? "",
-    result: processingResult({
-      readyToConfirm: false,
-      questions: [
+
+  assert.equal(next?.requirementState.status, "listening");
+  assert.equal(next?.requirementState.utterances[0].source, "voice");
+  assert.equal(next?.requirementState.utterances[0].text, "帮我做一个网页端贪吃蛇");
+});
+
+test("live understanding updates summary and open gaps without leaving listening", () => {
+  const session = createVoiceRequirementSession("voice-1", "1");
+  const next = requirementSessionReducer(session, {
+    type: "apply_live_summary",
+    requirementId: session.requirementState.id,
+    result: summaryResult({
+      summary: "用户想做网页端贪吃蛇游戏。",
+      openGaps: [
         {
-          question: "这个语音需求功能最重要的验收标准是什么？",
-          reason: "缺少验收标准会影响实现范围。",
-          blocksCoding: true
+          question: "还缺少胜负判定和验收标准。",
+          reason: "影响实现范围。",
+          severity: "blocking"
         }
       ]
     }),
-    now: "3"
-  });
-
-  assert.equal(processing?.requirementState.status, "clarifying");
-  assert.ok(processing?.requirementState.activeQuestionId);
-  assert.equal(processing?.requirementState.openQuestions.length, 1);
-});
-
-test("clarification answer can resolve loop into ready to confirm", () => {
-  const clarifying = sessionWithState("clarifying", {
-    openQuestions: [
-      {
-        id: "q1",
-        question: "验收标准是什么？",
-        reason: "影响测试范围",
-        blocksCoding: true
-      }
-    ],
-    activeQuestionId: "q1"
-  });
-  const withAnswer = requirementSessionReducer(clarifying, {
-    type: "append_voice_transcript",
-    segment: finalSegment("voice-1", "seg-1", "必须展示需求文档并且确认前不能编码"),
     now: "2"
   });
-  const processed = requirementSessionReducer(withAnswer, {
+
+  assert.equal(next?.requirementState.status, "listening");
+  assert.equal(next?.requirementState.summary, "用户想做网页端贪吃蛇游戏。");
+  assert.equal(next?.requirementState.openGaps.length, 1);
+  assert.equal(next?.requirementState.openGaps[0].status, "open");
+});
+
+test("finish action enters finalizing and final LLM result enters document ready", () => {
+  const session = createVoiceRequirementSession("voice-1", "1");
+  const finalizing = requirementSessionReducer(session, {
+    type: "mark_finalizing",
+    now: "2"
+  });
+  const processed = requirementSessionReducer(finalizing, {
     type: "apply_process_result",
-    requirementId: withAnswer?.requirementState.id ?? "",
+    requirementId: finalizing?.requirementState.id ?? "",
     result: processingResult({
-      readyToConfirm: true,
-      questions: [],
-      acceptanceCriteria: ["必须展示需求文档并且确认前不能编码"]
+      requirementDocumentDraft: "目标：实现网页端贪吃蛇游戏。"
     }),
     now: "3"
   });
 
-  assert.equal(processed?.requirementState.status, "ready_to_confirm");
-  assert.equal(processed?.requirementState.openQuestions.length, 0);
+  assert.equal(finalizing?.requirementState.status, "finalizing");
+  assert.equal(processed?.requirementState.status, "document_ready");
+  assert.equal(processed?.requirementState.requirementDocument, "目标：实现网页端贪吃蛇游戏。");
+  assert.ok(/网页端贪吃蛇/.test(processed?.requirementState.codingPrompt ?? ""));
 });
 
-test("processing errors restore the previous voice input mode", () => {
-  const collecting = createVoiceRequirementSession("voice-1", "1");
-  const processing = requirementSessionReducer(collecting, {
-    type: "mark_processing",
+test("processing errors restore listening so user can retry finalization", () => {
+  const session = createVoiceRequirementSession("voice-1", "1");
+  const finalizing = requirementSessionReducer(session, {
+    type: "mark_finalizing",
     now: "2"
   });
-  const failed = requirementSessionReducer(processing, {
+  const failed = requirementSessionReducer(finalizing, {
     type: "apply_process_error",
-    requirementId: processing?.requirementState.id ?? "",
+    requirementId: finalizing?.requirementState.id ?? "",
     error: "LLM 请求失败",
     now: "3"
   });
 
-  assert.equal(failed?.requirementState.status, "collecting");
+  assert.equal(failed?.requirementState.status, "listening");
   assert.equal(failed?.requirementState.error, "LLM 请求失败");
+});
+
+test("document save result keeps document ready and stores path", () => {
+  const session = sessionWithState("document_ready");
+  const next = requirementSessionReducer(session, {
+    type: "apply_document_save_result",
+    requirementId: session.requirementState.id,
+    savedRequirementDocumentPath: "/tmp/.voicecoder/voice_requirements.md",
+    now: "2"
+  });
+
+  assert.equal(next?.requirementState.status, "document_ready");
+  assert.equal(next?.requirementState.savedRequirementDocumentPath, "/tmp/.voicecoder/voice_requirements.md");
+});
+
+test("confirming document ready marks requirement confirmed", () => {
+  const session = sessionWithState("document_ready", {
+    requirementDocument: "目标：实现网页端贪吃蛇游戏。",
+    codingPrompt: "请实现网页端贪吃蛇游戏。"
+  });
+  const next = requirementSessionReducer(session, {
+    type: "confirm_requirement",
+    now: "2"
+  });
+
+  assert.equal(next?.requirementState.status, "confirmed");
+  assert.equal(next?.requirementState.codingPrompt, "请实现网页端贪吃蛇游戏。");
 });
 
 test("voice input permission is centralized by requirement state", () => {
@@ -168,21 +166,16 @@ test("voice input permission is centralized by requirement state", () => {
     canFinishTurn: false,
     transcriptSource: "voice"
   });
-  assert.deepEqual(getVoiceInputPermission(sessionWithState("collecting").requirementState), {
+  assert.deepEqual(getVoiceInputPermission(sessionWithState("listening").requirementState), {
     canUseMic: true,
     canFinishTurn: false,
     transcriptSource: "voice"
   });
-  assert.deepEqual(getVoiceInputPermission(sessionWithState("clarifying").requirementState), {
-    canUseMic: true,
-    canFinishTurn: false,
-    transcriptSource: "clarification_answer"
-  });
-  assert.deepEqual(getVoiceInputPermission(sessionWithState("processing").requirementState), {
+  assert.deepEqual(getVoiceInputPermission(sessionWithState("finalizing").requirementState), {
     canUseMic: false,
     canFinishTurn: false
   });
-  assert.deepEqual(getVoiceInputPermission(sessionWithState("ready_to_confirm").requirementState), {
+  assert.deepEqual(getVoiceInputPermission(sessionWithState("document_ready").requirementState), {
     canUseMic: false,
     canFinishTurn: false
   });
@@ -192,7 +185,7 @@ test("voice input permission is centralized by requirement state", () => {
   });
 });
 
-test("collecting turn can finish only after voice transcript arrives", () => {
+test("listening turn can finish only after voice transcript arrives", () => {
   const session = createVoiceRequirementSession("voice-1", "1");
   const withTranscript = requirementSessionReducer(session, {
     type: "append_voice_transcript",
@@ -202,28 +195,6 @@ test("collecting turn can finish only after voice transcript arrives", () => {
 
   assert.equal(getVoiceInputPermission(session.requirementState).canFinishTurn, false);
   assert.equal(getVoiceInputPermission(withTranscript?.requirementState).canFinishTurn, true);
-});
-
-test("clarifying turn can finish only after current question is answered", () => {
-  const clarifying = sessionWithState("clarifying", {
-    openQuestions: [
-      {
-        id: "q1",
-        question: "验收标准是什么？",
-        reason: "影响测试范围",
-        blocksCoding: true
-      }
-    ],
-    activeQuestionId: "q1"
-  });
-  const withAnswer = requirementSessionReducer(clarifying, {
-    type: "append_voice_transcript",
-    segment: finalSegment("voice-1", "seg-1", "必须展示需求文档"),
-    now: "2"
-  });
-
-  assert.equal(getVoiceInputPermission(clarifying.requirementState).canFinishTurn, false);
-  assert.equal(getVoiceInputPermission(withAnswer?.requirementState).canFinishTurn, true);
 });
 
 function sessionWithState(
@@ -254,15 +225,28 @@ function finalSegment(sessionId: string, id: string, text: string): VoiceTranscr
 
 function processingResult(overrides: Partial<RequirementProcessingResult> = {}): RequirementProcessingResult {
   return {
-    summary: "实现语音需求确认流程",
-    requirementDocumentDraft: "目标：实现语音需求确认流程。",
+    summary: "实现网页端贪吃蛇游戏",
+    requirementDocumentDraft: "目标：实现网页端贪吃蛇游戏。",
     confirmedFacts: [],
     constraints: [],
     acceptanceCriteria: [],
     outOfScope: [],
     risks: [],
     questions: [],
-    readyToConfirm: false,
+    readyToConfirm: true,
+    ...overrides
+  };
+}
+
+function summaryResult(overrides: Partial<RequirementSummaryResult> = {}): RequirementSummaryResult {
+  return {
+    summary: "用户正在描述需求。",
+    confirmedFacts: [],
+    constraints: [],
+    acceptanceCriteria: [],
+    outOfScope: [],
+    risks: [],
+    openGaps: [],
     ...overrides
   };
 }

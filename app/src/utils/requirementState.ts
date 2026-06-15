@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type {
+  RequirementGap,
   RequirementProcessingResult,
-  RequirementQuestion,
   RequirementState,
   RequirementSummaryResult,
   SavedRequirementDocument,
@@ -12,7 +12,9 @@ import type {
 } from "../types/app";
 import { createId } from "./project";
 
-const LIVE_SUMMARY_INTERVAL_MS = 30000;
+const LIVE_SUMMARY_QUIET_DELAY_MS = 6000;
+const LIVE_SUMMARY_MAX_INTERVAL_MS = 30000;
+const LIVE_SUMMARY_BATCH_UTTERANCES = 3;
 
 export type RequirementSessionAction =
   | {
@@ -43,7 +45,7 @@ export type RequirementSessionAction =
       error: string;
     }
   | {
-      type: "mark_processing";
+      type: "mark_finalizing";
       now: string;
     }
   | {
@@ -59,8 +61,15 @@ export type RequirementSessionAction =
       error: string;
     }
   | {
-      type: "mark_finalizing";
+      type: "mark_saving";
       now: string;
+    }
+  | {
+      type: "apply_document_save_result";
+      now: string;
+      requirementId: string;
+      savedRequirementDocumentPath?: string;
+      error?: string;
     }
   | {
       type: "confirm_requirement";
@@ -85,12 +94,13 @@ export type VoiceInputPermission = {
 export function createRequirementState(now: string): RequirementState {
   return {
     id: createId("requirement"),
-    status: "collecting",
+    status: "listening",
     utterances: [],
     summary: "",
     requirementDocument: "",
     confirmedFacts: [],
     constraints: [],
+    openGaps: [],
     openQuestions: [],
     answeredQuestions: [],
     activeQuestionId: undefined,
@@ -158,7 +168,7 @@ export function requirementSessionReducer(
   if (action.type === "apply_live_summary") {
     if (
       action.requirementId !== session.requirementState.id ||
-      !["collecting", "clarifying"].includes(session.requirementState.status)
+      session.requirementState.status !== "listening"
     ) {
       return session;
     }
@@ -168,7 +178,12 @@ export function requirementSessionReducer(
       requirementState: {
         ...session.requirementState,
         summary: action.result.summary,
-        risks: mergeUnique(session.requirementState.risks, action.result.uncertainties),
+        confirmedFacts: action.result.confirmedFacts,
+        constraints: action.result.constraints,
+        acceptanceCriteria: action.result.acceptanceCriteria,
+        outOfScope: action.result.outOfScope,
+        risks: action.result.risks,
+        openGaps: normalizeSummaryGaps(action.result.openGaps),
         pendingAction: undefined,
         updatedAt: action.now
       }
@@ -178,7 +193,7 @@ export function requirementSessionReducer(
   if (action.type === "apply_live_summary_error") {
     if (
       action.requirementId !== session.requirementState.id ||
-      !["collecting", "clarifying"].includes(session.requirementState.status)
+      session.requirementState.status !== "listening"
     ) {
       return session;
     }
@@ -194,25 +209,25 @@ export function requirementSessionReducer(
     };
   }
 
-  if (action.type === "mark_processing") {
+  if (action.type === "mark_finalizing") {
     return {
       ...session,
       requirementState: {
         ...session.requirementState,
-        status: "processing",
-        pendingAction: "process",
+        status: "finalizing",
+        pendingAction: "finalize",
         error: undefined,
         updatedAt: action.now
       }
     };
   }
 
-  if (action.type === "mark_finalizing") {
+  if (action.type === "mark_saving") {
     return {
       ...session,
       requirementState: {
         ...session.requirementState,
-        pendingAction: "finalize",
+        pendingAction: "save",
         error: undefined,
         updatedAt: action.now
       }
@@ -231,7 +246,6 @@ export function requirementSessionReducer(
       blocksCoding: question.blocksCoding,
       answer: question.answer
     }));
-    const hasBlockingQuestion = openQuestions.some((question) => question.blocksCoding);
 
     return {
       ...session,
@@ -246,10 +260,29 @@ export function requirementSessionReducer(
         outOfScope: action.result.outOfScope,
         risks: action.result.risks,
         openQuestions,
-        activeQuestionId: openQuestions.find((question) => question.blocksCoding)?.id,
-        status: action.result.readyToConfirm && !hasBlockingQuestion ? "ready_to_confirm" : "clarifying",
+        openGaps: [],
+        activeQuestionId: undefined,
+        codingPrompt: createCodingPromptFromProcessingResult(action.result),
+        status: "document_ready",
         pendingAction: undefined,
         error: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
+  if (action.type === "apply_document_save_result") {
+    if (action.requirementId !== session.requirementState.id) {
+      return session;
+    }
+
+    return {
+      ...session,
+      requirementState: {
+        ...session.requirementState,
+        savedRequirementDocumentPath: action.savedRequirementDocumentPath ?? session.requirementState.savedRequirementDocumentPath,
+        pendingAction: undefined,
+        error: action.error,
         updatedAt: action.now
       }
     };
@@ -264,7 +297,7 @@ export function requirementSessionReducer(
       ...session,
       requirementState: {
         ...session.requirementState,
-        status: session.requirementState.openQuestions.some((question) => question.blocksCoding) ? "clarifying" : "collecting",
+        status: "listening",
         pendingAction: undefined,
         error: action.error,
         updatedAt: action.now
@@ -278,8 +311,8 @@ export function requirementSessionReducer(
       requirementState: {
         ...session.requirementState,
         status: "confirmed",
-        codingPrompt: createCodingPromptFromConfirmedRequirement(session.requirementState),
-        savedRequirementDocumentPath: action.savedRequirementDocumentPath,
+        codingPrompt: session.requirementState.codingPrompt ?? createCodingPromptFromConfirmedRequirement(session.requirementState),
+        savedRequirementDocumentPath: action.savedRequirementDocumentPath ?? session.requirementState.savedRequirementDocumentPath,
         pendingAction: undefined,
         error: action.error,
         updatedAt: action.now
@@ -292,7 +325,8 @@ export function requirementSessionReducer(
   }
 
   const permission = getVoiceInputPermission(session.requirementState);
-  if (!permission.transcriptSource) {
+  const transcriptSource = session.requirementState.status === "finalizing" ? "voice" : permission.transcriptSource;
+  if (!transcriptSource) {
     return session;
   }
 
@@ -305,19 +339,18 @@ export function requirementSessionReducer(
     return session;
   }
 
-  const utterance = transcriptSegmentToUtterance(action.segment, text, action.source ?? permission.transcriptSource);
+  const utterance = transcriptSegmentToUtterance(action.segment, text, action.source ?? transcriptSource);
   const utterances = upsertUtteranceByTranscriptId(session.requirementState.utterances, utterance);
-  const nextAnsweredQuestions = upsertAnsweredQuestionForUtterance(session.requirementState, utterance);
 
   return {
     ...session,
     requirementState: {
       ...session.requirementState,
       utterances,
-      answeredQuestions: nextAnsweredQuestions,
+      answeredQuestions: session.requirementState.answeredQuestions,
       codingPrompt: undefined,
       savedRequirementDocumentPath: undefined,
-      pendingAction: undefined,
+      pendingAction: session.requirementState.status === "finalizing" ? session.requirementState.pendingAction : undefined,
       error: undefined,
       updatedAt: action.now
     }
@@ -333,10 +366,13 @@ export function useVoiceRequirementSession(voice: {
   const sessionRef = useRef<VoiceRequirementSession | undefined>(undefined);
   const processedSegmentTextsRef = useRef<Map<string, string>>(new Map());
   const lastSummarizedUtteranceCountRef = useRef(0);
+  const lastSummaryAtRef = useRef(0);
   const summaryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>();
   const liveSummaryRequestRef = useRef(0);
   const processRequestRef = useRef(0);
+  const finalizingRequestRequirementIdRef = useRef<string | undefined>();
   const projectPathRef = useRef<string | undefined>(projectPath);
+  const savedRequirementIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     sessionRef.current = session;
@@ -409,6 +445,7 @@ export function useVoiceRequirementSession(voice: {
         }
 
         lastSummarizedUtteranceCountRef.current = latestSession.requirementState.utterances.length;
+        lastSummaryAtRef.current = Date.now();
         dispatch({
           type: "apply_live_summary",
           requirementId,
@@ -431,7 +468,7 @@ export function useVoiceRequirementSession(voice: {
   }, []);
 
   useEffect(() => {
-    if (!session || session.requirementState.status === "processing" || session.requirementState.status === "ready_to_confirm" || session.requirementState.status === "confirmed") {
+    if (!session || session.requirementState.status !== "listening") {
       return;
     }
 
@@ -441,8 +478,15 @@ export function useVoiceRequirementSession(voice: {
       return;
     }
 
+    const lastSummarizedAt = Number(lastSummaryAtRef.current || 0);
+    const elapsedSinceSummary = Date.now() - lastSummarizedAt;
+    if (unsummarizedCount >= LIVE_SUMMARY_BATCH_UTTERANCES || (lastSummarizedAt > 0 && elapsedSinceSummary >= LIVE_SUMMARY_MAX_INTERVAL_MS)) {
+      applyLiveSummary();
+      return;
+    }
+
     clearSummaryTimer(summaryTimerRef.current);
-    summaryTimerRef.current = setTimeout(applyLiveSummary, LIVE_SUMMARY_INTERVAL_MS);
+    summaryTimerRef.current = setTimeout(applyLiveSummary, LIVE_SUMMARY_QUIET_DELAY_MS);
 
     return () => {
       clearSummaryTimer(summaryTimerRef.current);
@@ -458,19 +502,38 @@ export function useVoiceRequirementSession(voice: {
     }
 
     liveSummaryRequestRef.current += 1;
-    const requirementId = currentSession.requirementState.id;
     lastSummarizedUtteranceCountRef.current = currentSession.requirementState.utterances.length;
     dispatch({
-      type: "mark_processing",
+      type: "mark_finalizing",
       now: nowString()
     });
 
+    finalizingRequestRequirementIdRef.current = undefined;
+  }, []);
+
+  useEffect(() => {
+    const currentSession = sessionRef.current;
+    if (
+      !currentSession ||
+      currentSession.requirementState.status !== "finalizing" ||
+      currentSession.requirementState.pendingAction !== "finalize" ||
+      finalizingRequestRequirementIdRef.current === currentSession.requirementState.id ||
+      voice.status === "recording" ||
+      voice.status === "starting" ||
+      voice.status === "requesting-permission" ||
+      voice.status === "transcribing"
+    ) {
+      return;
+    }
+
     const requestId = processRequestRef.current + 1;
     processRequestRef.current = requestId;
+    const requirementId = currentSession.requirementState.id;
+    finalizingRequestRequirementIdRef.current = requirementId;
     const processingState: RequirementState = {
       ...currentSession.requirementState,
-      status: "processing",
-      pendingAction: "process"
+      status: "finalizing",
+      pendingAction: "finalize"
     };
 
     void invokeTauri<RequirementProcessingResult>("process_requirement_turn", {
@@ -495,6 +558,7 @@ export function useVoiceRequirementSession(voice: {
           return;
         }
 
+        finalizingRequestRequirementIdRef.current = undefined;
         dispatch({
           type: "apply_process_error",
           requirementId,
@@ -502,25 +566,35 @@ export function useVoiceRequirementSession(voice: {
           now: nowString()
         });
       });
-  }, []);
+  }, [session, voice.status]);
 
-  const confirmRequirement = useCallback(() => {
+  useEffect(() => {
     const currentSession = sessionRef.current;
-    if (!currentSession) {
+    const state = currentSession?.requirementState;
+    if (
+      !currentSession ||
+      !state ||
+      state.status !== "document_ready" ||
+      state.pendingAction ||
+      state.savedRequirementDocumentPath ||
+      !state.requirementDocument ||
+      savedRequirementIdsRef.current.has(state.id)
+    ) {
       return;
     }
 
-    const state = currentSession.requirementState;
-    const codingPrompt = createCodingPromptFromConfirmedRequirement(state);
+    savedRequirementIdsRef.current.add(state.id);
     dispatch({
-      type: "mark_finalizing",
+      type: "mark_saving",
       now: nowString()
     });
 
+    const codingPrompt = state.codingPrompt ?? createCodingPromptFromConfirmedRequirement(state);
     const selectedProjectPath = projectPathRef.current;
     if (!selectedProjectPath) {
       dispatch({
-        type: "confirm_requirement",
+        type: "apply_document_save_result",
+        requirementId: state.id,
         error: "未选择项目，需求文档未写入文件。",
         now: nowString()
       });
@@ -544,18 +618,27 @@ export function useVoiceRequirementSession(voice: {
         }));
 
         dispatch({
-          type: "confirm_requirement",
+          type: "apply_document_save_result",
+          requirementId: state.id,
           savedRequirementDocumentPath: savedDocument.path,
           now: nowString()
         });
       })
       .catch((error) => {
         dispatch({
-          type: "confirm_requirement",
+          type: "apply_document_save_result",
+          requirementId: state.id,
           error: toErrorMessage(error),
           now: nowString()
         });
       });
+  }, [session]);
+
+  const confirmRequirement = useCallback(() => {
+    dispatch({
+      type: "confirm_requirement",
+      now: nowString()
+    });
   }, []);
 
   return useMemo(
@@ -578,19 +661,11 @@ export function getVoiceInputPermission(state: RequirementState | undefined): Vo
     };
   }
 
-  if (state.status === "collecting") {
+  if (state.status === "listening" || state.status === "collecting") {
     return {
       canUseMic: true,
       canFinishTurn: state.utterances.some((utterance) => utterance.source === "voice"),
       transcriptSource: "voice"
-    };
-  }
-
-  if (state.status === "clarifying") {
-    return {
-      canUseMic: true,
-      canFinishTurn: Boolean(state.activeQuestionId && state.answeredQuestions.some((question) => question.id === state.activeQuestionId)),
-      transcriptSource: "clarification_answer"
     };
   }
 
@@ -635,39 +710,25 @@ function upsertUtteranceByTranscriptId(utterances: RequirementUtterance[], utter
   return nextUtterances;
 }
 
-function upsertAnsweredQuestionForUtterance(state: RequirementState, utterance: RequirementUtterance) {
-  if (utterance.source !== "clarification_answer" || !state.activeQuestionId) {
-    return state.answeredQuestions;
-  }
-
-  const question = state.openQuestions.find((item) => item.id === state.activeQuestionId);
-  if (!question) {
-    return state.answeredQuestions;
-  }
-
-  const answeredQuestion: RequirementQuestion = {
-    ...question,
-    answer: utterance.text
-  };
-  const existingIndex = state.answeredQuestions.findIndex((item) => item.id === answeredQuestion.id);
-  if (existingIndex < 0) {
-    return [...state.answeredQuestions, answeredQuestion];
-  }
-
-  const nextQuestions = [...state.answeredQuestions];
-  nextQuestions[existingIndex] = answeredQuestion;
-  return nextQuestions;
-}
-
 function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
 }
 
-function mergeUnique(current: string[], incoming: string[]) {
-  return incoming.reduce((values, value) => {
-    const trimmed = value.trim();
-    return trimmed && !values.includes(trimmed) ? [...values, trimmed] : values;
-  }, current);
+function normalizeSummaryGaps(gaps: Array<Omit<RequirementGap, "id" | "status"> & { id?: string; status?: RequirementGap["status"] }>) {
+  return gaps
+    .filter((gap) => gap.question.trim())
+    .slice(0, 3)
+    .map((gap) => ({
+      id: gap.id || createId("gap"),
+      question: gap.question,
+      reason: gap.reason,
+      severity: gap.severity,
+      status: gap.status ?? "open"
+    }));
+}
+
+function createCodingPromptFromProcessingResult(result: RequirementProcessingResult) {
+  return `请根据以下已整理需求进行实现：\n\n${result.requirementDocumentDraft}`;
 }
 
 function createCodingPromptFromConfirmedRequirement(state: RequirementState) {

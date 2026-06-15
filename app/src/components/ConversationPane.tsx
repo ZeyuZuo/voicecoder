@@ -78,11 +78,11 @@ function VoiceRequirementWorkspace({
   const voiceProvider = voice.sessionSnapshot?.provider ?? voice.providerStatus?.autoProvider ?? voice.provider;
   const providerDiagnostic = voice.providerStatus?.diagnostics.find((diagnostic) => diagnostic.provider === voiceProvider);
   const missingProviderEnv = providerDiagnostic?.missingEnv ?? [];
-  const canConfirm = state?.status === "ready_to_confirm" && !state.pendingAction && !state.openQuestions.some((question) => question.blocksCoding);
+  const canConfirm = state?.status === "document_ready" && !state.pendingAction;
   const [documentExpanded, setDocumentExpanded] = useState(false);
-  const showClarification = state?.status === "clarifying" && state.openQuestions.length > 0;
-  const showRequirementConfirm = state?.status === "ready_to_confirm";
-  const showRequirementDocument = state?.status === "confirmed" && Boolean(state.requirementDocument);
+  const openGaps = state?.openGaps.filter((gap) => gap.status === "open").slice(0, 3) ?? [];
+  const showRequirementConfirm = state?.status === "document_ready";
+  const showRequirementDocument = (state?.status === "document_ready" || state?.status === "confirmed") && Boolean(state.requirementDocument);
 
   return (
     <div className="voice-workspace">
@@ -106,7 +106,7 @@ function VoiceRequirementWorkspace({
           {utterances.length ? (
             utterances.map((utterance) => (
               <article className="voice-transcript-line" key={utterance.id}>
-                <span>{utterance.speakerId ?? (utterance.source === "clarification_answer" ? "补充" : "语音")}</span>
+                <span>{utterance.speakerId ?? "语音"}</span>
                 <p>{utterance.text}</p>
               </article>
             ))
@@ -131,31 +131,27 @@ function VoiceRequirementWorkspace({
           <Cloud size={22} />
         </div>
         <div className="voice-thought-cloud-copy">
-          <span>{state?.pendingAction ? "整理中" : "当前理解"}</span>
+          <span>{state?.pendingAction === "summarize" ? "理解中" : "当前理解"}</span>
           <p>{state?.summary || "先听你完整描述几句。"}</p>
+          {openGaps.length ? (
+            <ul>
+              {openGaps.map((gap) => (
+                <li key={gap.id}>{gap.question}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       </aside>
 
-      {showClarification ? (
-        <section className="requirement-action-card is-clarification">
-          <span>需要补充</span>
-          <div>
-            {state.openQuestions.slice(0, 3).map((question) => (
-              <p key={question.id}>{question.question}</p>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
       {showRequirementConfirm ? (
-        <section className="requirement-action-card is-confirm">
+        <section className="requirement-action-card is-confirm is-document-ready">
           <div>
-            <span>需求确认</span>
-            <p>信息已经足够整理成需求文档。确认后，系统会生成完整需求文档并展示在这里。</p>
+            <span>需求文档已生成</span>
+            <p>已根据本轮语音整理需求文档，确认后可交给后续编码阶段。</p>
           </div>
           <button className="tool-button accent" disabled={!canConfirm} onClick={requirement.confirmRequirement}>
             <Check size={15} />
-            <span>确认并生成文档</span>
+            <span>确认需求</span>
           </button>
         </section>
       ) : null}
@@ -204,6 +200,9 @@ function getVoiceStatusLabel(status: VoiceSessionController["status"]) {
 function getRequirementStatusLabel(status: NonNullable<VoiceRequirementController["session"]>["requirementState"]["status"]) {
   const labels = {
     idle: "空闲",
+    listening: "持续监听",
+    finalizing: "生成文档中",
+    document_ready: "文档已生成",
     collecting: "收集中",
     processing: "整理中",
     clarifying: "待补充",

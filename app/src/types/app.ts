@@ -122,13 +122,16 @@ export type VoiceSessionSnapshot = {
 
 export type RequirementStatus =
   | "idle"
+  | "listening"
+  | "finalizing"
+  | "document_ready"
   | "collecting"
   | "processing"
   | "clarifying"
   | "ready_to_confirm"
   | "confirmed";
 
-export type RequirementPendingAction = "summarize" | "process" | "finalize";
+export type RequirementPendingAction = "summarize" | "process" | "finalize" | "save";
 
 export type RequirementUtteranceSource = "voice" | "clarification_answer";
 
@@ -149,6 +152,14 @@ export type RequirementQuestion = {
   answer?: string;
 };
 
+export type RequirementGap = {
+  id: string;
+  question: string;
+  reason: string;
+  severity: "blocking" | "helpful";
+  status: "open" | "resolved";
+};
+
 export type RequirementProcessingResult = {
   summary: string;
   requirementDocumentDraft: string;
@@ -163,7 +174,13 @@ export type RequirementProcessingResult = {
 
 export type RequirementSummaryResult = {
   summary: string;
-  uncertainties: string[];
+  confirmedFacts: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+  openGaps: Array<Omit<RequirementGap, "id" | "status"> & { id?: string; status?: RequirementGap["status"] }>;
+  uncertainties?: string[];
 };
 
 export type RequirementState = {
@@ -174,6 +191,7 @@ export type RequirementState = {
   requirementDocument: string;
   confirmedFacts: string[];
   constraints: string[];
+  openGaps: RequirementGap[];
   openQuestions: RequirementQuestion[];
   answeredQuestions: RequirementQuestion[];
   activeQuestionId?: string;

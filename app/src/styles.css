@@ -667,10 +667,25 @@ button {
   overflow: hidden;
   margin: 5px 0 0;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
   color: #2b3138;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.voice-thought-cloud-copy ul {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 7px 0 0 14px;
+  border-top: 1px solid rgb(154 178 205 / 28%);
+  color: #55606d;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.voice-thought-cloud-copy li {
+  padding-left: 1px;
 }
 
 .requirement-document-preview,
@@ -771,6 +786,10 @@ button {
 .requirement-action-card.is-confirm {
   border-color: #dce8f6;
   background: rgb(247 251 255 / 92%);
+}
+
+.requirement-action-card.is-document-ready {
+  bottom: 108px;
 }
 
 .requirement-action-card p {

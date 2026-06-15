@@ -188,31 +188,21 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
 }
 
 function getVoiceInputMode(status: VoiceSessionController["status"], requirementStatus: RequirementStatus | undefined) {
-  if (requirementStatus === "processing") {
+  if (requirementStatus === "finalizing" || requirementStatus === "processing") {
     return {
-      title: "正在整理这一轮内容",
-      hint: "稍等一下，系统会判断需求是否还需要补充。",
-      finishLabel: "整理中",
+      title: "正在生成需求文档",
+      hint: "正在整理完整需求，稍等一下。",
+      finishLabel: "生成中",
       canFinishTurn: false,
       disableMic: true
     };
   }
 
-  if (requirementStatus === "clarifying") {
+  if (requirementStatus === "document_ready") {
     return {
-      title: status === "recording" ? "正在听你回答问题" : "回答补充问题",
-      hint: "点击麦克风回答上方问题，回答完后点“回答完了”。",
-      finishLabel: "回答完了",
-      canFinishTurn: true,
-      disableMic: false
-    };
-  }
-
-  if (requirementStatus === "ready_to_confirm") {
-    return {
-      title: "需求已足够明确",
-      hint: "请确认生成需求文档。确认前不会进入编码。",
-      finishLabel: "等待确认",
+      title: "需求文档已生成",
+      hint: "可以展开查看文档，确认后进入后续编码阶段。",
+      finishLabel: "已生成",
       canFinishTurn: false,
       disableMic: true
     };
@@ -251,7 +241,7 @@ function getVoiceInputMode(status: VoiceSessionController["status"], requirement
   if (status === "recording") {
     return {
       title: "正在听你说需求",
-      hint: "继续自然描述，系统会逐步整理当前理解。",
+      hint: "继续自然描述，系统会实时整理当前理解和缺口。",
       finishLabel: "我说完了",
       canFinishTurn: true,
       disableMic: false
@@ -260,7 +250,7 @@ function getVoiceInputMode(status: VoiceSessionController["status"], requirement
 
   return {
     title: "语音需求模式",
-    hint: "点击麦克风继续说，或点“我说完了”整理需求。",
+    hint: "点击麦克风持续说需求，或点“我说完了”生成文档。",
     finishLabel: "我说完了",
     canFinishTurn: true,
     disableMic: false
