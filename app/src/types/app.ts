@@ -181,9 +181,14 @@ export type RequirementState = {
   outOfScope: string[];
   risks: string[];
   codingPrompt?: string;
+  savedRequirementDocumentPath?: string;
   pendingAction?: RequirementPendingAction;
   error?: string;
   updatedAt: string;
+};
+
+export type SavedRequirementDocument = {
+  path: string;
 };
 
 export type VoiceRequirementSession = {

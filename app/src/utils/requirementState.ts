@@ -4,6 +4,7 @@ import type {
   RequirementQuestion,
   RequirementState,
   RequirementSummaryResult,
+  SavedRequirementDocument,
   RequirementUtterance,
   VoiceRequirementSession,
   VoiceSessionStatus,
@@ -58,8 +59,14 @@ export type RequirementSessionAction =
       error: string;
     }
   | {
+      type: "mark_finalizing";
+      now: string;
+    }
+  | {
       type: "confirm_requirement";
       now: string;
+      savedRequirementDocumentPath?: string;
+      error?: string;
     };
 
 export type VoiceRequirementController = {
@@ -125,6 +132,7 @@ export function requirementSessionReducer(
         ...session.requirementState,
         pendingAction: undefined,
         codingPrompt: undefined,
+        savedRequirementDocumentPath: undefined,
         updatedAt: action.now
       },
       endedAt: undefined
@@ -199,6 +207,18 @@ export function requirementSessionReducer(
     };
   }
 
+  if (action.type === "mark_finalizing") {
+    return {
+      ...session,
+      requirementState: {
+        ...session.requirementState,
+        pendingAction: "finalize",
+        error: undefined,
+        updatedAt: action.now
+      }
+    };
+  }
+
   if (action.type === "apply_process_result") {
     if (action.requirementId !== session.requirementState.id) {
       return session;
@@ -259,8 +279,9 @@ export function requirementSessionReducer(
         ...session.requirementState,
         status: "confirmed",
         codingPrompt: createCodingPromptFromConfirmedRequirement(session.requirementState),
+        savedRequirementDocumentPath: action.savedRequirementDocumentPath,
         pendingAction: undefined,
-        error: undefined,
+        error: action.error,
         updatedAt: action.now
       }
     };
@@ -295,6 +316,7 @@ export function requirementSessionReducer(
       utterances,
       answeredQuestions: nextAnsweredQuestions,
       codingPrompt: undefined,
+      savedRequirementDocumentPath: undefined,
       pendingAction: undefined,
       error: undefined,
       updatedAt: action.now
@@ -306,7 +328,7 @@ export function useVoiceRequirementSession(voice: {
   sessionId?: string;
   status: VoiceSessionStatus;
   segments: VoiceTranscriptSegment[];
-}): VoiceRequirementController {
+}, projectPath?: string): VoiceRequirementController {
   const [session, dispatch] = useReducer(requirementSessionReducer, undefined);
   const sessionRef = useRef<VoiceRequirementSession | undefined>(undefined);
   const processedSegmentTextsRef = useRef<Map<string, string>>(new Map());
@@ -314,10 +336,15 @@ export function useVoiceRequirementSession(voice: {
   const summaryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>();
   const liveSummaryRequestRef = useRef(0);
   const processRequestRef = useRef(0);
+  const projectPathRef = useRef<string | undefined>(projectPath);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    projectPathRef.current = projectPath;
+  }, [projectPath]);
 
   useEffect(() => {
     if (!voice.sessionId) {
@@ -478,10 +505,50 @@ export function useVoiceRequirementSession(voice: {
   }, []);
 
   const confirmRequirement = useCallback(() => {
+    const currentSession = sessionRef.current;
+    if (!currentSession) {
+      return;
+    }
+
+    const state = currentSession.requirementState;
+    const codingPrompt = createCodingPromptFromConfirmedRequirement(state);
     dispatch({
-      type: "confirm_requirement",
+      type: "mark_finalizing",
       now: nowString()
     });
+
+    const selectedProjectPath = projectPathRef.current;
+    if (!selectedProjectPath) {
+      dispatch({
+        type: "confirm_requirement",
+        error: "未选择项目，需求文档未写入文件。",
+        now: nowString()
+      });
+      return;
+    }
+
+    void invokeTauri<SavedRequirementDocument>("save_requirement_document", {
+      request: {
+        projectPath: selectedProjectPath,
+        requirementDocument: state.requirementDocument,
+        summary: state.summary,
+        codingPrompt
+      }
+    })
+      .then((savedDocument) => {
+        dispatch({
+          type: "confirm_requirement",
+          savedRequirementDocumentPath: savedDocument.path,
+          now: nowString()
+        });
+      })
+      .catch((error) => {
+        dispatch({
+          type: "confirm_requirement",
+          error: toErrorMessage(error),
+          now: nowString()
+        });
+      });
   }, []);
 
   return useMemo(

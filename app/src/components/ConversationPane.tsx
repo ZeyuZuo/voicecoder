@@ -21,7 +21,7 @@ export function ConversationPane() {
   const { currentProject, maximizedPane, sidebarCollapsed, workspaceCollapsed, toggleMaximizedPane, toggleSidebar, toggleWorkspace } = useAppState();
   const maximized = maximizedPane === "conversation";
   const voice = useVoiceSession();
-  const requirement = useVoiceRequirementSession(voice);
+  const requirement = useVoiceRequirementSession(voice, currentProject?.path);
   const voiceMode = voice.status !== "idle" || voice.segments.length > 0 || requirement.active;
 
   return (
@@ -78,7 +78,7 @@ function VoiceRequirementWorkspace({
   const voiceProvider = voice.sessionSnapshot?.provider ?? voice.providerStatus?.autoProvider ?? voice.provider;
   const providerDiagnostic = voice.providerStatus?.diagnostics.find((diagnostic) => diagnostic.provider === voiceProvider);
   const missingProviderEnv = providerDiagnostic?.missingEnv ?? [];
-  const canConfirm = state?.status === "ready_to_confirm" && !state.openQuestions.some((question) => question.blocksCoding);
+  const canConfirm = state?.status === "ready_to_confirm" && !state.pendingAction && !state.openQuestions.some((question) => question.blocksCoding);
   const [documentExpanded, setDocumentExpanded] = useState(false);
   const showClarification = state?.status === "clarifying" && state.openQuestions.length > 0;
   const showRequirementConfirm = state?.status === "ready_to_confirm";
@@ -165,6 +165,9 @@ function VoiceRequirementWorkspace({
           <div>
             <span>需求文档</span>
             <p>{state.requirementDocument}</p>
+            {state.savedRequirementDocumentPath ? (
+              <small className="requirement-document-path">已写入 {state.savedRequirementDocumentPath}</small>
+            ) : null}
           </div>
           <button className="tool-button document-expand-button" onClick={() => setDocumentExpanded((expanded) => !expanded)}>
             {documentExpanded ? <ChevronDown size={15} /> : <ChevronUp size={15} />}

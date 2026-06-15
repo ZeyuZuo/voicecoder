@@ -721,6 +721,16 @@ button {
   white-space: pre-line;
 }
 
+.requirement-document-path {
+  display: block;
+  overflow: hidden;
+  margin-top: 6px;
+  color: #7a828c;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .requirement-document-preview.is-expanded p {
   display: block;
   max-height: none;
