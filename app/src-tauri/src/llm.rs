@@ -454,6 +454,8 @@ async fn complete_openai_compatible_json(
     config: OpenaiCompatibleLlmConfig,
     request: LlmJsonRequest,
 ) -> Result<LlmJsonResponse, String> {
+    crate::install_rustls_crypto_provider();
+
     let endpoint = config.chat_completions_endpoint();
     let client = reqwest::Client::builder()
         .timeout(config.timeout)

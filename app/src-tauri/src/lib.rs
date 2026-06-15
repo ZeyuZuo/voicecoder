@@ -116,6 +116,8 @@ fn find_git_dir(path: &Path) -> Option<std::path::PathBuf> {
 }
 
 pub fn run() {
+    install_rustls_crypto_provider();
+
     tauri::Builder::default()
         .manage(voice::VoiceState::default())
         .plugin(tauri_plugin_dialog::init())
@@ -136,4 +138,8 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VoiceCoder");
+}
+
+pub(crate) fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
