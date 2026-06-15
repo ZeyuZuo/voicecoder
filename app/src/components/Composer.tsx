@@ -117,7 +117,7 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
             <ChevronDown size={14} />
           </button>
           {projectMenuOpen ? (
-            <div className="project-menu">
+            <div className={`project-menu ${voiceMode ? "opens-up" : ""}`}>
               {visibleProjects.length ? (
                 <>
                   <label className="project-search">
