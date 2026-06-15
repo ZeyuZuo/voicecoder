@@ -1,5 +1,5 @@
 import { ChevronRight, FileCode2, FileText, Folder, FolderOpen } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { FileTreeEntry, Project } from "../../types/app";
 import { getBrowserDirectoryHandle, readBrowserProjectTree } from "../../utils/browserFileSystem";
@@ -21,6 +21,26 @@ export function FileExplorer({ project }: FileExplorerProps) {
   const [selectedPath, setSelectedPath] = useState<string | undefined>();
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [error, setError] = useState<string | undefined>();
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const revealPathRef = useRef<string | undefined>();
+
+  useEffect(() => {
+    function handleProjectFilesChanged(event: Event) {
+      const detail = (event as CustomEvent<{ projectPath?: string; changedPath?: string }>).detail;
+      if (!project || detail?.projectPath !== project.path) {
+        return;
+      }
+
+      revealPathRef.current = detail.changedPath;
+      setRefreshVersion((version) => version + 1);
+    }
+
+    window.addEventListener("voicecoder:project-files-changed", handleProjectFilesChanged);
+
+    return () => {
+      window.removeEventListener("voicecoder:project-files-changed", handleProjectFilesChanged);
+    };
+  }, [project]);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,7 +60,9 @@ export function FileExplorer({ project }: FileExplorerProps) {
           const tree = await invoke<BackendFileTreeEntry[]>("read_project_tree", { path: project.path });
           if (!cancelled) {
             setEntries(tree.map(normalizeEntry));
-            setExpandedPaths(new Set([project.path]));
+            setExpandedPaths((paths) => mergeExpandedPaths(paths, project.path, revealPathRef.current));
+            setSelectedPath(revealPathRef.current);
+            revealPathRef.current = undefined;
             setStatus("idle");
           }
           return;
@@ -49,7 +71,9 @@ export function FileExplorer({ project }: FileExplorerProps) {
         const browserTree = await readBrowserProjectTree(project.path);
         if (!cancelled && browserTree) {
           setEntries(browserTree);
-          setExpandedPaths(new Set([project.path]));
+          setExpandedPaths((paths) => mergeExpandedPaths(paths, project.path, revealPathRef.current));
+          setSelectedPath(revealPathRef.current);
+          revealPathRef.current = undefined;
           setStatus("idle");
           return;
         }
@@ -73,7 +97,7 @@ export function FileExplorer({ project }: FileExplorerProps) {
     return () => {
       cancelled = true;
     };
-  }, [project]);
+  }, [project, refreshVersion]);
 
   if (!project) {
     return (
@@ -181,6 +205,40 @@ function normalizeEntry(entry: BackendFileTreeEntry): FileTreeEntry {
     isDirectory: entry.is_directory,
     children: entry.children?.map(normalizeEntry)
   };
+}
+
+function mergeExpandedPaths(paths: Set<string>, projectPath: string, revealPath?: string) {
+  const nextPaths = new Set(paths);
+  nextPaths.add(projectPath);
+
+  if (revealPath?.startsWith(projectPath)) {
+    for (const parentPath of parentPathsBetween(projectPath, revealPath)) {
+      nextPaths.add(parentPath);
+    }
+  }
+
+  return nextPaths;
+}
+
+function parentPathsBetween(rootPath: string, targetPath: string) {
+  const rootSegments = splitPath(rootPath);
+  const targetSegments = splitPath(targetPath);
+  const parents: string[] = [];
+
+  for (let index = rootSegments.length + 1; index < targetSegments.length; index += 1) {
+    parents.push(joinPathSegments(targetSegments.slice(0, index), targetPath.startsWith("/")));
+  }
+
+  return parents;
+}
+
+function splitPath(path: string) {
+  return path.split("/").filter(Boolean);
+}
+
+function joinPathSegments(segments: string[], absolute: boolean) {
+  const joined = segments.join("/");
+  return absolute ? `/${joined}` : joined;
 }
 
 function getFileIcon(name: string) {

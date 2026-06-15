@@ -536,6 +536,13 @@ export function useVoiceRequirementSession(voice: {
       }
     })
       .then((savedDocument) => {
+        window.dispatchEvent(new CustomEvent("voicecoder:project-files-changed", {
+          detail: {
+            projectPath: selectedProjectPath,
+            changedPath: savedDocument.path
+          }
+        }));
+
         dispatch({
           type: "confirm_requirement",
           savedRequirementDocumentPath: savedDocument.path,

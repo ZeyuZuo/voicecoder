@@ -470,6 +470,8 @@ button {
   display: grid;
   min-height: 0;
   padding: 22px clamp(20px, 4vw, 46px) 18px;
+  --voice-edge: clamp(20px, 4vw, 46px);
+  --voice-cloud-space: clamp(250px, 26vw, 330px);
 }
 
 .voice-workspace-main {
@@ -546,14 +548,14 @@ button {
   flex-direction: column;
   justify-content: flex-end;
   min-height: 0;
-  padding: 26px clamp(270px, 28vw, 360px) 120px 0;
+  padding: 26px var(--voice-cloud-space) 120px 0;
   overflow: hidden;
 }
 
 .voice-transcript-canvas::before {
   position: absolute;
   top: 0;
-  right: clamp(270px, 28vw, 360px);
+  right: var(--voice-cloud-space);
   left: 0;
   height: 64px;
   background: linear-gradient(180deg, #fbfbfa 0%, rgb(251 251 250 / 0%) 100%);
@@ -564,10 +566,10 @@ button {
 
 .voice-transcript-line {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-  max-width: 760px;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  max-width: 680px;
   margin-top: 10px;
   opacity: 0;
   transform: translateY(12px);
@@ -576,10 +578,10 @@ button {
 
 .voice-transcript-line span {
   overflow: hidden;
-  padding-top: 5px;
   color: #969a9f;
   font-size: 11px;
   font-weight: 650;
+  line-height: 1.4;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -588,7 +590,7 @@ button {
 .voice-transcript-line p {
   min-width: 0;
   margin: 0;
-  padding: 8px 0 10px;
+  padding: 9px 0 10px;
   border-bottom: 1px solid #e7e8e4;
   color: #25272b;
   font-size: 19px;
@@ -625,10 +627,10 @@ button {
 
 .voice-thought-cloud {
   position: absolute;
-  right: clamp(10px, 2vw, 24px);
+  right: var(--voice-edge);
   bottom: 130px;
   display: grid;
-  width: min(275px, 30vw);
+  width: min(250px, 26vw);
   grid-template-columns: 34px minmax(0, 1fr);
   gap: 9px;
   padding: 12px;
