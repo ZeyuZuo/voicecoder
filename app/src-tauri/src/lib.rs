@@ -2,6 +2,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+mod coding_agent;
 mod env_config;
 mod llm;
 mod voice;
@@ -197,6 +198,7 @@ pub fn run() {
             voice::start_voice_session,
             voice::send_voice_audio_chunk,
             voice::get_voice_provider_status,
+            coding_agent::get_coding_agent_provider_status,
             llm::get_llm_provider_status,
             llm::test_llm_provider_connection,
             llm::summarize_requirement_state,
