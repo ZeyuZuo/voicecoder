@@ -1,8 +1,14 @@
 use crate::env_config::read_local_env;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, process::Command};
+use serde_json::{json, Value};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Write},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+};
 
 const DEFAULT_CODEX_BIN: &str = "codex";
+const APP_SERVER_INITIALIZE_REQUEST_ID: u64 = 0;
 
 #[allow(dead_code)]
 pub(crate) trait CodingAgentSession {
@@ -16,8 +22,9 @@ pub(crate) trait CodingAgentProvider {
     fn diagnostic(&self) -> CodingAgentProviderDiagnostic;
     fn start_session(
         &self,
-        _context: CodingAgentStartContext,
+        context: CodingAgentStartContext,
     ) -> Result<Box<dyn CodingAgentSession + Send>, String> {
+        let _ = context;
         Err("Coding Agent session start is not implemented yet.".to_string())
     }
 }
@@ -125,6 +132,14 @@ impl CodingAgentProvider for CodexAppServerProvider {
                 ("threadMode", "persistent"),
             ],
         )
+    }
+
+    fn start_session(
+        &self,
+        context: CodingAgentStartContext,
+    ) -> Result<Box<dyn CodingAgentSession + Send>, String> {
+        self.validate_start()?;
+        Ok(Box::new(start_codex_app_server_session(context)?))
     }
 }
 
@@ -236,6 +251,158 @@ fn codex_executable() -> String {
     read_local_env("VOICECODER_CODEX_BIN").unwrap_or_else(|| DEFAULT_CODEX_BIN.to_string())
 }
 
+#[allow(dead_code)]
+struct CodexAppServerSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    project_path: String,
+    initial_prompt: String,
+}
+
+impl CodingAgentSession for CodexAppServerSession {
+    fn cancel(&mut self) -> Result<(), String> {
+        self.child
+            .kill()
+            .map_err(|error| format!("停止 Codex app-server 失败：{error}"))?;
+        let _ = self.child.wait();
+        Ok(())
+    }
+}
+
+fn start_codex_app_server_session(
+    context: CodingAgentStartContext,
+) -> Result<CodexAppServerSession, String> {
+    let executable = codex_executable();
+    let mut child = Command::new(&executable)
+        .args(["app-server", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("启动 Codex app-server 失败：{error}"))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        return Err("Codex app-server stdin 不可用。".to_string());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return Err("Codex app-server stdout 不可用。".to_string());
+    };
+    let mut stdout = BufReader::new(stdout);
+
+    let initialize_request = build_initialize_request();
+    if let Err(error) = write_json_line(&mut stdin, &initialize_request) {
+        return Err(cleanup_child_with_error(&mut child, error));
+    }
+    if let Err(error) = read_initialize_response(&mut stdout) {
+        return Err(cleanup_child_with_error(&mut child, error));
+    }
+
+    let initialized_notification = build_initialized_notification();
+    if let Err(error) = write_json_line(&mut stdin, &initialized_notification) {
+        return Err(cleanup_child_with_error(&mut child, error));
+    }
+
+    Ok(CodexAppServerSession {
+        child,
+        stdin,
+        stdout,
+        project_path: context.project_path,
+        initial_prompt: context.prompt,
+    })
+}
+
+fn cleanup_child_with_error(child: &mut Child, error: String) -> String {
+    let _ = child.kill();
+    let _ = child.wait();
+    error
+}
+
+fn build_initialize_request() -> Value {
+    json!({
+        "method": "initialize",
+        "id": APP_SERVER_INITIALIZE_REQUEST_ID,
+        "params": {
+            "clientInfo": {
+                "name": "voicecoder",
+                "title": "VoiceCoder",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }
+    })
+}
+
+fn build_initialized_notification() -> Value {
+    json!({
+        "method": "initialized",
+        "params": {}
+    })
+}
+
+fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Result<(), String> {
+    let line = serde_json::to_string(value)
+        .map_err(|error| format!("序列化 Codex app-server 消息失败：{error}"))?;
+    stdin
+        .write_all(line.as_bytes())
+        .and_then(|_| stdin.write_all(b"\n"))
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("写入 Codex app-server stdin 失败：{error}"))
+}
+
+fn read_initialize_response(stdout: &mut BufReader<ChildStdout>) -> Result<Value, String> {
+    loop {
+        let mut line = String::new();
+        let read_bytes = stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("读取 Codex app-server stdout 失败：{error}"))?;
+        if read_bytes == 0 {
+            return Err("Codex app-server 在 initialize 完成前退出。".to_string());
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+
+        if message
+            .get("id")
+            .and_then(Value::as_u64)
+            .is_some_and(|id| id == APP_SERVER_INITIALIZE_REQUEST_ID)
+        {
+            return validate_initialize_response(message);
+        }
+    }
+}
+
+fn validate_initialize_response(message: Value) -> Result<Value, String> {
+    if let Some(error) = message.get("error") {
+        return Err(format!(
+            "Codex app-server initialize 失败：{}",
+            json_rpc_error_message(error)
+        ));
+    }
+
+    if message.get("result").is_none() {
+        return Err("Codex app-server initialize 响应缺少 result。".to_string());
+    }
+
+    Ok(message)
+}
+
+fn json_rpc_error_message(error: &Value) -> String {
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +432,54 @@ mod tests {
         assert_eq!(
             CodingAgentProviderRegistry::resolve_provider(CodingAgentProviderKind::Auto),
             CodingAgentProviderKind::CodexAppServer
+        );
+    }
+
+    #[test]
+    fn builds_initialize_request_with_voicecoder_client_info() {
+        let request = build_initialize_request();
+
+        assert_eq!(
+            request.get("method").and_then(Value::as_str),
+            Some("initialize")
+        );
+        assert_eq!(
+            request.get("id").and_then(Value::as_u64),
+            Some(APP_SERVER_INITIALIZE_REQUEST_ID)
+        );
+        assert_eq!(
+            request
+                .pointer("/params/clientInfo/name")
+                .and_then(Value::as_str),
+            Some("voicecoder")
+        );
+    }
+
+    #[test]
+    fn validate_initialize_response_accepts_result() {
+        let response = json!({
+            "id": APP_SERVER_INITIALIZE_REQUEST_ID,
+            "result": {
+                "platformFamily": "macos"
+            }
+        });
+
+        assert!(validate_initialize_response(response).is_ok());
+    }
+
+    #[test]
+    fn validate_initialize_response_rejects_json_rpc_error() {
+        let response = json!({
+            "id": APP_SERVER_INITIALIZE_REQUEST_ID,
+            "error": {
+                "code": -32000,
+                "message": "Not initialized"
+            }
+        });
+
+        assert_eq!(
+            validate_initialize_response(response).unwrap_err(),
+            "Codex app-server initialize 失败：Not initialized"
         );
     }
 }

@@ -300,7 +300,7 @@ cancel_active_agent_run()
 - [x] Step 3：新增前端 demo session reducer，管理 `ready_to_start`、`agent_running`、`preview_ready`、`feedback_listening` 等状态。
 - [x] Step 4：在需求 `confirmed` 后创建 DemoSession，并显示“生成 demo”操作。
 - [x] Step 5：新增 Rust `coding_agent` 模块，定义 `CodingAgentProvider`、`CodingAgentSession`、provider diagnostic。
-- [ ] Step 6：实现 `codex_app_server` provider：启动 `codex app-server --stdio`、完成 initialize / initialized。
+- [x] Step 6：实现 `codex_app_server` provider：启动 `codex app-server --stdio`、完成 initialize / initialized。
 - [ ] Step 7：实现 app-server JSON-RPC 客户端：请求 id 管理、响应匹配、通知分发、子进程退出处理。
 - [ ] Step 8：实现 `thread/start` 和 `turn/start`，支持传入 `cwd`、sandbox、prompt。
 - [ ] Step 9：实现 app-server 事件归一化，把 Codex 通知转换成前端 `AgentEvent`。
