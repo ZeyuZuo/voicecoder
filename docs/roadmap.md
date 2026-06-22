@@ -191,31 +191,57 @@
 - 用户可以确认整理后的需求文档和 Coding Prompt。
 - Phase 3 使用真实 OpenAI-compatible API，不实现 mock LLM provider。
 
-## Phase 4：Coding Agent MVP
+## Phase 4：Demo Agent Loop MVP
 
-目标：跑通“确认需求后自动修改代码”的第一条闭环。
+目标：跑通“确认需求后生成第一版 demo，并支持用户看 demo 后继续用语音反馈修改”的多轮闭环。
+
+核心判断：
+
+- Phase 4 不再只设计成一次性 `codex exec` 调用。
+- 第一版正式主线优先接入 `codex app-server`，把 demo 生成和后续修改放在同一个 Codex thread 中持续推进。
+- `codex exec --json` 保留为诊断、实验和后备 provider，不作为长期交互主路径。
+- Phase 3 产物中的需求文档和 Coding Prompt 作为 DemoSession 的初始输入。
+- 第一轮是 `initial_build`，后续每轮语音反馈是 `feedback_change`，不能每次从零重写需求。
 
 交付物：
 
-- Coding Agent Provider 抽象。
-- 第一版使用 `codex exec --json --sandbox workspace-write --cd <project>`。
-- Tauri 后端管理子进程。
-- JSONL 事件解析：
+- DemoSession 状态模型：
+  - 初始需求文档。
+  - 初始 Coding Prompt。
+  - Codex thread id。
+  - Agent runs。
+  - 语音 feedback turns。
+  - 当前 preview 状态。
+- Coding Agent Provider 抽象：
+  - `codex_app_server` 作为主 provider。
+  - `codex_exec_json` 作为后备 provider。
+- Tauri 后端管理 `codex app-server` 子进程。
+- JSON-RPC / JSONL 事件解析：
+  - thread / turn lifecycle。
   - agent message。
-  - plan / reasoning。
+  - plan / reasoning summary。
   - command execution。
   - file change。
   - final result。
   - error。
-- 对话区展示执行进度。
-- 执行完成后展示变更摘要。
+- 对话区展示 Agent 执行进度。
+- 第一版 demo 完成后展示变更摘要，并刷新文件树。
+- demo 生成后进入语音反馈模式。
+- 用户语音反馈整理成增量修改指令。
+- 同一个 Codex thread 继续执行修改，并刷新新的 demo。
 
 验收标准：
 
-- 对一个测试前端项目可以完成一次真实代码修改。
+- 对一个测试前端项目可以根据已确认需求生成第一版 demo。
 - 用户能看到 Agent 正在做什么。
+- 第一版 demo 完成后，用户可以通过语音描述不满意的地方。
+- 系统能把反馈整理成本轮修改指令，而不是重写完整需求文档。
+- 后续修改在同一个 DemoSession / Codex thread 中继续执行。
+- 每轮执行前必须确认目标项目、运行类型和本轮 prompt。
 - 失败时保留可排查日志。
-- 执行前必须确认目标项目和 Coding Prompt。
+- 完成后刷新文件树；预览刷新可先接入最小可用版本，完整 dev server 管理进入 Phase 6。
+
+详细 todo 见 `docs/phase4-demo-agent-loop-todo.md`。
 
 ## Phase 5：审查与 Diff
 
