@@ -9,6 +9,7 @@ use std::{
 
 const DEFAULT_CODEX_BIN: &str = "codex";
 const FIRST_APP_SERVER_REQUEST_ID: u64 = 0;
+const DEFAULT_CODEX_SANDBOX: CodingAgentSandboxMode = CodingAgentSandboxMode::WorkspaceWrite;
 
 #[allow(dead_code)]
 pub(crate) trait CodingAgentSession {
@@ -65,6 +66,43 @@ pub struct CodingAgentProviderDiagnostic {
 pub(crate) struct CodingAgentStartContext {
     pub project_path: String,
     pub prompt: String,
+    #[serde(default)]
+    pub sandbox: Option<CodingAgentSandboxMode>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodingAgentSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodingAgentSandboxMode {
+    fn app_server_thread_sandbox(self) -> &'static str {
+        match self {
+            CodingAgentSandboxMode::ReadOnly => "read-only",
+            CodingAgentSandboxMode::WorkspaceWrite => "workspace-write",
+            CodingAgentSandboxMode::DangerFullAccess => "danger-full-access",
+        }
+    }
+
+    fn app_server_turn_sandbox_policy(self, project_path: &str) -> Value {
+        match self {
+            CodingAgentSandboxMode::ReadOnly => json!({
+                "type": "readOnly",
+                "networkAccess": false
+            }),
+            CodingAgentSandboxMode::WorkspaceWrite => json!({
+                "type": "workspaceWrite",
+                "writableRoots": [project_path],
+                "networkAccess": false
+            }),
+            CodingAgentSandboxMode::DangerFullAccess => json!({
+                "type": "dangerFullAccess"
+            }),
+        }
+    }
 }
 
 pub(crate) struct CodingAgentProviderRegistry;
@@ -256,6 +294,9 @@ struct CodexAppServerSession {
     child: Child,
     client: CodexAppServerClient,
     project_path: String,
+    sandbox: CodingAgentSandboxMode,
+    codex_thread_id: String,
+    initial_turn_id: String,
     initial_prompt: String,
 }
 
@@ -272,6 +313,8 @@ impl CodingAgentSession for CodexAppServerSession {
 fn start_codex_app_server_session(
     context: CodingAgentStartContext,
 ) -> Result<CodexAppServerSession, String> {
+    validate_coding_agent_start_context(&context)?;
+
     let executable = codex_executable();
     let mut child = Command::new(&executable)
         .args(["app-server", "--stdio"])
@@ -293,13 +336,31 @@ fn start_codex_app_server_session(
     if let Err(error) = initialize_codex_app_server(&mut child, &mut client) {
         return Err(cleanup_child_with_error(&mut child, error));
     }
+    let run_handles = match start_initial_codex_turn(&mut child, &mut client, &context) {
+        Ok(run_handles) => run_handles,
+        Err(error) => return Err(cleanup_child_with_error(&mut child, error)),
+    };
+    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
 
     Ok(CodexAppServerSession {
         child,
         client,
         project_path: context.project_path,
+        sandbox,
+        codex_thread_id: run_handles.thread_id,
+        initial_turn_id: run_handles.turn_id,
         initial_prompt: context.prompt,
     })
+}
+
+fn validate_coding_agent_start_context(context: &CodingAgentStartContext) -> Result<(), String> {
+    if context.project_path.trim().is_empty() {
+        return Err("Coding Agent 启动失败：项目路径不能为空。".to_string());
+    }
+    if context.prompt.trim().is_empty() {
+        return Err("Coding Agent 启动失败：prompt 不能为空。".to_string());
+    }
+    Ok(())
 }
 
 fn cleanup_child_with_error(child: &mut Child, error: String) -> String {
@@ -324,6 +385,71 @@ fn initialize_params() -> Value {
             "title": "VoiceCoder",
             "version": env!("CARGO_PKG_VERSION")
         }
+    })
+}
+
+struct CodexAppServerRunHandles {
+    thread_id: String,
+    turn_id: String,
+}
+
+fn start_initial_codex_turn(
+    child: &mut Child,
+    client: &mut CodexAppServerClient,
+    context: &CodingAgentStartContext,
+) -> Result<CodexAppServerRunHandles, String> {
+    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
+    let thread_response = client.send_request(
+        child,
+        "thread/start",
+        build_thread_start_params(&context.project_path, sandbox),
+    )?;
+    let thread_id = extract_json_pointer_string(
+        &thread_response,
+        "/result/thread/id",
+        "Codex app-server thread/start 响应缺少 thread.id。",
+    )?;
+
+    let turn_response = client.send_request(
+        child,
+        "turn/start",
+        build_turn_start_params(&thread_id, &context.project_path, sandbox, &context.prompt),
+    )?;
+    let turn_id = extract_json_pointer_string(
+        &turn_response,
+        "/result/turn/id",
+        "Codex app-server turn/start 响应缺少 turn.id。",
+    )?;
+
+    Ok(CodexAppServerRunHandles { thread_id, turn_id })
+}
+
+fn build_thread_start_params(project_path: &str, sandbox: CodingAgentSandboxMode) -> Value {
+    json!({
+        "cwd": project_path,
+        "runtimeWorkspaceRoots": [project_path],
+        "sandbox": sandbox.app_server_thread_sandbox(),
+        "threadSource": "user"
+    })
+}
+
+fn build_turn_start_params(
+    thread_id: &str,
+    project_path: &str,
+    sandbox: CodingAgentSandboxMode,
+    prompt: &str,
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "cwd": project_path,
+        "runtimeWorkspaceRoots": [project_path],
+        "sandboxPolicy": sandbox.app_server_turn_sandbox_policy(project_path),
+        "input": [
+            {
+                "type": "text",
+                "text": prompt
+            }
+        ]
     })
 }
 
@@ -475,6 +601,18 @@ fn validate_json_rpc_response(message: Value) -> Result<Value, String> {
     Ok(message)
 }
 
+fn extract_json_pointer_string(
+    message: &Value,
+    pointer: &str,
+    error_message: &str,
+) -> Result<String, String> {
+    message
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| error_message.to_string())
+}
+
 fn format_exit_status(status: std::process::ExitStatus) -> String {
     status
         .code()
@@ -603,6 +741,162 @@ mod tests {
         assert_eq!(
             request.pointer("/params/cwd").and_then(Value::as_str),
             Some("/tmp/project")
+        );
+    }
+
+    #[test]
+    fn builds_thread_start_params_with_cwd_and_workspace_sandbox() {
+        let params = build_thread_start_params(
+            "/tmp/voicecoder-demo",
+            CodingAgentSandboxMode::WorkspaceWrite,
+        );
+
+        assert_eq!(
+            params.get("cwd").and_then(Value::as_str),
+            Some("/tmp/voicecoder-demo")
+        );
+        assert_eq!(
+            params.get("sandbox").and_then(Value::as_str),
+            Some("workspace-write")
+        );
+        assert_eq!(
+            params
+                .pointer("/runtimeWorkspaceRoots/0")
+                .and_then(Value::as_str),
+            Some("/tmp/voicecoder-demo")
+        );
+        assert_eq!(
+            params.get("threadSource").and_then(Value::as_str),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn builds_turn_start_params_with_thread_cwd_prompt_and_sandbox_policy() {
+        let params = build_turn_start_params(
+            "thread-1",
+            "/tmp/voicecoder-demo",
+            CodingAgentSandboxMode::WorkspaceWrite,
+            "Build the demo",
+        );
+
+        assert_eq!(
+            params.get("threadId").and_then(Value::as_str),
+            Some("thread-1")
+        );
+        assert_eq!(
+            params.get("cwd").and_then(Value::as_str),
+            Some("/tmp/voicecoder-demo")
+        );
+        assert_eq!(
+            params.pointer("/input/0/type").and_then(Value::as_str),
+            Some("text")
+        );
+        assert_eq!(
+            params.pointer("/input/0/text").and_then(Value::as_str),
+            Some("Build the demo")
+        );
+        assert_eq!(
+            params
+                .pointer("/sandboxPolicy/type")
+                .and_then(Value::as_str),
+            Some("workspaceWrite")
+        );
+        assert_eq!(
+            params
+                .pointer("/sandboxPolicy/writableRoots/0")
+                .and_then(Value::as_str),
+            Some("/tmp/voicecoder-demo")
+        );
+    }
+
+    #[test]
+    fn maps_danger_full_access_sandbox_for_thread_and_turn_protocols() {
+        let thread_params = build_thread_start_params(
+            "/tmp/voicecoder-demo",
+            CodingAgentSandboxMode::DangerFullAccess,
+        );
+        let turn_params = build_turn_start_params(
+            "thread-1",
+            "/tmp/voicecoder-demo",
+            CodingAgentSandboxMode::DangerFullAccess,
+            "Build the demo",
+        );
+
+        assert_eq!(
+            thread_params.get("sandbox").and_then(Value::as_str),
+            Some("danger-full-access")
+        );
+        assert_eq!(
+            turn_params
+                .pointer("/sandboxPolicy/type")
+                .and_then(Value::as_str),
+            Some("dangerFullAccess")
+        );
+    }
+
+    #[test]
+    fn validates_coding_agent_start_context_requires_project_path_and_prompt() {
+        assert!(
+            validate_coding_agent_start_context(&CodingAgentStartContext {
+                project_path: "/tmp/project".to_string(),
+                prompt: "Build it".to_string(),
+                sandbox: None,
+            })
+            .is_ok()
+        );
+
+        assert_eq!(
+            validate_coding_agent_start_context(&CodingAgentStartContext {
+                project_path: " ".to_string(),
+                prompt: "Build it".to_string(),
+                sandbox: None,
+            })
+            .unwrap_err(),
+            "Coding Agent 启动失败：项目路径不能为空。"
+        );
+        assert_eq!(
+            validate_coding_agent_start_context(&CodingAgentStartContext {
+                project_path: "/tmp/project".to_string(),
+                prompt: " ".to_string(),
+                sandbox: None,
+            })
+            .unwrap_err(),
+            "Coding Agent 启动失败：prompt 不能为空。"
+        );
+    }
+
+    #[test]
+    fn extracts_thread_and_turn_ids_from_app_server_responses() {
+        let thread_response = json!({
+            "id": 1,
+            "result": {
+                "thread": {
+                    "id": "thread-1"
+                }
+            }
+        });
+        let turn_response = json!({
+            "id": 2,
+            "result": {
+                "turn": {
+                    "id": "turn-1"
+                }
+            }
+        });
+
+        assert_eq!(
+            extract_json_pointer_string(&thread_response, "/result/thread/id", "missing").unwrap(),
+            "thread-1"
+        );
+        assert_eq!(
+            extract_json_pointer_string(&turn_response, "/result/turn/id", "missing").unwrap(),
+            "turn-1"
+        );
+        assert_eq!(
+            extract_json_pointer_string(&turn_response, "/result/thread/id", "missing")
+                .unwrap_err(),
+            "missing"
         );
     }
 
