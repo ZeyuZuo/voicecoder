@@ -297,7 +297,7 @@ cancel_active_agent_run()
 
 - [x] Step 1：更新路线图和 Phase 4 文档，明确 Demo Agent Loop 是 Phase 4 主目标。
 - [x] Step 2：新增 TypeScript 类型：`DemoSession`、`AgentRun`、`DemoFeedbackTurn`、`AgentEvent`、`CodingAgentProviderStatus`。
-- [ ] Step 3：新增前端 demo session reducer，管理 `ready_to_start`、`agent_running`、`preview_ready`、`feedback_listening` 等状态。
+- [x] Step 3：新增前端 demo session reducer，管理 `ready_to_start`、`agent_running`、`preview_ready`、`feedback_listening` 等状态。
 - [ ] Step 4：在需求 `confirmed` 后创建 DemoSession，并显示“生成 demo”操作。
 - [ ] Step 5：新增 Rust `coding_agent` 模块，定义 `CodingAgentProvider`、`CodingAgentSession`、provider diagnostic。
 - [ ] Step 6：实现 `codex_app_server` provider：启动 `codex app-server --stdio`、完成 initialize / initialized。
