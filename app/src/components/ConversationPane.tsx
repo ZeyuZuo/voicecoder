@@ -85,7 +85,7 @@ function VoiceRequirementWorkspace({
   const showRequirementDocument = (state?.status === "document_ready" || state?.status === "confirmed") && Boolean(state.requirementDocument);
 
   return (
-    <div className="voice-workspace">
+    <div className={`voice-workspace ${showRequirementDocument ? "has-document-stack" : ""}`}>
       <div className="voice-workspace-main">
         <div className="voice-workspace-topline">
           <StatusPill active={voice.recording}>{getVoiceStatusLabel(voice.status)}</StatusPill>
@@ -143,33 +143,37 @@ function VoiceRequirementWorkspace({
         </div>
       </aside>
 
-      {showRequirementConfirm ? (
-        <section className="requirement-action-card is-confirm is-document-ready">
-          <div>
-            <span>需求文档已生成</span>
-            <p>已根据本轮语音整理需求文档，确认后可交给后续编码阶段。</p>
-          </div>
-          <button className="tool-button accent" disabled={!canConfirm} onClick={requirement.confirmRequirement}>
-            <Check size={15} />
-            <span>确认需求</span>
-          </button>
-        </section>
-      ) : null}
+      {showRequirementConfirm || showRequirementDocument ? (
+        <div className="requirement-bottom-stack">
+          {showRequirementConfirm ? (
+            <section className="requirement-action-card is-confirm is-document-ready">
+              <div>
+                <span>需求文档已生成</span>
+                <p>已根据本轮语音整理需求文档，确认后可交给后续编码阶段。</p>
+              </div>
+              <button className="tool-button accent" disabled={!canConfirm} onClick={requirement.confirmRequirement}>
+                <Check size={15} />
+                <span>确认需求</span>
+              </button>
+            </section>
+          ) : null}
 
-      {showRequirementDocument ? (
-        <section className={`requirement-document-preview ${documentExpanded ? "is-expanded" : ""}`}>
-          <div>
-            <span>需求文档</span>
-            <p>{state.requirementDocument}</p>
-            {state.savedRequirementDocumentPath ? (
-              <small className="requirement-document-path">已写入 {state.savedRequirementDocumentPath}</small>
-            ) : null}
-          </div>
-          <button className="tool-button document-expand-button" onClick={() => setDocumentExpanded((expanded) => !expanded)}>
-            {documentExpanded ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
-            <span>{documentExpanded ? "收起" : "展开"}</span>
-          </button>
-        </section>
+          {showRequirementDocument ? (
+            <section className={`requirement-document-preview ${documentExpanded ? "is-expanded" : ""}`}>
+              <div>
+                <span>需求文档</span>
+                <p>{state.requirementDocument}</p>
+                {state.savedRequirementDocumentPath ? (
+                  <small className="requirement-document-path">已写入 {state.savedRequirementDocumentPath}</small>
+                ) : null}
+              </div>
+              <button className="tool-button document-expand-button" onClick={() => setDocumentExpanded((expanded) => !expanded)}>
+                {documentExpanded ? <ChevronDown size={15} /> : <ChevronUp size={15} />}
+                <span>{documentExpanded ? "收起" : "展开"}</span>
+              </button>
+            </section>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );

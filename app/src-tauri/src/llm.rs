@@ -523,6 +523,12 @@ async fn complete_openai_compatible_json(
     crate::install_rustls_crypto_provider();
 
     let endpoint = config.chat_completions_endpoint();
+    let task = llm_request_task(&request);
+    let started_at = Instant::now();
+    eprintln!(
+        "[llm][openai_compatible] request task={} model={} endpoint={}",
+        task, config.model, endpoint
+    );
     let client = reqwest::Client::builder()
         .timeout(config.timeout)
         .build()
@@ -542,6 +548,13 @@ async fn complete_openai_compatible_json(
         .map_err(|error| format!("读取 LLM 响应失败：{error}"))?;
 
     if !status.is_success() {
+        eprintln!(
+            "[llm][openai_compatible] error task={} status={} duration_ms={} body={}",
+            task,
+            status.as_u16(),
+            started_at.elapsed().as_millis(),
+            extract_openai_error_message(&response_text)
+        );
         return Err(format!(
             "LLM HTTP {}：{}",
             status.as_u16(),
@@ -553,6 +566,13 @@ async fn complete_openai_compatible_json(
         .map_err(|error| format!("LLM 响应不是合法 JSON：{error}"))?;
     let content = extract_chat_completion_content(&response_value)?;
     let parsed_content = parse_json_object_content(content)?;
+    eprintln!(
+        "[llm][openai_compatible] response task={} status={} duration_ms={} content={}",
+        task,
+        status.as_u16(),
+        started_at.elapsed().as_millis(),
+        pretty_json_for_log(&parsed_content)
+    );
 
     Ok(LlmJsonResponse {
         provider: LlmProviderKind::OpenaiCompatible,
@@ -560,6 +580,19 @@ async fn complete_openai_compatible_json(
         endpoint,
         content: parsed_content,
     })
+}
+
+fn llm_request_task(request: &LlmJsonRequest) -> String {
+    request
+        .user_payload
+        .get("task")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn pretty_json_for_log(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn build_openai_compatible_request_body(

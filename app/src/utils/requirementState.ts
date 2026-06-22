@@ -334,7 +334,7 @@ export function requirementSessionReducer(
     return session;
   }
 
-  const text = action.segment.text.trim();
+  const text = normalizeTranscriptText(action.segment.text);
   if (!text) {
     return session;
   }
@@ -428,6 +428,7 @@ export function useVoiceRequirementSession(voice: {
     const requestId = liveSummaryRequestRef.current + 1;
     liveSummaryRequestRef.current = requestId;
     const requirementId = currentSession.requirementState.id;
+    const summarizedUtteranceCount = currentSession.requirementState.utterances.length;
 
     void invokeTauri<RequirementSummaryResult>("summarize_requirement_state", {
       request: {
@@ -444,7 +445,7 @@ export function useVoiceRequirementSession(voice: {
           return;
         }
 
-        lastSummarizedUtteranceCountRef.current = latestSession.requirementState.utterances.length;
+        lastSummarizedUtteranceCountRef.current = summarizedUtteranceCount;
         lastSummaryAtRef.current = Date.now();
         dispatch({
           type: "apply_live_summary",
@@ -744,6 +745,14 @@ function clearSummaryTimer(timer: ReturnType<typeof setTimeout> | undefined) {
 
 function nowString() {
   return Date.now().toString();
+}
+
+function normalizeTranscriptText(text: string) {
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[，。！？、；：,.!?;:\s]+/u, "")
+    .trim();
 }
 
 async function invokeTauri<T>(command: string, args: Record<string, unknown>): Promise<T> {

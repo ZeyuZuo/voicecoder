@@ -71,6 +71,28 @@ test("listening voice turn records transcript as voice utterance", () => {
   assert.equal(next?.requirementState.utterances[0].text, "帮我做一个网页端贪吃蛇");
 });
 
+test("voice transcript trims leading punctuation and repeated whitespace", () => {
+  const session = createVoiceRequirementSession("voice-1", "1");
+  const next = requirementSessionReducer(session, {
+    type: "append_voice_transcript",
+    segment: finalSegment("voice-1", "seg-1", " ，  我想   做一个  网页端贪吃蛇  "),
+    now: "2"
+  });
+
+  assert.equal(next?.requirementState.utterances[0].text, "我想 做一个 网页端贪吃蛇");
+});
+
+test("voice transcript ignores punctuation-only final segment", () => {
+  const session = createVoiceRequirementSession("voice-1", "1");
+  const next = requirementSessionReducer(session, {
+    type: "append_voice_transcript",
+    segment: finalSegment("voice-1", "seg-1", "！？ ;: ，。"),
+    now: "2"
+  });
+
+  assert.equal(next?.requirementState.utterances.length, 0);
+});
+
 test("live understanding updates summary and open gaps without leaving listening", () => {
   const session = createVoiceRequirementSession("voice-1", "1");
   const next = requirementSessionReducer(session, {

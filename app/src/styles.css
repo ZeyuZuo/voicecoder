@@ -471,7 +471,7 @@ button {
   min-height: 0;
   padding: 22px clamp(20px, 4vw, 46px) 18px;
   --voice-edge: clamp(20px, 4vw, 46px);
-  --voice-cloud-space: clamp(250px, 26vw, 330px);
+  --voice-cloud-space: clamp(320px, 31vw, 420px);
 }
 
 .voice-workspace-main {
@@ -552,6 +552,10 @@ button {
   overflow: hidden;
 }
 
+.voice-workspace.has-document-stack .voice-transcript-canvas {
+  padding-bottom: 220px;
+}
+
 .voice-transcript-canvas::before {
   position: absolute;
   top: 0;
@@ -630,22 +634,32 @@ button {
   right: var(--voice-edge);
   bottom: 130px;
   display: grid;
-  width: min(250px, 26vw);
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 9px;
-  padding: 12px;
+  align-items: flex-start;
+  width: min(360px, calc(100% - var(--voice-edge) * 2));
+  max-height: min(34vh, 280px);
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  padding: 13px 14px 14px;
   border: 1px solid #dfe7ef;
   border-radius: 24px 24px 24px 10px;
   background:
     linear-gradient(145deg, rgb(255 255 255 / 92%), rgb(242 248 255 / 92%)),
     #fff;
   box-shadow: 0 14px 34px rgb(28 48 72 / 11%);
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(145 164 185 / 55%) transparent;
+}
+
+.voice-workspace.has-document-stack .voice-thought-cloud {
+  bottom: 240px;
+  max-height: min(28vh, 220px);
 }
 
 .voice-thought-cloud-icon {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   border-radius: 999px;
   background: #e7f1ff;
@@ -654,6 +668,7 @@ button {
 
 .voice-thought-cloud-copy {
   min-width: 0;
+  word-break: break-word;
 }
 
 .voice-thought-cloud-copy span {
@@ -663,14 +678,10 @@ button {
 }
 
 .voice-thought-cloud-copy p {
-  display: -webkit-box;
-  overflow: hidden;
   margin: 5px 0 0;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
   color: #2b3138;
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 12.5px;
+  line-height: 1.52;
 }
 
 .voice-thought-cloud-copy ul {
@@ -690,9 +701,6 @@ button {
 
 .requirement-document-preview,
 .requirement-action-card {
-  position: absolute;
-  left: clamp(20px, 4vw, 46px);
-  right: clamp(20px, 4vw, 46px);
   display: flex;
   align-items: center;
   gap: 14px;
@@ -701,8 +709,17 @@ button {
   box-shadow: 0 12px 34px rgb(31 33 36 / 7%);
 }
 
-.requirement-document-preview {
+.requirement-bottom-stack {
+  position: absolute;
+  right: clamp(20px, 4vw, 46px);
   bottom: 22px;
+  left: clamp(20px, 4vw, 46px);
+  display: grid;
+  gap: 8px;
+  z-index: 8;
+}
+
+.requirement-document-preview {
   min-height: 70px;
   padding: 12px 14px 12px 16px;
   border-radius: 14px;
@@ -772,7 +789,6 @@ button {
 }
 
 .requirement-action-card {
-  bottom: 22px;
   min-height: 58px;
   padding: 12px 14px 12px 16px;
   border-radius: 14px;
@@ -786,10 +802,6 @@ button {
 .requirement-action-card.is-confirm {
   border-color: #dce8f6;
   background: rgb(247 251 255 / 92%);
-}
-
-.requirement-action-card.is-document-ready {
-  bottom: 108px;
 }
 
 .requirement-action-card p {
@@ -1619,6 +1631,7 @@ button {
     bottom: 116px;
     left: 16px;
     width: auto;
+    max-height: min(32vh, 240px);
     border-radius: 22px 22px 22px 10px;
   }
 
