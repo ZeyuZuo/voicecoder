@@ -217,6 +217,124 @@ export type VoiceRequirementSession = {
   endedAt?: string;
 };
 
+export type CodingAgentProviderKind = "auto" | "codex_app_server" | "codex_exec_json";
+
+export type CodingAgentProviderStatus = {
+  autoProvider: Exclude<CodingAgentProviderKind, "auto">;
+  providerOverride?: CodingAgentProviderKind;
+  activeProviderConfigured: boolean;
+  activeProviderError?: string;
+  diagnostics: CodingAgentProviderDiagnostic[];
+};
+
+export type CodingAgentProviderDiagnostic = {
+  provider: Exclude<CodingAgentProviderKind, "auto">;
+  configured: boolean;
+  missingDependencies: string[];
+  executable?: string;
+  version?: string;
+  details: Record<string, string>;
+  error?: string;
+};
+
+export type DemoSessionStatus =
+  | "idle"
+  | "ready_to_start"
+  | "agent_running"
+  | "preview_ready"
+  | "feedback_listening"
+  | "feedback_processing"
+  | "agent_modifying"
+  | "error";
+
+export type AgentRunKind = "initial_build" | "feedback_change";
+
+export type AgentRunStatus = "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled";
+
+export type AgentEvent =
+  | {
+      type: "thread_started";
+      threadId: string;
+      createdAt: string;
+    }
+  | {
+      type: "turn_started";
+      turnId?: string;
+      createdAt: string;
+    }
+  | {
+      type: "agent_message";
+      text: string;
+      createdAt: string;
+    }
+  | {
+      type: "plan_update";
+      text: string;
+      createdAt: string;
+    }
+  | {
+      type: "command";
+      command: string;
+      status: string;
+      createdAt: string;
+    }
+  | {
+      type: "file_change";
+      path: string;
+      changeType?: string;
+      createdAt: string;
+    }
+  | {
+      type: "turn_completed";
+      finalMessage?: string;
+      createdAt: string;
+    }
+  | {
+      type: "error";
+      message: string;
+      createdAt: string;
+    };
+
+export type AgentRun = {
+  id: string;
+  kind: AgentRunKind;
+  prompt: string;
+  status: AgentRunStatus;
+  codexThreadId?: string;
+  codexTurnId?: string;
+  events: AgentEvent[];
+  changedFiles: string[];
+  finalMessage?: string;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+};
+
+export type DemoFeedbackTurn = {
+  id: string;
+  utterances: RequirementUtterance[];
+  summary: string;
+  modificationPrompt: string;
+  linkedAgentRunId?: string;
+  createdAt: string;
+};
+
+export type DemoSession = {
+  id: string;
+  projectPath: string;
+  requirementId: string;
+  initialRequirementDocument: string;
+  initialCodingPrompt: string;
+  codexThreadId?: string;
+  runs: AgentRun[];
+  feedbackTurns: DemoFeedbackTurn[];
+  currentPreviewUrl?: string;
+  status: DemoSessionStatus;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type FileTreeEntry = {
   name: string;
   path: string;
