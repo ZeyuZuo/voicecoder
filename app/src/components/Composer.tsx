@@ -6,15 +6,24 @@ import {
   Mic,
   Plus,
   Search,
-  ShieldCheck
+  ShieldCheck,
+  Square
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useGitBranch } from "../hooks/useGitBranch";
-import { useVoiceSession } from "../hooks/useVoiceSession";
+import type { VoiceSessionController } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
+import type { RequirementStatus } from "../types/app";
 import { shortPath } from "../utils/project";
+import { getVoiceInputPermission, type VoiceRequirementController } from "../utils/requirementState";
 
-export function Composer() {
+type ComposerProps = {
+  requirement: VoiceRequirementController;
+  voice: VoiceSessionController;
+  voiceMode: boolean;
+};
+
+export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
   const {
     projects,
     currentProject,
@@ -25,126 +34,80 @@ export function Composer() {
     setPrompt
   } = useAppState();
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
-  const appendedVoiceSegments = useRef<Map<string, string>>(new Map());
 
   const visibleProjects = useMemo(() => projects.slice(0, 6), [projects]);
   const gitBranch = useGitBranch(currentProject);
-  const voice = useVoiceSession();
 
-  const submitDisabled = prompt.trim().length === 0;
+  const submitDisabled = voiceMode || prompt.trim().length === 0;
   const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
-  const voiceStatusLabel = getVoiceStatusLabel(voice.status);
-  const voiceProvider = voice.sessionSnapshot?.provider ?? voice.providerStatus?.autoProvider ?? voice.provider;
-  const providerDiagnostic = voice.providerStatus?.diagnostics.find((diagnostic) => diagnostic.provider === voiceProvider);
-  const missingProviderEnv = providerDiagnostic?.missingEnv ?? [];
+  const requirementState = requirement.session?.requirementState;
+  const voiceInputPermission = getVoiceInputPermission(requirementState);
+  const voiceInputMode = getVoiceInputMode(voice.status, requirementState?.status);
+  const canFinishRequirement = voiceMode && voiceInputPermission.canFinishTurn && voiceInputMode.canFinishTurn;
+  const voiceButtonDisabled = voice.status === "transcribing" || !voiceInputPermission.canUseMic;
 
-  useEffect(() => {
-    const changedFinalSegments = voice.segments.filter((segment) => appendedVoiceSegments.current.get(segment.id) !== segment.text);
-
-    if (!changedFinalSegments.length) {
-      return;
+  const finishRequirement = async () => {
+    if (voice.recording || voice.busy) {
+      await voice.stop();
     }
 
-    let nextPrompt = prompt;
-
-    for (const segment of changedFinalSegments) {
-      const nextText = segment.text.trim();
-      if (!nextText) {
-        continue;
-      }
-
-      const previousText = appendedVoiceSegments.current.get(segment.id);
-      if (previousText && nextPrompt.includes(previousText)) {
-        nextPrompt = replaceLast(nextPrompt, previousText, nextText);
-      } else {
-        nextPrompt = nextPrompt.trim() ? `${nextPrompt.trimEnd()}\n${nextText}` : nextText;
-      }
-      appendedVoiceSegments.current.set(segment.id, nextText);
-    }
-
-    if (nextPrompt === prompt) {
-      return;
-    }
-
-    setPrompt(nextPrompt);
-  }, [prompt, setPrompt, voice.segments]);
+    requirement.finishUserTurn();
+  };
 
   return (
-    <div className="composer-shell">
-      <div className="composer-card">
-        <textarea
-          className="composer-input"
-          placeholder="尽管问"
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-        />
+    <div className={`composer-shell ${voiceMode ? "is-voice-mode" : ""}`}>
+      <div className={`composer-card ${voiceMode ? "is-voice-mode" : ""}`}>
+        {voiceMode ? (
+          <div className="voice-composer-status">
+            <span className={`voice-dot ${voice.recording ? "is-recording" : ""}`} />
+            <div>
+              <strong>{voiceInputMode.title}</strong>
+              <small>{voiceInputMode.hint}</small>
+            </div>
+          </div>
+        ) : (
+          <textarea
+            className="composer-input"
+            placeholder="尽管问"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+        )}
         <div className="composer-toolbar">
           <div className="composer-actions-left">
-            <button className="icon-button quiet" aria-label="添加上下文">
-              <Plus size={20} />
-            </button>
-            <button className="tool-button accent">
-              <ShieldCheck size={17} />
-              <span>自动审查</span>
-              <ChevronDown size={14} />
-            </button>
+            {!voiceMode ? (
+              <>
+                <button className="icon-button quiet" aria-label="添加上下文">
+                  <Plus size={20} />
+                </button>
+                <button className="tool-button accent">
+                  <ShieldCheck size={17} />
+                  <span>自动审查</span>
+                  <ChevronDown size={14} />
+                </button>
+              </>
+            ) : (
+              <button className="tool-button" disabled={!canFinishRequirement} onClick={finishRequirement}>
+                <Square size={14} />
+                <span>{voiceInputMode.finishLabel}</span>
+              </button>
+            )}
           </div>
           <div className="composer-actions-right">
             <button
               className={`icon-button quiet voice-button ${voice.recording ? "is-recording" : ""}`}
               aria-label={voiceButtonLabel}
-              disabled={voice.status === "transcribing"}
+              disabled={voiceButtonDisabled}
               onClick={voice.toggle}
             >
               <Mic size={18} />
             </button>
-            <button className="send-button" disabled={submitDisabled} aria-label="发送需求">
+            <button className="send-button" disabled={submitDisabled} aria-label={voiceMode ? "语音模式下不可发送文本" : "发送需求"}>
               <ArrowUp size={22} />
             </button>
           </div>
         </div>
       </div>
-
-      {voice.status !== "idle" || voice.segments.length ? (
-        <div className={`voice-session-panel ${voice.recording ? "is-recording" : ""}`}>
-          <div className="voice-session-header">
-            <span className="voice-pulse" />
-            <span>{voiceStatusLabel}</span>
-            {voiceProvider ? <small>{voiceProvider}</small> : null}
-          </div>
-          {voice.providerStatus ? (
-            <p className="voice-provider-note">
-              {getVoiceProviderNote(voice.providerStatus.autoProvider, voice.providerStatus.providerOverride, providerDiagnostic?.configured)}
-            </p>
-          ) : null}
-          {missingProviderEnv.length ? (
-            <p className="voice-provider-note">缺少{getProviderLabel(voiceProvider)}配置：{missingProviderEnv.join("、")}</p>
-          ) : null}
-          {providerDiagnostic?.error && !missingProviderEnv.length ? (
-            <p className="voice-provider-note">{providerDiagnostic.error}</p>
-          ) : null}
-          {voice.error ? <p className="voice-error">{voice.error}</p> : null}
-          {voice.status === "error" && voice.sessionSnapshot?.active ? (
-            <p className="voice-provider-note">后端仍有语音会话，点击麦克风会先自动清理后重试。</p>
-          ) : null}
-          {voice.partialText ? (
-            <p className="voice-partial">
-              <span>实时</span>
-              {voice.partialText}
-            </p>
-          ) : null}
-          {voice.segments.length ? (
-            <div className="voice-transcripts">
-              {voice.segments.slice(-4).map((segment) => (
-                <p key={segment.id}>
-                  <span>{segment.speakerId ?? "speaker"}</span>
-                  {segment.text}
-                </p>
-              ))}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       <div className="context-bar">
         <div className="project-menu-anchor">
@@ -154,7 +117,7 @@ export function Composer() {
             <ChevronDown size={14} />
           </button>
           {projectMenuOpen ? (
-            <div className="project-menu">
+            <div className={`project-menu ${voiceMode ? "opens-up" : ""}`}>
               {visibleProjects.length ? (
                 <>
                   <label className="project-search">
@@ -224,50 +187,72 @@ export function Composer() {
   );
 }
 
-function replaceLast(value: string, search: string, replacement: string) {
-  const index = value.lastIndexOf(search);
-  if (index < 0) {
-    return value;
+function getVoiceInputMode(status: VoiceSessionController["status"], requirementStatus: RequirementStatus | undefined) {
+  if (requirementStatus === "finalizing" || requirementStatus === "processing") {
+    return {
+      title: "正在生成需求文档",
+      hint: "正在整理完整需求，稍等一下。",
+      finishLabel: "生成中",
+      canFinishTurn: false,
+      disableMic: true
+    };
   }
 
-  return `${value.slice(0, index)}${replacement}${value.slice(index + search.length)}`;
-}
+  if (requirementStatus === "document_ready") {
+    return {
+      title: "需求文档已生成",
+      hint: "可以展开查看文档，确认后进入后续编码阶段。",
+      finishLabel: "已生成",
+      canFinishTurn: false,
+      disableMic: true
+    };
+  }
 
-function getVoiceStatusLabel(status: ReturnType<typeof useVoiceSession>["status"]) {
-  const labels = {
-    idle: "语音已停止",
-    starting: "正在启动语音输入",
-    "requesting-permission": "正在请求麦克风权限",
-    recording: "正在录音转写",
-    transcribing: "正在等待转写结果",
-    error: "语音输入出错"
+  if (requirementStatus === "confirmed") {
+    return {
+      title: "需求已确认",
+      hint: "需求文档已生成，后续可交给编码阶段。",
+      finishLabel: "已确认",
+      canFinishTurn: false,
+      disableMic: true
+    };
+  }
+
+  if (status === "transcribing") {
+    return {
+      title: "正在等待最后的转写",
+      hint: "收到最后一段语音后会继续整理。",
+      finishLabel: "我说完了",
+      canFinishTurn: false,
+      disableMic: true
+    };
+  }
+
+  if (status === "error") {
+    return {
+      title: "语音输入出错",
+      hint: "检查语音 provider 后，可以点击麦克风重试。",
+      finishLabel: "我说完了",
+      canFinishTurn: false,
+      disableMic: false
+    };
+  }
+
+  if (status === "recording") {
+    return {
+      title: "正在听你说需求",
+      hint: "继续自然描述，系统会实时整理当前理解和缺口。",
+      finishLabel: "我说完了",
+      canFinishTurn: true,
+      disableMic: false
+    };
+  }
+
+  return {
+    title: "语音需求模式",
+    hint: "点击麦克风持续说需求，或点“我说完了”生成文档。",
+    finishLabel: "我说完了",
+    canFinishTurn: true,
+    disableMic: false
   };
-
-  return labels[status];
-}
-
-function getVoiceProviderNote(provider: string, override: string | undefined, configured: boolean | undefined) {
-  const source = override ? `已指定 ${override}` : "自动选择";
-
-  if (provider === "mock") {
-    return `${source} · Mock 转写`;
-  }
-
-  return `${source} · ${getProviderLabel(provider)}${configured ? "配置就绪" : "配置待检查"}`;
-}
-
-function getProviderLabel(provider: string) {
-  if (provider === "tencent") {
-    return "腾讯云";
-  }
-
-  if (provider === "iflytek_llm") {
-    return "讯飞大模型";
-  }
-
-  if (provider === "mock") {
-    return "Mock";
-  }
-
-  return provider;
 }

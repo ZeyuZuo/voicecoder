@@ -83,11 +83,138 @@ export type VoiceProviderDiagnostic = {
   error?: string;
 };
 
+export type LlmProviderKind = "auto" | "openai_compatible";
+
+export type LlmProviderStatus = {
+  autoProvider: Exclude<LlmProviderKind, "auto">;
+  providerOverride?: LlmProviderKind;
+  activeProviderConfigured: boolean;
+  activeProviderError?: string;
+  diagnostics: LlmProviderDiagnostic[];
+};
+
+export type LlmProviderDiagnostic = {
+  provider: Exclude<LlmProviderKind, "auto">;
+  configured: boolean;
+  missingEnv: string[];
+  endpoint?: string;
+  model?: string;
+  details: Record<string, string>;
+  error?: string;
+};
+
+export type LlmConnectionTestResult = {
+  ok: boolean;
+  provider: Exclude<LlmProviderKind, "auto">;
+  model?: string;
+  endpoint?: string;
+  durationMs: number;
+  response?: unknown;
+  error?: string;
+};
+
 export type VoiceSessionSnapshot = {
   active: boolean;
   sessionId?: string;
   provider?: Exclude<VoiceProviderKind, "auto">;
   receivedAudioChunks: number;
+};
+
+export type RequirementStatus =
+  | "idle"
+  | "listening"
+  | "finalizing"
+  | "document_ready"
+  | "collecting"
+  | "processing"
+  | "clarifying"
+  | "ready_to_confirm"
+  | "confirmed";
+
+export type RequirementPendingAction = "summarize" | "process" | "finalize" | "save";
+
+export type RequirementUtteranceSource = "voice" | "clarification_answer";
+
+export type RequirementUtterance = {
+  id: string;
+  source: RequirementUtteranceSource;
+  speakerId?: string;
+  text: string;
+  createdAt: string;
+  transcriptId?: string;
+};
+
+export type RequirementQuestion = {
+  id: string;
+  question: string;
+  reason: string;
+  blocksCoding: boolean;
+  answer?: string;
+};
+
+export type RequirementGap = {
+  id: string;
+  question: string;
+  reason: string;
+  severity: "blocking" | "helpful";
+  status: "open" | "resolved";
+};
+
+export type RequirementProcessingResult = {
+  summary: string;
+  requirementDocumentDraft: string;
+  confirmedFacts: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+  questions: Array<Omit<RequirementQuestion, "id"> & { id?: string }>;
+  readyToConfirm: boolean;
+};
+
+export type RequirementSummaryResult = {
+  summary: string;
+  confirmedFacts: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+  openGaps: Array<Omit<RequirementGap, "id" | "status"> & { id?: string; status?: RequirementGap["status"] }>;
+  uncertainties?: string[];
+};
+
+export type RequirementState = {
+  id: string;
+  status: RequirementStatus;
+  utterances: RequirementUtterance[];
+  summary: string;
+  requirementDocument: string;
+  confirmedFacts: string[];
+  constraints: string[];
+  openGaps: RequirementGap[];
+  openQuestions: RequirementQuestion[];
+  answeredQuestions: RequirementQuestion[];
+  activeQuestionId?: string;
+  acceptanceCriteria: string[];
+  outOfScope: string[];
+  risks: string[];
+  codingPrompt?: string;
+  savedRequirementDocumentPath?: string;
+  pendingAction?: RequirementPendingAction;
+  error?: string;
+  updatedAt: string;
+};
+
+export type SavedRequirementDocument = {
+  path: string;
+};
+
+export type VoiceRequirementSession = {
+  id: string;
+  voiceSessionIds: string[];
+  requirementState: RequirementState;
+  startedAt: string;
+  endedAt?: string;
 };
 
 export type FileTreeEntry = {

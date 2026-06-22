@@ -1,6 +1,9 @@
-use serde::Serialize;
+use chrono::Local;
+use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+mod env_config;
+mod llm;
 mod voice;
 
 #[derive(Serialize)]
@@ -9,6 +12,21 @@ struct FileTreeEntry {
     path: String,
     is_directory: bool,
     children: Option<Vec<FileTreeEntry>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveRequirementDocumentRequest {
+    project_path: String,
+    requirement_document: String,
+    summary: Option<String>,
+    coding_prompt: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedRequirementDocument {
+    path: String,
 }
 
 #[tauri::command]
@@ -49,6 +67,29 @@ fn read_git_branch(path: String) -> Result<Option<String>, String> {
     }
 
     Ok(Some(trimmed_head.chars().take(7).collect()))
+}
+
+#[tauri::command]
+fn save_requirement_document(
+    request: SaveRequirementDocumentRequest,
+) -> Result<SavedRequirementDocument, String> {
+    let project_root = Path::new(&request.project_path);
+    if !project_root.is_dir() {
+        return Err("当前项目路径不是有效文件夹，无法写入需求文档。".to_string());
+    }
+
+    let voicecoder_dir = project_root.join(".voicecoder");
+    fs::create_dir_all(&voicecoder_dir)
+        .map_err(|error| format!("创建 .voicecoder 目录失败：{error}"))?;
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S_%3f").to_string();
+    let document_path = voicecoder_dir.join(format!("voice_requirements_{timestamp}.md"));
+    fs::write(&document_path, build_requirement_markdown(&request))
+        .map_err(|error| format!("写入需求文档失败：{error}"))?;
+
+    Ok(SavedRequirementDocument {
+        path: document_path.to_string_lossy().to_string(),
+    })
 }
 
 fn read_directory(path: &Path, depth: usize) -> Result<Vec<FileTreeEntry>, String> {
@@ -113,16 +154,53 @@ fn find_git_dir(path: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+fn build_requirement_markdown(request: &SaveRequirementDocumentRequest) -> String {
+    let mut sections = vec![
+        "# 语音需求文档".to_string(),
+        format!("生成时间：{}", Local::now().format("%Y-%m-%d %H:%M:%S")),
+    ];
+
+    if let Some(summary) = request
+        .summary
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("## 当前理解\n\n{}", summary.trim()));
+    }
+
+    sections.push(format!(
+        "## 需求文档\n\n{}",
+        request.requirement_document.trim()
+    ));
+
+    if let Some(coding_prompt) = request
+        .coding_prompt
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("## Coding Prompt\n\n{}", coding_prompt.trim()));
+    }
+
+    format!("{}\n", sections.join("\n\n"))
+}
+
 pub fn run() {
+    install_rustls_crypto_provider();
+
     tauri::Builder::default()
         .manage(voice::VoiceState::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_project_tree,
             read_git_branch,
+            save_requirement_document,
             voice::start_voice_session,
             voice::send_voice_audio_chunk,
             voice::get_voice_provider_status,
+            llm::get_llm_provider_status,
+            llm::test_llm_provider_connection,
+            llm::summarize_requirement_state,
+            llm::process_requirement_turn,
             voice::check_tencent_asr_config,
             voice::get_voice_session_snapshot,
             voice::stop_voice_session,
@@ -130,4 +208,8 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run VoiceCoder");
+}
+
+pub(crate) fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }

@@ -12,8 +12,10 @@
     "tauri:build": "tauri build",
     "diagnose:iflytek": "node scripts/diagnose-iflytek-handshake.mjs",
     "typecheck": "tsc --noEmit",
+    "test:unit": "node --test dist-tests/requirementState.test.mjs",
+    "pretest:unit": "esbuild src/utils/requirementState.test.ts --bundle --platform=node --format=esm --outfile=dist-tests/requirementState.test.mjs",
     "check:rust": "cd src-tauri && cargo fmt -- --check && cargo check && cargo test",
-    "check": "npm run typecheck && npm run build && npm run check:rust"
+    "check": "npm run typecheck && npm run test:unit && npm run build && npm run check:rust"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",
