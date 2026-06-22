@@ -14,6 +14,7 @@ import { useState, type ReactNode } from "react";
 import type { VoiceSessionController } from "../hooks/useVoiceSession";
 import { useVoiceSession } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
+import { useDemoSession, type DemoSessionController } from "../utils/demoSession";
 import { useVoiceRequirementSession, type VoiceRequirementController } from "../utils/requirementState";
 import { Composer } from "./Composer";
 
@@ -22,6 +23,7 @@ export function ConversationPane() {
   const maximized = maximizedPane === "conversation";
   const voice = useVoiceSession();
   const requirement = useVoiceRequirementSession(voice, currentProject?.path);
+  const demo = useDemoSession(requirement.session?.requirementState, currentProject?.path);
   const voiceMode = voice.status !== "idle" || voice.segments.length > 0 || requirement.active;
 
   return (
@@ -55,11 +57,11 @@ export function ConversationPane() {
       <div className={`empty-conversation ${voiceMode ? "is-voice-mode" : ""}`}>
         <div className={`prompt-stage ${voiceMode ? "is-voice-mode" : ""}`}>
           {voiceMode ? (
-            <VoiceRequirementWorkspace requirement={requirement} voice={voice} />
+            <VoiceRequirementWorkspace demo={demo} requirement={requirement} voice={voice} />
           ) : (
             <h2>{currentProject ? `我们应该在 ${currentProject.name} 中构建什么？` : "我们应该聊些什么？"}</h2>
           )}
-          <Composer requirement={requirement} voice={voice} voiceMode={voiceMode} />
+          <Composer demo={demo} requirement={requirement} voice={voice} voiceMode={voiceMode} />
         </div>
       </div>
     </section>
@@ -67,9 +69,11 @@ export function ConversationPane() {
 }
 
 function VoiceRequirementWorkspace({
+  demo,
   requirement,
   voice
 }: {
+  demo: DemoSessionController;
   requirement: VoiceRequirementController;
   voice: VoiceSessionController;
 }) {
@@ -91,6 +95,7 @@ function VoiceRequirementWorkspace({
           <StatusPill active={voice.recording}>{getVoiceStatusLabel(voice.status)}</StatusPill>
           {voiceProvider ? <StatusPill>{getProviderLabel(voiceProvider)}</StatusPill> : null}
           {state ? <StatusPill>{getRequirementStatusLabel(state.status)}</StatusPill> : null}
+          {demo.session ? <StatusPill active={demo.session.status === "agent_running" || demo.session.status === "agent_modifying"}>{getDemoStatusLabel(demo.session.status)}</StatusPill> : null}
         </div>
 
         {voice.error ? <p className="voice-workspace-error">{voice.error}</p> : null}
@@ -177,6 +182,21 @@ function VoiceRequirementWorkspace({
       ) : null}
     </div>
   );
+}
+
+function getDemoStatusLabel(status: NonNullable<DemoSessionController["session"]>["status"]) {
+  const labels = {
+    idle: "Demo 空闲",
+    ready_to_start: "待生成 demo",
+    agent_running: "生成 demo 中",
+    preview_ready: "Demo 已生成",
+    feedback_listening: "等待反馈",
+    feedback_processing: "整理反馈中",
+    agent_modifying: "修改 demo 中",
+    error: "Demo 出错"
+  };
+
+  return labels[status];
 }
 
 function StatusPill({ active, children }: { active?: boolean; children: ReactNode }) {

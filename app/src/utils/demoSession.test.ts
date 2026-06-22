@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { DemoSession, RequirementUtterance } from "../types/app";
-import { createDemoSession, demoSessionReducer } from "./demoSession";
+import { createDemoSession, demoSessionReducer, demoSessionStoreReducer } from "./demoSession";
 
 test("creates a demo session that is ready to start", () => {
   const session = createTestSession();
@@ -10,6 +10,39 @@ test("creates a demo session that is ready to start", () => {
   assert.equal(session.projectPath, "/tmp/demo");
   assert.equal(session.requirementId, "requirement-1");
   assert.equal(session.initialCodingPrompt, "请实现第一版 demo。");
+});
+
+test("store reducer creates a demo session from confirmed requirement input", () => {
+  const session = demoSessionStoreReducer(undefined, {
+    type: "create_demo_session",
+    input: {
+      projectPath: "/tmp/demo",
+      requirementId: "requirement-1",
+      initialRequirementDocument: "目标：生成 demo。",
+      initialCodingPrompt: "请实现 demo。",
+      now: "1"
+    }
+  });
+
+  assert.equal(session?.status, "ready_to_start");
+  assert.equal(session?.projectPath, "/tmp/demo");
+  assert.equal(session?.requirementId, "requirement-1");
+});
+
+test("store reducer keeps the same demo session for duplicate requirement input", () => {
+  const session = createTestSession();
+  const next = demoSessionStoreReducer(session, {
+    type: "create_demo_session",
+    input: {
+      projectPath: session.projectPath,
+      requirementId: session.requirementId,
+      initialRequirementDocument: "目标：变化不应重建。",
+      initialCodingPrompt: "请实现变化。",
+      now: "2"
+    }
+  });
+
+  assert.equal(next, session);
 });
 
 test("starts and completes the initial build run", () => {

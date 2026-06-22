@@ -1,9 +1,11 @@
+import { useCallback, useEffect, useMemo, useReducer } from "react";
 import type {
   AgentEvent,
   AgentRun,
   AgentRunKind,
   DemoFeedbackTurn,
   DemoSession,
+  RequirementState,
   RequirementUtterance
 } from "../types/app";
 import { createId } from "./project";
@@ -62,6 +64,20 @@ export type DemoSessionAction =
       now: string;
     };
 
+export type DemoSessionStoreAction =
+  | {
+      type: "create_demo_session";
+      input: CreateDemoSessionInput;
+    }
+  | DemoSessionAction;
+
+export type DemoSessionController = {
+  session?: DemoSession;
+  active: boolean;
+  canStartInitialRun: boolean;
+  startInitialRun: () => void;
+};
+
 export function createDemoSession(input: CreateDemoSessionInput): DemoSession {
   return {
     id: createId("demo_session"),
@@ -76,6 +92,29 @@ export function createDemoSession(input: CreateDemoSessionInput): DemoSession {
     createdAt: input.now,
     updatedAt: input.now
   };
+}
+
+export function demoSessionStoreReducer(
+  session: DemoSession | undefined,
+  action: DemoSessionStoreAction
+): DemoSession | undefined {
+  if (action.type === "create_demo_session") {
+    if (
+      session &&
+      session.projectPath === action.input.projectPath &&
+      session.requirementId === action.input.requirementId
+    ) {
+      return session;
+    }
+
+    return createDemoSession(action.input);
+  }
+
+  if (!session) {
+    return undefined;
+  }
+
+  return demoSessionReducer(session, action);
 }
 
 export function demoSessionReducer(session: DemoSession, action: DemoSessionAction): DemoSession {
@@ -243,6 +282,54 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
   return session;
 }
 
+export function useDemoSession(requirementState: RequirementState | undefined, projectPath: string | undefined): DemoSessionController {
+  const [session, dispatch] = useReducer(demoSessionStoreReducer, undefined);
+
+  useEffect(() => {
+    if (
+      !projectPath ||
+      requirementState?.status !== "confirmed" ||
+      !requirementState.requirementDocument.trim()
+    ) {
+      return;
+    }
+
+    dispatch({
+      type: "create_demo_session",
+      input: {
+        projectPath,
+        requirementId: requirementState.id,
+        initialRequirementDocument: requirementState.requirementDocument,
+        initialCodingPrompt: requirementState.codingPrompt || createInitialCodingPrompt(requirementState),
+        now: nowString()
+      }
+    });
+  }, [projectPath, requirementState]);
+
+  const startInitialRun = useCallback(() => {
+    if (!session || session.status !== "ready_to_start") {
+      return;
+    }
+
+    dispatch({
+      type: "start_agent_run",
+      kind: "initial_build",
+      prompt: createInitialDemoPrompt(session),
+      now: nowString()
+    });
+  }, [session]);
+
+  return useMemo(
+    () => ({
+      session,
+      active: Boolean(session),
+      canStartInitialRun: session?.status === "ready_to_start",
+      startInitialRun
+    }),
+    [session, startInitialRun]
+  );
+}
+
 function canStartAgentRun(session: DemoSession, kind: AgentRunKind) {
   if (hasActiveRun(session)) {
     return false;
@@ -288,4 +375,31 @@ function mergeUnique(left: string[], right: string[]) {
 
 function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
+}
+
+function createInitialDemoPrompt(session: DemoSession) {
+  return [
+    "你正在为 VoiceCoder 生成第一版可运行 demo。",
+    "",
+    "目标项目路径：",
+    session.projectPath,
+    "",
+    "已确认需求文档：",
+    session.initialRequirementDocument,
+    "",
+    "Coding Prompt：",
+    session.initialCodingPrompt,
+    "",
+    "请基于当前项目实现第一版 demo。优先保证可运行、可展示、交互完整。",
+    "完成后给出简短变更摘要和后续可改进点。"
+  ].join("\n");
+}
+
+function createInitialCodingPrompt(requirementState: RequirementState) {
+  const document = requirementState.requirementDocument || requirementState.summary;
+  return `请根据以下已确认需求进行实现：\n\n${document}`;
+}
+
+function nowString() {
+  return Date.now().toString();
 }

@@ -4,6 +4,7 @@ import {
   Folder,
   GitBranch,
   Mic,
+  Play,
   Plus,
   Search,
   ShieldCheck,
@@ -13,17 +14,19 @@ import { useMemo, useState } from "react";
 import { useGitBranch } from "../hooks/useGitBranch";
 import type { VoiceSessionController } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
-import type { RequirementStatus } from "../types/app";
+import type { DemoSessionStatus, RequirementStatus } from "../types/app";
+import type { DemoSessionController } from "../utils/demoSession";
 import { shortPath } from "../utils/project";
 import { getVoiceInputPermission, type VoiceRequirementController } from "../utils/requirementState";
 
 type ComposerProps = {
   requirement: VoiceRequirementController;
+  demo: DemoSessionController;
   voice: VoiceSessionController;
   voiceMode: boolean;
 };
 
-export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
+export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps) {
   const {
     projects,
     currentProject,
@@ -42,7 +45,8 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
   const voiceButtonLabel = voice.recording || voice.busy ? "停止语音输入" : "语音输入";
   const requirementState = requirement.session?.requirementState;
   const voiceInputPermission = getVoiceInputPermission(requirementState);
-  const voiceInputMode = getVoiceInputMode(voice.status, requirementState?.status);
+  const voiceInputMode = getVoiceInputMode(voice.status, requirementState?.status, demo.session?.status);
+  const showDemoAction = voiceMode && requirementState?.status === "confirmed";
   const canFinishRequirement = voiceMode && voiceInputPermission.canFinishTurn && voiceInputMode.canFinishTurn;
   const voiceButtonDisabled = voice.status === "transcribing" || !voiceInputPermission.canUseMic;
 
@@ -87,10 +91,17 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
                 </button>
               </>
             ) : (
-              <button className="tool-button" disabled={!canFinishRequirement} onClick={finishRequirement}>
-                <Square size={14} />
-                <span>{voiceInputMode.finishLabel}</span>
-              </button>
+              showDemoAction ? (
+                <button className="tool-button accent" disabled={!demo.canStartInitialRun} onClick={demo.startInitialRun}>
+                  <Play size={14} />
+                  <span>{getDemoActionLabel(demo.session?.status)}</span>
+                </button>
+              ) : (
+                <button className="tool-button" disabled={!canFinishRequirement} onClick={finishRequirement}>
+                  <Square size={14} />
+                  <span>{voiceInputMode.finishLabel}</span>
+                </button>
+              )
             )}
           </div>
           <div className="composer-actions-right">
@@ -187,7 +198,11 @@ export function Composer({ requirement, voice, voiceMode }: ComposerProps) {
   );
 }
 
-function getVoiceInputMode(status: VoiceSessionController["status"], requirementStatus: RequirementStatus | undefined) {
+function getVoiceInputMode(
+  status: VoiceSessionController["status"],
+  requirementStatus: RequirementStatus | undefined,
+  demoStatus: DemoSessionStatus | undefined
+) {
   if (requirementStatus === "finalizing" || requirementStatus === "processing") {
     return {
       title: "正在生成需求文档",
@@ -209,10 +224,20 @@ function getVoiceInputMode(status: VoiceSessionController["status"], requirement
   }
 
   if (requirementStatus === "confirmed") {
+    if (demoStatus === "agent_running" || demoStatus === "agent_modifying") {
+      return {
+        title: "正在生成 demo",
+        hint: "已创建 DemoSession，后续会接入 Codex 执行事件。",
+        finishLabel: "生成中",
+        canFinishTurn: false,
+        disableMic: true
+      };
+    }
+
     return {
       title: "需求已确认",
-      hint: "需求文档已生成，后续可交给编码阶段。",
-      finishLabel: "已确认",
+      hint: demoStatus === "ready_to_start" ? "点击生成 demo 启动第一轮实现。" : "选择项目后可以生成第一版 demo。",
+      finishLabel: "生成 demo",
       canFinishTurn: false,
       disableMic: true
     };
@@ -255,4 +280,16 @@ function getVoiceInputMode(status: VoiceSessionController["status"], requirement
     canFinishTurn: true,
     disableMic: false
   };
+}
+
+function getDemoActionLabel(status: DemoSessionStatus | undefined) {
+  if (status === "agent_running" || status === "agent_modifying") {
+    return "生成中";
+  }
+
+  if (status === "preview_ready") {
+    return "已生成";
+  }
+
+  return "生成 demo";
 }
