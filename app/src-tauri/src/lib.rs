@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 mod coding_agent;
+mod dev_server;
 mod env_config;
 mod llm;
 mod voice;
@@ -189,12 +190,15 @@ pub fn run() {
     install_rustls_crypto_provider();
 
     tauri::Builder::default()
+        .manage(dev_server::DevServerState::default())
         .manage(voice::VoiceState::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_project_tree,
             read_git_branch,
             save_requirement_document,
+            dev_server::get_dev_server_snapshot,
+            dev_server::get_dev_server_diagnostic,
             voice::start_voice_session,
             voice::send_voice_audio_chunk,
             voice::get_voice_provider_status,

@@ -29,6 +29,64 @@ export type BrowserPreviewState = {
   updatedAt?: string;
 };
 
+export type DevServerSessionStatus = "idle" | "starting" | "running" | "ready" | "stopped" | "error";
+
+export type DevServerOutputStream = "stdout" | "stderr";
+
+export type DevServerStoppedReason = "exited" | "user" | "replaced" | "error";
+
+export type DevServerLifecycleEvent =
+  | {
+      type: "starting";
+      command: string[];
+    }
+  | {
+      type: "output";
+      stream: DevServerOutputStream;
+      text: string;
+    }
+  | {
+      type: "ready";
+      url: string;
+    }
+  | {
+      type: "stopped";
+      reason: DevServerStoppedReason;
+      exitCode?: number;
+    }
+  | {
+      type: "error";
+      message: string;
+    };
+
+export type DevServerLifecycleEventEnvelope = {
+  sessionId: string;
+  projectPath: string;
+  event: DevServerLifecycleEvent;
+  occurredAt: string;
+};
+
+export type DevServerSessionSnapshot = {
+  id: string;
+  projectPath: string;
+  command: string[];
+  status: DevServerSessionStatus;
+  previewUrl?: string;
+  startedAt?: string;
+  updatedAt: string;
+  error?: string;
+};
+
+export type DevServerDiagnostic = {
+  configured: boolean;
+  command: string[];
+  executable?: string;
+  version?: string;
+  missingDependencies: string[];
+  details: Record<string, string>;
+  error?: string;
+};
+
 export type VoiceSessionStatus = "idle" | "starting" | "requesting-permission" | "recording" | "transcribing" | "error";
 
 export type VoiceTranscriptSegment = {
