@@ -110,6 +110,10 @@ impl CodingAgentSandboxMode {
             }),
         }
     }
+
+    fn codex_exec_sandbox_arg(self) -> &'static str {
+        self.app_server_thread_sandbox()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -310,6 +314,14 @@ impl CodingAgentProvider for CodexExecJsonProvider {
             ],
         )
     }
+
+    fn start_session(
+        &self,
+        context: CodingAgentStartContext,
+    ) -> Result<Box<dyn CodingAgentSession + Send>, String> {
+        self.validate_start()?;
+        Ok(Box::new(start_codex_exec_json_session(context)?))
+    }
 }
 
 #[tauri::command]
@@ -368,12 +380,38 @@ fn run_initial_demo_agent(
     app: AppHandle,
     request: StartInitialDemoRunRequest,
 ) -> Result<(), String> {
-    let provider = CodingAgentProviderRegistry::resolve_provider(
-        request.provider.unwrap_or(CodingAgentProviderKind::Auto),
-    );
-    if provider != CodingAgentProviderKind::CodexAppServer {
-        return Err("当前后台事件流只支持 codex_app_server provider。".to_string());
+    let requested_provider = request.provider.unwrap_or(CodingAgentProviderKind::Auto);
+    let provider = CodingAgentProviderRegistry::resolve_provider(requested_provider);
+
+    match provider {
+        CodingAgentProviderKind::CodexAppServer => {
+            let result = run_app_server_demo_agent(app.clone(), request.clone(), provider);
+            if result.is_ok() || !can_fallback_to_codex_exec_json(requested_provider) {
+                return result;
+            }
+
+            run_codex_exec_json_demo_agent(app, request, result.err())
+        }
+        CodingAgentProviderKind::CodexExecJson => {
+            run_codex_exec_json_demo_agent(app, request, None)
+        }
+        CodingAgentProviderKind::Auto => {
+            Err("auto coding agent provider must be resolved before use".to_string())
+        }
     }
+}
+
+fn can_fallback_to_codex_exec_json(requested_provider: CodingAgentProviderKind) -> bool {
+    requested_provider == CodingAgentProviderKind::Auto
+        && CodingAgentProviderRegistry::provider_override_from_env().is_none()
+        && CodexExecJsonProvider.validate_start().is_ok()
+}
+
+fn run_app_server_demo_agent(
+    app: AppHandle,
+    request: StartInitialDemoRunRequest,
+    provider: CodingAgentProviderKind,
+) -> Result<(), String> {
     CodexAppServerProvider.validate_start()?;
 
     let context = CodingAgentStartContext {
@@ -420,6 +458,93 @@ fn run_initial_demo_agent(
             return finish_agent_run(app, request, session, summary);
         }
     }
+}
+
+fn run_codex_exec_json_demo_agent(
+    app: AppHandle,
+    request: StartInitialDemoRunRequest,
+    fallback_reason: Option<String>,
+) -> Result<(), String> {
+    CodexExecJsonProvider.validate_start()?;
+
+    let context = CodingAgentStartContext {
+        project_path: request.project_path.clone(),
+        prompt: request.prompt.clone(),
+        sandbox: request.sandbox,
+    };
+    let mut session = start_codex_exec_json_session(context)?;
+
+    emit_agent_run_started(
+        &app,
+        AgentRunStartedEvent {
+            demo_session_id: request.demo_session_id.clone(),
+            run_id: request.run_id.clone(),
+            project_path: request.project_path.clone(),
+            provider: CodingAgentProviderKind::CodexExecJson,
+            codex_thread_id: format!("exec-json:{}", request.run_id),
+            codex_turn_id: format!("exec-json-turn:{}", request.run_id),
+            started_at: current_agent_event_timestamp(),
+        },
+    )?;
+
+    if let Some(reason) = fallback_reason {
+        emit_agent_event(
+            &app,
+            AgentEventEnvelope {
+                demo_session_id: request.demo_session_id.clone(),
+                run_id: request.run_id.clone(),
+                event: AgentEvent::PlanUpdate {
+                    text: format!(
+                        "codex app-server 不可用，已切换到 codex exec --json 后备路径：{reason}"
+                    ),
+                    created_at: current_agent_event_timestamp(),
+                },
+            },
+        )?;
+    }
+
+    let mut summary = AgentRunEventSummary::default();
+    loop {
+        let events = session.read_next_agent_events()?;
+        if emit_agent_events(
+            &app,
+            &request.demo_session_id,
+            &request.run_id,
+            events,
+            &mut summary,
+        )? {
+            return finish_codex_exec_json_agent_run(app, request, session, summary);
+        }
+    }
+}
+
+fn finish_codex_exec_json_agent_run(
+    app: AppHandle,
+    request: StartInitialDemoRunRequest,
+    mut session: CodexExecJsonSession,
+    summary: AgentRunEventSummary,
+) -> Result<(), String> {
+    let _ = session.cancel();
+    if let Some(message) = summary.error_message {
+        emit_agent_error(
+            &app,
+            Some(request.demo_session_id),
+            Some(request.run_id),
+            message,
+        );
+        return Ok(());
+    }
+
+    emit_agent_run_completed(
+        &app,
+        AgentRunCompletedEvent {
+            demo_session_id: request.demo_session_id,
+            run_id: request.run_id,
+            final_message: summary.final_message,
+            changed_files: summary.changed_files,
+            completed_at: current_agent_event_timestamp(),
+        },
+    )
 }
 
 fn finish_agent_run(
@@ -513,6 +638,107 @@ fn validate_codex_executable() -> Result<String, String> {
 
 fn codex_executable() -> String {
     read_local_env("VOICECODER_CODEX_BIN").unwrap_or_else(|| DEFAULT_CODEX_BIN.to_string())
+}
+
+struct CodexExecJsonSession {
+    child: Child,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl CodingAgentSession for CodexExecJsonSession {
+    fn cancel(&mut self) -> Result<(), String> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|error| format!("检查 Codex exec --json 子进程状态失败：{error}"))?
+            .is_none()
+        {
+            self.child
+                .kill()
+                .map_err(|error| format!("停止 Codex exec --json 失败：{error}"))?;
+        }
+        let _ = self.child.wait();
+        Ok(())
+    }
+}
+
+impl CodexExecJsonSession {
+    fn read_next_agent_events(&mut self) -> Result<Vec<AgentEvent>, String> {
+        loop {
+            let mut line = String::new();
+            let read_bytes = self
+                .stdout
+                .read_line(&mut line)
+                .map_err(|error| format!("读取 Codex exec --json stdout 失败：{error}"))?;
+            if read_bytes == 0 {
+                let status = self
+                    .child
+                    .wait()
+                    .map_err(|error| format!("等待 Codex exec --json 退出失败：{error}"))?;
+                if status.success() {
+                    return Ok(vec![AgentEvent::TurnCompleted {
+                        final_message: None,
+                        created_at: current_agent_event_timestamp(),
+                    }]);
+                }
+
+                return Err(format!(
+                    "Codex exec --json 已退出，退出码：{}。",
+                    format_exit_status(status)
+                ));
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let message = serde_json::from_str::<Value>(trimmed)
+                .map_err(|error| format!("Codex exec --json 输出不是合法 JSON：{error}"))?;
+            let events = normalize_codex_exec_json_event(&message);
+            if !events.is_empty() {
+                return Ok(events);
+            }
+        }
+    }
+}
+
+fn start_codex_exec_json_session(
+    context: CodingAgentStartContext,
+) -> Result<CodexExecJsonSession, String> {
+    validate_coding_agent_start_context(&context)?;
+
+    let executable = codex_executable();
+    let args = build_codex_exec_json_args(&context);
+    let mut child = Command::new(&executable)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("启动 Codex exec --json 失败：{error}"))?;
+
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        return Err("Codex exec --json stdout 不可用。".to_string());
+    };
+
+    Ok(CodexExecJsonSession {
+        child,
+        stdout: BufReader::new(stdout),
+    })
+}
+
+fn build_codex_exec_json_args(context: &CodingAgentStartContext) -> Vec<String> {
+    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
+    vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--sandbox".to_string(),
+        sandbox.codex_exec_sandbox_arg().to_string(),
+        "--cd".to_string(),
+        context.project_path.clone(),
+        context.prompt.clone(),
+    ]
 }
 
 #[allow(dead_code)]
@@ -850,6 +1076,69 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
     }
 }
 
+fn normalize_codex_exec_json_event(event: &Value) -> Vec<AgentEvent> {
+    normalize_codex_exec_json_event_at(event, &current_agent_event_timestamp())
+}
+
+fn normalize_codex_exec_json_event_at(event: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+
+    match event_type {
+        "thread.started" => extract_string(event, "/thread_id")
+            .or_else(|| extract_string(event, "/thread/id"))
+            .map(|thread_id| {
+                vec![AgentEvent::ThreadStarted {
+                    thread_id,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "turn.started" => vec![AgentEvent::TurnStarted {
+            turn_id: extract_string(event, "/turn_id")
+                .or_else(|| extract_string(event, "/turn/id")),
+            created_at: created_at.to_string(),
+        }],
+        "turn.completed" => vec![AgentEvent::TurnCompleted {
+            final_message: extract_exec_final_message(event),
+            created_at: created_at.to_string(),
+        }],
+        "turn.failed" => vec![AgentEvent::Error {
+            message: extract_string(event, "/error")
+                .or_else(|| extract_string(event, "/message"))
+                .or_else(|| {
+                    event
+                        .get("error")
+                        .map(format_codex_error)
+                        .filter(|message| !message.is_empty())
+                })
+                .unwrap_or_else(|| "Codex exec --json turn failed.".to_string()),
+            created_at: created_at.to_string(),
+        }],
+        "item.started" | "item.completed" => {
+            normalize_codex_exec_json_item(event.get("item"), created_at)
+        }
+        "item.agent_message.delta" | "item.agentMessage.delta" => extract_string(event, "/delta")
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::AgentMessage {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "error" => vec![AgentEvent::Error {
+            message: event
+                .get("error")
+                .map(format_codex_error)
+                .unwrap_or_else(|| format_codex_error(event)),
+            created_at: created_at.to_string(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
 fn normalize_codex_item(item: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
     let Some(item) = item else {
         return Vec::new();
@@ -889,6 +1178,46 @@ fn normalize_codex_item(item: Option<&Value>, created_at: &str) -> Vec<AgentEven
     }
 }
 
+fn normalize_codex_exec_json_item(item: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
+    let Some(item) = item else {
+        return Vec::new();
+    };
+
+    match item.get("type").and_then(Value::as_str) {
+        Some("agent_message") | Some("agentMessage") => extract_string(item, "/text")
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::AgentMessage {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        Some("plan_update") | Some("plan") => format_exec_plan_update(item)
+            .map(|text| {
+                vec![AgentEvent::PlanUpdate {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        Some("command_execution") | Some("commandExecution") => {
+            let Some(command) = extract_string(item, "/command") else {
+                return Vec::new();
+            };
+            vec![AgentEvent::Command {
+                command,
+                status: extract_string(item, "/status").unwrap_or_else(|| "unknown".to_string()),
+                created_at: created_at.to_string(),
+            }]
+        }
+        Some("file_change") | Some("fileChange") => {
+            normalize_codex_exec_json_file_change(item, created_at)
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn normalize_codex_file_changes(changes: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
     changes
         .and_then(Value::as_array)
@@ -905,6 +1234,23 @@ fn normalize_codex_file_changes(changes: Option<&Value>, created_at: &str) -> Ve
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn normalize_codex_exec_json_file_change(item: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let mut events = normalize_codex_file_changes(item.get("changes"), created_at);
+    if events.is_empty() {
+        if let Some(path) = extract_string(item, "/path") {
+            events.push(AgentEvent::FileChange {
+                path,
+                change_type: extract_string(item, "/kind/type")
+                    .or_else(|| extract_string(item, "/change_type"))
+                    .or_else(|| extract_string(item, "/changeType")),
+                created_at: created_at.to_string(),
+            });
+        }
+    }
+
+    events
 }
 
 fn normalize_codex_turn_completed(params: &Value, created_at: &str) -> Vec<AgentEvent> {
@@ -941,6 +1287,13 @@ fn extract_final_agent_message(params: &Value) -> Option<String> {
         })
 }
 
+fn extract_exec_final_message(event: &Value) -> Option<String> {
+    extract_string(event, "/final_message")
+        .or_else(|| extract_string(event, "/finalMessage"))
+        .or_else(|| extract_string(event, "/message"))
+        .or_else(|| extract_final_agent_message(event))
+}
+
 fn format_turn_plan_update(params: &Value) -> Option<String> {
     let mut lines = Vec::new();
     if let Some(explanation) =
@@ -962,6 +1315,13 @@ fn format_turn_plan_update(params: &Value) -> Option<String> {
     } else {
         Some(lines.join("\n"))
     }
+}
+
+fn format_exec_plan_update(item: &Value) -> Option<String> {
+    extract_string(item, "/text")
+        .or_else(|| extract_string(item, "/message"))
+        .filter(|text| !text.is_empty())
+        .or_else(|| format_turn_plan_update(item))
 }
 
 fn format_codex_error(error: &Value) -> String {
@@ -1365,6 +1725,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_codex_exec_json_args_with_project_sandbox_and_prompt() {
+        let args = build_codex_exec_json_args(&CodingAgentStartContext {
+            project_path: "/tmp/voicecoder-demo".to_string(),
+            prompt: "Build the demo".to_string(),
+            sandbox: Some(CodingAgentSandboxMode::WorkspaceWrite),
+        });
+
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--cd",
+                "/tmp/voicecoder-demo",
+                "Build the demo"
+            ]
+        );
+    }
+
+    #[test]
     fn validates_coding_agent_start_context_requires_project_path_and_prompt() {
         assert!(
             validate_coding_agent_start_context(&CodingAgentStartContext {
@@ -1714,6 +2096,154 @@ mod tests {
                     created_at: "2026-06-24T00:00:00Z".to_string(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn normalizes_codex_exec_json_lifecycle_events() {
+        let thread_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "thread.started",
+                "thread_id": "exec-thread-1"
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let turn_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "turn.started"
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+        let completed_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "turn.completed",
+                "final_message": "完成"
+            }),
+            "2026-06-24T00:00:02Z",
+        );
+
+        assert_eq!(
+            thread_events,
+            vec![AgentEvent::ThreadStarted {
+                thread_id: "exec-thread-1".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            turn_events,
+            vec![AgentEvent::TurnStarted {
+                turn_id: None,
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            completed_events,
+            vec![AgentEvent::TurnCompleted {
+                final_message: Some("完成".to_string()),
+                created_at: "2026-06-24T00:00:02Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_codex_exec_json_item_events() {
+        let command_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "item.started",
+                "item": {
+                    "id": "item-1",
+                    "type": "command_execution",
+                    "command": "npm run check",
+                    "status": "in_progress"
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let message_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item-2",
+                    "type": "agent_message",
+                    "text": "Repo contains docs, sdk, and examples directories."
+                }
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+        let file_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item-3",
+                    "type": "file_change",
+                    "changes": [
+                        {
+                            "path": "src/App.tsx",
+                            "kind": { "type": "update" }
+                        }
+                    ]
+                }
+            }),
+            "2026-06-24T00:00:02Z",
+        );
+
+        assert_eq!(
+            command_events,
+            vec![AgentEvent::Command {
+                command: "npm run check".to_string(),
+                status: "in_progress".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            message_events,
+            vec![AgentEvent::AgentMessage {
+                text: "Repo contains docs, sdk, and examples directories.".to_string(),
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            file_events,
+            vec![AgentEvent::FileChange {
+                path: "src/App.tsx".to_string(),
+                change_type: Some("update".to_string()),
+                created_at: "2026-06-24T00:00:02Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_codex_exec_json_failed_turn_and_errors() {
+        let failed_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "turn.failed",
+                "error": {
+                    "message": "Sandbox denied command"
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let error_events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "error",
+                "message": "Authentication required"
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+
+        assert_eq!(
+            failed_events,
+            vec![AgentEvent::Error {
+                message: "Sandbox denied command".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            error_events,
+            vec![AgentEvent::Error {
+                message: "Authentication required".to_string(),
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            }]
         );
     }
 
