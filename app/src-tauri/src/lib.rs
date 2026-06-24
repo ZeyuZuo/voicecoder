@@ -199,6 +199,8 @@ pub fn run() {
             save_requirement_document,
             dev_server::get_dev_server_snapshot,
             dev_server::get_dev_server_diagnostic,
+            dev_server::start_demo_dev_server,
+            dev_server::stop_demo_dev_server,
             voice::start_voice_session,
             voice::send_voice_audio_chunk,
             voice::get_voice_provider_status,

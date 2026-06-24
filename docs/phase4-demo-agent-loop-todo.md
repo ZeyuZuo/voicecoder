@@ -330,7 +330,7 @@ cancel_active_agent_run()
 - [x] Step 15：实现 demo 反馈模式：第一版成功后 Composer 文案和操作切换为反馈输入。
 - [x] Step 16：新增右侧浏览器预览状态：Workspace browser tab 可接收并打开指定 URL。
 - [x] Step 17：新增 Tauri `dev_server` 模块，定义 dev server session / diagnostic / lifecycle event。
-- [ ] Step 18：实现 `npm run dev` 自动启动：管理子进程、cwd、stdout/stderr、停止旧进程。
+- [x] Step 18：实现 `npm run dev` 自动启动：管理子进程、cwd、stdout/stderr、停止旧进程。
 - [ ] Step 19：解析 dev server 输出中的本地 URL，例如 `http://localhost:5173`。
 - [ ] Step 20：Agent 初次生成完成后自动启动 dev server，并把 preview URL 写入 DemoSession。
 - [ ] Step 21：前端订阅 dev server 事件，在右侧浏览器 tab 打开 preview URL。

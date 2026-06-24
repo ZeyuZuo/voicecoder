@@ -87,6 +87,16 @@ export type DevServerDiagnostic = {
   error?: string;
 };
 
+export type StartDevServerRequest = {
+  projectPath: string;
+  sessionId?: string;
+  command?: string[];
+};
+
+export type StopDevServerRequest = {
+  sessionId?: string;
+};
+
 export type VoiceSessionStatus = "idle" | "starting" | "requesting-permission" | "recording" | "transcribing" | "error";
 
 export type VoiceTranscriptSegment = {
