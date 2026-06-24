@@ -8,9 +8,10 @@ import {
   Plus,
   Search,
   ShieldCheck,
-  Square
+  Square,
+  X
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useGitBranch } from "../hooks/useGitBranch";
 import type { VoiceSessionController } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
@@ -37,6 +38,7 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
     setPrompt
   } = useAppState();
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [demoConfirmOpen, setDemoConfirmOpen] = useState(false);
 
   const visibleProjects = useMemo(() => projects.slice(0, 6), [projects]);
   const gitBranch = useGitBranch(currentProject);
@@ -49,6 +51,13 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
   const showDemoAction = voiceMode && requirementState?.status === "confirmed";
   const canFinishRequirement = voiceMode && voiceInputPermission.canFinishTurn && voiceInputMode.canFinishTurn;
   const voiceButtonDisabled = voice.status === "transcribing" || !voiceInputPermission.canUseMic;
+  const demoPromptSummary = useMemo(() => getDemoPromptSummary(demo.session?.initialCodingPrompt), [demo.session?.initialCodingPrompt]);
+
+  useEffect(() => {
+    if (!demo.canStartInitialRun) {
+      setDemoConfirmOpen(false);
+    }
+  }, [demo.canStartInitialRun]);
 
   const finishRequirement = async () => {
     if (voice.recording || voice.busy) {
@@ -60,6 +69,54 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
 
   return (
     <div className={`composer-shell ${voiceMode ? "is-voice-mode" : ""}`}>
+      {demoConfirmOpen && demo.session ? (
+        <section className="demo-start-confirmation" aria-label="第一版 demo 启动确认">
+          <div className="demo-start-confirmation-header">
+            <div>
+              <span>第一版 demo</span>
+              <strong>启动确认</strong>
+            </div>
+            <button className="icon-button quiet" aria-label="关闭启动确认" onClick={() => setDemoConfirmOpen(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <dl className="demo-start-confirmation-grid">
+            <div>
+              <dt>目标项目</dt>
+              <dd>{currentProject ? `${currentProject.name} · ${shortPath(currentProject.path)}` : shortPath(demo.session.projectPath)}</dd>
+            </div>
+            <div>
+              <dt>当前分支</dt>
+              <dd>{gitBranch ?? "未检测到分支"}</dd>
+            </div>
+            <div>
+              <dt>运行类型</dt>
+              <dd>initial_build</dd>
+            </div>
+            <div>
+              <dt>Prompt 摘要</dt>
+              <dd>{demoPromptSummary}</dd>
+            </div>
+          </dl>
+          <div className="demo-start-confirmation-actions">
+            <button className="tool-button" onClick={() => setDemoConfirmOpen(false)}>
+              取消
+            </button>
+            <button
+              className="tool-button accent"
+              disabled={!demo.canStartInitialRun}
+              onClick={() => {
+                setDemoConfirmOpen(false);
+                demo.startInitialRun();
+              }}
+            >
+              <Play size={14} />
+              <span>确认生成</span>
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       <div className={`composer-card ${voiceMode ? "is-voice-mode" : ""}`}>
         {voiceMode ? (
           <div className="voice-composer-status">
@@ -92,7 +149,7 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
               </>
             ) : (
               showDemoAction ? (
-                <button className="tool-button accent" disabled={!demo.canStartInitialRun} onClick={demo.startInitialRun}>
+                <button className="tool-button accent" disabled={!demo.canStartInitialRun} onClick={() => setDemoConfirmOpen(true)}>
                   <Play size={14} />
                   <span>{getDemoActionLabel(demo.session?.status)}</span>
                 </button>
@@ -292,4 +349,13 @@ function getDemoActionLabel(status: DemoSessionStatus | undefined) {
   }
 
   return "生成 demo";
+}
+
+function getDemoPromptSummary(prompt: string | undefined) {
+  if (!prompt?.trim()) {
+    return "使用已确认需求文档生成第一版可运行 demo。";
+  }
+
+  const compact = prompt.replace(/\s+/g, " ").trim();
+  return compact.length > 120 ? `${compact.slice(0, 120)}...` : compact;
 }

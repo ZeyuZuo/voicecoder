@@ -936,6 +936,78 @@ button {
   background: transparent;
 }
 
+.demo-start-confirmation {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 14px;
+  border: 1px solid #d9e3ee;
+  border-radius: 18px;
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 16px 42px rgb(31 33 36 / 11%);
+}
+
+.demo-start-confirmation-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.demo-start-confirmation-header div {
+  display: grid;
+  gap: 2px;
+}
+
+.demo-start-confirmation-header span {
+  color: #627181;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.demo-start-confirmation-header strong {
+  color: #252a30;
+  font-size: 15px;
+}
+
+.demo-start-confirmation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 12px;
+  margin: 0;
+}
+
+.demo-start-confirmation-grid div {
+  min-width: 0;
+}
+
+.demo-start-confirmation-grid dt {
+  margin: 0 0 3px;
+  color: #7b8490;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.demo-start-confirmation-grid dd {
+  overflow: hidden;
+  margin: 0;
+  color: #30363e;
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.demo-start-confirmation-grid div:last-child {
+  grid-column: 1 / -1;
+}
+
+.demo-start-confirmation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .composer-card {
   overflow: hidden;
   border: 1px solid #ddddda;
@@ -1731,6 +1803,19 @@ button {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .demo-start-confirmation-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .demo-start-confirmation-actions {
+    justify-content: stretch;
+  }
+
+  .demo-start-confirmation-actions .tool-button {
+    flex: 1;
+    justify-content: center;
   }
 
   .composer-shell.is-voice-mode {
