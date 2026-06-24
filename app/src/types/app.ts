@@ -24,6 +24,11 @@ export type WorkspaceTab = {
   title: string;
 };
 
+export type BrowserPreviewState = {
+  url?: string;
+  updatedAt?: string;
+};
+
 export type VoiceSessionStatus = "idle" | "starting" | "requesting-permission" | "recording" | "transcribing" | "error";
 
 export type VoiceTranscriptSegment = {

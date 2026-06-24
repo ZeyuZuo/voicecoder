@@ -1607,6 +1607,89 @@ button {
   line-height: 1.55;
 }
 
+.browser-preview {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  background: #f7f8f6;
+}
+
+.browser-preview-toolbar {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  color: #54575c;
+}
+
+.browser-preview-toolbar input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #dfe2dd;
+  border-radius: 8px;
+  outline: none;
+  background: #f8f9f7;
+  color: #25272b;
+  font-size: 13px;
+}
+
+.browser-preview-toolbar input:focus {
+  border-color: #9aa7a5;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgba(60, 77, 72, 0.1);
+}
+
+.browser-preview-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+.browser-preview-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  text-align: center;
+}
+
+.browser-preview-empty h2 {
+  margin: 18px 0 8px;
+  font-size: 23px;
+}
+
+.browser-preview-empty p {
+  max-width: 360px;
+  margin: 0;
+  color: #74777c;
+  line-height: 1.55;
+}
+
+@container workspace-pane (max-width: 380px) {
+  .browser-preview-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .browser-preview-toolbar input {
+    flex-basis: 100%;
+    order: 3;
+  }
+
+  .browser-preview-toolbar .tool-button {
+    margin-left: auto;
+  }
+}
+
 .file-explorer {
   display: flex;
   flex: 1;

@@ -1,7 +1,7 @@
 import { createContext, ReactNode, useContext, useMemo, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Conversation, Project, WorkspaceMode, WorkspaceTab, WorkspaceTabKind } from "../types/app";
+import type { BrowserPreviewState, Conversation, Project, WorkspaceMode, WorkspaceTab, WorkspaceTabKind } from "../types/app";
 import { registerBrowserDirectory } from "../utils/browserFileSystem";
 import { createId, getProjectName } from "../utils/project";
 
@@ -18,6 +18,7 @@ type AppStateContextValue = {
   workspaceMode: WorkspaceMode;
   workspaceTabs: WorkspaceTab[];
   activeWorkspaceTabId?: string;
+  browserPreview: BrowserPreviewState;
   sidebarCollapsed: boolean;
   workspaceCollapsed: boolean;
   maximizedPane: "conversation" | "workspace" | null;
@@ -29,6 +30,7 @@ type AppStateContextValue = {
   selectProject: (projectId?: string) => void;
   setWorkspaceMode: (mode: WorkspaceMode) => void;
   openWorkspaceTab: (kind: WorkspaceTabKind) => void;
+  openBrowserPreview: (url: string) => void;
   selectWorkspaceTab: (tabId: string) => void;
   closeWorkspaceTab: (tabId: string) => void;
   toggleSidebar: () => void;
@@ -91,6 +93,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("launcher");
   const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([]);
   const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState<string | undefined>();
+  const [browserPreview, setBrowserPreview] = useState<BrowserPreviewState>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(false);
   const [maximizedPane, setMaximizedPane] = useState<"conversation" | "workspace" | null>(null);
@@ -249,6 +252,16 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setWorkspaceMode(kind);
   };
 
+  const openBrowserPreview = (url: string) => {
+    const normalizedUrl = normalizePreviewUrl(url);
+    setBrowserPreview({
+      url: normalizedUrl,
+      updatedAt: Date.now().toString()
+    });
+    openWorkspaceTab("browser");
+    setWorkspaceCollapsed(false);
+  };
+
   const selectWorkspaceTab = (tabId: string) => {
     const tab = workspaceTabs.find((candidate) => candidate.id === tabId);
 
@@ -282,6 +295,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       workspaceMode,
       workspaceTabs,
       activeWorkspaceTabId,
+      browserPreview,
       sidebarCollapsed,
       workspaceCollapsed,
       maximizedPane,
@@ -293,6 +307,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       selectProject,
       setWorkspaceMode,
       openWorkspaceTab,
+      openBrowserPreview,
       selectWorkspaceTab,
       closeWorkspaceTab,
       toggleSidebar,
@@ -300,10 +315,19 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       toggleMaximizedPane,
       setPrompt
     }),
-    [activeWorkspaceTabId, currentProject, maximizedPane, projectPickerMessage, prompt, sidebarCollapsed, state.conversations, state.projects, workspaceCollapsed, workspaceMode, workspaceTabs]
+    [activeWorkspaceTabId, browserPreview, currentProject, maximizedPane, projectPickerMessage, prompt, sidebarCollapsed, state.conversations, state.projects, workspaceCollapsed, workspaceMode, workspaceTabs]
   );
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>;
+}
+
+function normalizePreviewUrl(url: string) {
+  const trimmedUrl = url.trim();
+  if (/^https?:\/\//i.test(trimmedUrl)) {
+    return trimmedUrl;
+  }
+
+  return `http://${trimmedUrl}`;
 }
 
 function getWorkspaceTabTitle(kind: WorkspaceTabKind): string {

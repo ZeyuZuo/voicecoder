@@ -1,5 +1,6 @@
 import {
   Code2,
+  ExternalLink,
   FileText,
   FolderOpen,
   Globe2,
@@ -10,8 +11,9 @@ import {
   SquareTerminal,
   X
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useAppState } from "../providers/AppStateProvider";
-import type { Project, WorkspaceTabKind } from "../types/app";
+import type { BrowserPreviewState, Project, WorkspaceTabKind } from "../types/app";
 import { FileExplorer } from "./workspace/FileExplorer";
 
 const launcherItems = [
@@ -47,8 +49,10 @@ export function WorkspacePane() {
     setWorkspaceMode,
     workspaceTabs,
     activeWorkspaceTabId,
+    browserPreview,
     currentProject,
     maximizedPane,
+    openBrowserPreview,
     openWorkspaceTab,
     selectWorkspaceTab,
     closeWorkspaceTab,
@@ -112,23 +116,37 @@ export function WorkspacePane() {
           </div>
         </div>
       ) : (
-        <WorkspaceTabContent kind={activeTab.kind} currentProject={currentProject} onOpenLauncher={() => setWorkspaceMode("launcher")} />
+        <WorkspaceTabContent
+          browserPreview={browserPreview}
+          currentProject={currentProject}
+          kind={activeTab.kind}
+          onOpenBrowserPreview={openBrowserPreview}
+          onOpenLauncher={() => setWorkspaceMode("launcher")}
+        />
       )}
     </section>
   );
 }
 
 function WorkspaceTabContent({
+  browserPreview,
   kind,
   currentProject,
+  onOpenBrowserPreview,
   onOpenLauncher
 }: {
+  browserPreview: BrowserPreviewState;
   kind: WorkspaceTabKind;
   currentProject?: Project;
+  onOpenBrowserPreview: (url: string) => void;
   onOpenLauncher: () => void;
 }) {
   if (kind === "files") {
     return <FileExplorer project={currentProject} />;
+  }
+
+  if (kind === "browser") {
+    return <BrowserPreview preview={browserPreview} onOpenPreview={onOpenBrowserPreview} />;
   }
 
   return (
@@ -141,6 +159,64 @@ function WorkspaceTabContent({
       <button className="tool-button" onClick={onOpenLauncher}>
         返回工具入口
       </button>
+    </div>
+  );
+}
+
+function BrowserPreview({
+  preview,
+  onOpenPreview
+}: {
+  preview: BrowserPreviewState;
+  onOpenPreview: (url: string) => void;
+}) {
+  const [draftUrl, setDraftUrl] = useState(preview.url ?? "http://localhost:5173");
+
+  useEffect(() => {
+    if (preview.url) {
+      setDraftUrl(preview.url);
+    }
+  }, [preview.url]);
+
+  const openDraftUrl = () => {
+    if (!draftUrl.trim()) {
+      return;
+    }
+
+    onOpenPreview(draftUrl);
+  };
+
+  return (
+    <div className="browser-preview">
+      <div className="browser-preview-toolbar">
+        <Globe2 size={16} />
+        <input
+          aria-label="预览地址"
+          value={draftUrl}
+          onChange={(event) => setDraftUrl(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              openDraftUrl();
+            }
+          }}
+        />
+        <button className="tool-button" onClick={openDraftUrl}>
+          <ExternalLink size={14} />
+          <span>打开</span>
+        </button>
+      </div>
+
+      {preview.url ? (
+        <iframe className="browser-preview-frame" src={preview.url} title="Demo preview" />
+      ) : (
+        <div className="browser-preview-empty">
+          <div className="workspace-placeholder-icon">
+            <Globe2 size={30} />
+          </div>
+          <h2>浏览器预览</h2>
+          <p>等待 dev server URL，或手动输入本地预览地址。</p>
+        </div>
+      )}
     </div>
   );
 }
