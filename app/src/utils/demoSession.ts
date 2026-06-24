@@ -1,8 +1,11 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useReducer } from "react";
 import type {
   AgentEvent,
   AgentRun,
   AgentRunKind,
+  CodingAgentProviderKind,
   DemoFeedbackTurn,
   DemoSession,
   RequirementState,
@@ -22,10 +25,18 @@ export type CreateDemoSessionInput = {
 export type DemoSessionAction =
   | {
       type: "start_agent_run";
+      runId?: string;
       kind: AgentRunKind;
       prompt: string;
       now: string;
       feedbackTurnId?: string;
+    }
+  | {
+      type: "mark_agent_run_started";
+      runId: string;
+      codexThreadId: string;
+      codexTurnId: string;
+      now: string;
     }
   | {
       type: "append_agent_event";
@@ -78,6 +89,46 @@ export type DemoSessionController = {
   startInitialRun: () => void;
 };
 
+type StartInitialDemoRunRequest = {
+  demoSessionId: string;
+  runId: string;
+  projectPath: string;
+  prompt: string;
+  sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+  provider?: CodingAgentProviderKind;
+};
+
+type AgentRunStartedPayload = {
+  demoSessionId: string;
+  runId: string;
+  projectPath: string;
+  provider: CodingAgentProviderKind;
+  codexThreadId: string;
+  codexTurnId: string;
+  startedAt: string;
+};
+
+type AgentEventPayload = {
+  demoSessionId: string;
+  runId: string;
+  event: AgentEvent;
+};
+
+type AgentRunCompletedPayload = {
+  demoSessionId: string;
+  runId: string;
+  finalMessage?: string;
+  changedFiles: string[];
+  completedAt: string;
+};
+
+type AgentErrorPayload = {
+  demoSessionId?: string;
+  runId?: string;
+  message: string;
+  occurredAt: string;
+};
+
 export function createDemoSession(input: CreateDemoSessionInput): DemoSession {
   return {
     id: createId("demo_session"),
@@ -123,8 +174,9 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
       return session;
     }
 
+    const runId = action.runId ?? createId("agent_run");
     const run: AgentRun = {
-      id: createId("agent_run"),
+      id: runId,
       kind: action.kind,
       prompt: action.prompt,
       status: "running",
@@ -137,9 +189,32 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
     return {
       ...session,
       runs: [...session.runs, run],
-      feedbackTurns: linkFeedbackTurnToRun(session.feedbackTurns, action.feedbackTurnId, run.id),
+      feedbackTurns: linkFeedbackTurnToRun(session.feedbackTurns, action.feedbackTurnId, runId),
       status: action.kind === "initial_build" ? "agent_running" : "agent_modifying",
       error: undefined,
+      updatedAt: action.now
+    };
+  }
+
+  if (action.type === "mark_agent_run_started") {
+    const run = findRun(session, action.runId);
+    if (!run || isTerminalRunStatus(run.status)) {
+      return session;
+    }
+
+    return {
+      ...session,
+      codexThreadId: action.codexThreadId,
+      runs: session.runs.map((candidate) =>
+        candidate.id === action.runId
+          ? {
+              ...candidate,
+              codexThreadId: action.codexThreadId,
+              codexTurnId: action.codexTurnId,
+              status: "running"
+            }
+          : candidate
+      ),
       updatedAt: action.now
     };
   }
@@ -311,13 +386,113 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
       return;
     }
 
+    const runId = createId("agent_run");
+    const prompt = createInitialDemoPrompt(session);
+    const now = nowString();
     dispatch({
       type: "start_agent_run",
+      runId,
       kind: "initial_build",
-      prompt: createInitialDemoPrompt(session),
-      now: nowString()
+      prompt,
+      now
+    });
+
+    if (!isTauri()) {
+      dispatch({
+        type: "fail_agent_run",
+        runId,
+        error: "Demo 生成需要在 Tauri 客户端中使用。",
+        now: nowString()
+      });
+      return;
+    }
+
+    const request: StartInitialDemoRunRequest = {
+      demoSessionId: session.id,
+      runId,
+      projectPath: session.projectPath,
+      prompt,
+      sandbox: "workspace-write"
+    };
+
+    void invoke("start_initial_demo_run", { request }).catch((error) => {
+      dispatch({
+        type: "fail_agent_run",
+        runId,
+        error: stringifyError(error),
+        now: nowString()
+      });
     });
   }, [session]);
+
+  useEffect(() => {
+    if (!isTauri() || !session) {
+      return;
+    }
+
+    const sessionId = session.id;
+    const unlistenPromises = [
+      listen<AgentRunStartedPayload>("agent://run-started", (event) => {
+        if (event.payload.demoSessionId !== sessionId) {
+          return;
+        }
+
+        dispatch({
+          type: "mark_agent_run_started",
+          runId: event.payload.runId,
+          codexThreadId: event.payload.codexThreadId,
+          codexTurnId: event.payload.codexTurnId,
+          now: event.payload.startedAt
+        });
+      }),
+      listen<AgentEventPayload>("agent://event", (event) => {
+        if (event.payload.demoSessionId !== sessionId) {
+          return;
+        }
+
+        dispatch({
+          type: "append_agent_event",
+          runId: event.payload.runId,
+          event: event.payload.event,
+          now: event.payload.event.createdAt
+        });
+      }),
+      listen<AgentRunCompletedPayload>("agent://run-completed", (event) => {
+        if (event.payload.demoSessionId !== sessionId) {
+          return;
+        }
+
+        dispatch({
+          type: "complete_agent_run",
+          runId: event.payload.runId,
+          finalMessage: event.payload.finalMessage,
+          changedFiles: event.payload.changedFiles,
+          now: event.payload.completedAt
+        });
+      }),
+      listen<AgentErrorPayload>("agent://error", (event) => {
+        if (event.payload.demoSessionId && event.payload.demoSessionId !== sessionId) {
+          return;
+        }
+        if (!event.payload.runId) {
+          return;
+        }
+
+        dispatch({
+          type: "fail_agent_run",
+          runId: event.payload.runId,
+          error: event.payload.message,
+          now: event.payload.occurredAt
+        });
+      })
+    ];
+
+    return () => {
+      for (const unlistenPromise of unlistenPromises) {
+        void unlistenPromise.then((unlisten) => unlisten());
+      }
+    };
+  }, [session?.id]);
 
   return useMemo(
     () => ({
@@ -402,4 +577,8 @@ function createInitialCodingPrompt(requirementState: RequirementState) {
 
 function nowString() {
   return Date.now().toString();
+}
+
+function stringifyError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

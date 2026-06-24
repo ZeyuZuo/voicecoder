@@ -833,6 +833,93 @@ button {
   margin-top: 4px;
 }
 
+.agent-progress-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #dfe6ea;
+  border-radius: 14px;
+  background: rgb(255 255 255 / 90%);
+  box-shadow: 0 12px 34px rgb(31 33 36 / 7%);
+}
+
+.agent-progress-panel.is-failed {
+  border-color: #f2c8c1;
+  background: rgb(255 247 245 / 94%);
+}
+
+.agent-progress-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.agent-progress-header div {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+}
+
+.agent-progress-header span {
+  color: #66717c;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.agent-progress-header strong {
+  color: #252a30;
+  font-size: 13px;
+}
+
+.agent-progress-header small {
+  flex: 0 0 auto;
+  color: #738091;
+  font-size: 12px;
+}
+
+.agent-progress-events {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-progress-event {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: #59636f;
+}
+
+.agent-progress-event svg {
+  color: #3e7fb8;
+}
+
+.agent-progress-event.is-file_change svg {
+  color: #498057;
+}
+
+.agent-progress-event.is-command svg {
+  color: #7d688e;
+}
+
+.agent-progress-event.is-error svg {
+  color: #bd4438;
+}
+
+.agent-progress-event p {
+  overflow: hidden;
+  margin: 0;
+  color: #343a42;
+  font-size: 12.5px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-shell {
   position: relative;
   z-index: 20;
@@ -1635,10 +1722,15 @@ button {
     border-radius: 22px 22px 22px 10px;
   }
 
-  .requirement-document-preview,
-  .requirement-action-card {
+  .requirement-bottom-stack {
     right: 16px;
     left: 16px;
+  }
+
+  .agent-progress-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .composer-shell.is-voice-mode {

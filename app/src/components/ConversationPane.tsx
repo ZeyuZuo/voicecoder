@@ -1,14 +1,19 @@
 import {
+  Bot,
   Check,
   ChevronDown,
   ChevronUp,
   Cloud,
+  FileCode2,
+  ListChecks,
   Maximize2,
   Minimize2,
   MoreHorizontal,
   PanelLeft,
   PanelRight,
-  ScrollText
+  ScrollText,
+  Terminal,
+  XCircle
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import type { VoiceSessionController } from "../hooks/useVoiceSession";
@@ -16,6 +21,7 @@ import { useVoiceSession } from "../hooks/useVoiceSession";
 import { useAppState } from "../providers/AppStateProvider";
 import { useDemoSession, type DemoSessionController } from "../utils/demoSession";
 import { useVoiceRequirementSession, type VoiceRequirementController } from "../utils/requirementState";
+import type { AgentEvent, AgentRun } from "../types/app";
 import { Composer } from "./Composer";
 
 export function ConversationPane() {
@@ -87,9 +93,11 @@ function VoiceRequirementWorkspace({
   const openGaps = state?.openGaps.filter((gap) => gap.status === "open").slice(0, 3) ?? [];
   const showRequirementConfirm = state?.status === "document_ready";
   const showRequirementDocument = (state?.status === "document_ready" || state?.status === "confirmed") && Boolean(state.requirementDocument);
+  const showAgentProgress = Boolean(demo.session?.runs.length);
+  const hasBottomStack = showRequirementConfirm || showRequirementDocument || showAgentProgress;
 
   return (
-    <div className={`voice-workspace ${showRequirementDocument ? "has-document-stack" : ""}`}>
+    <div className={`voice-workspace ${hasBottomStack ? "has-document-stack" : ""}`}>
       <div className="voice-workspace-main">
         <div className="voice-workspace-topline">
           <StatusPill active={voice.recording}>{getVoiceStatusLabel(voice.status)}</StatusPill>
@@ -148,7 +156,7 @@ function VoiceRequirementWorkspace({
         </div>
       </aside>
 
-      {showRequirementConfirm || showRequirementDocument ? (
+      {hasBottomStack ? (
         <div className="requirement-bottom-stack">
           {showRequirementConfirm ? (
             <section className="requirement-action-card is-confirm is-document-ready">
@@ -178,10 +186,124 @@ function VoiceRequirementWorkspace({
               </button>
             </section>
           ) : null}
+
+          {showAgentProgress && demo.session ? <AgentProgressPanel runs={demo.session.runs} /> : null}
         </div>
       ) : null}
     </div>
   );
+}
+
+function AgentProgressPanel({ runs }: { runs: AgentRun[] }) {
+  const latestRun = runs[runs.length - 1];
+
+  if (!latestRun) {
+    return null;
+  }
+
+  const visibleEvents = latestRun.events.slice(-5);
+  const changedCount = latestRun.changedFiles.length;
+
+  return (
+    <section className={`agent-progress-panel is-${latestRun.status}`} aria-live="polite">
+      <div className="agent-progress-header">
+        <div>
+          <span>{getAgentRunKindLabel(latestRun.kind)}</span>
+          <strong>{getAgentRunStatusLabel(latestRun.status)}</strong>
+        </div>
+        {changedCount ? <small>{changedCount} 个文件变更</small> : null}
+      </div>
+
+      <div className="agent-progress-events">
+        {visibleEvents.length ? (
+          visibleEvents.map((event, index) => (
+            <div className={`agent-progress-event is-${event.type}`} key={`${event.type}-${event.createdAt}-${index}`}>
+              <AgentEventIcon event={event} />
+              <p>{formatAgentEvent(event)}</p>
+            </div>
+          ))
+        ) : (
+          <div className="agent-progress-event is-waiting">
+            <Bot size={15} />
+            <p>正在启动 Codex thread</p>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AgentEventIcon({ event }: { event: AgentEvent }) {
+  if (event.type === "command") {
+    return <Terminal size={15} />;
+  }
+
+  if (event.type === "file_change") {
+    return <FileCode2 size={15} />;
+  }
+
+  if (event.type === "plan_update") {
+    return <ListChecks size={15} />;
+  }
+
+  if (event.type === "error") {
+    return <XCircle size={15} />;
+  }
+
+  return <Bot size={15} />;
+}
+
+function formatAgentEvent(event: AgentEvent) {
+  if (event.type === "thread_started") {
+    return `Thread ${event.threadId}`;
+  }
+
+  if (event.type === "turn_started") {
+    return event.turnId ? `Turn ${event.turnId}` : "Turn 已启动";
+  }
+
+  if (event.type === "agent_message") {
+    return compactText(event.text);
+  }
+
+  if (event.type === "plan_update") {
+    return compactText(event.text);
+  }
+
+  if (event.type === "command") {
+    return `${event.status} · ${event.command}`;
+  }
+
+  if (event.type === "file_change") {
+    return `${event.changeType ?? "changed"} · ${event.path}`;
+  }
+
+  if (event.type === "turn_completed") {
+    return compactText(event.finalMessage ?? "本轮已完成");
+  }
+
+  return event.message;
+}
+
+function compactText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function getAgentRunKindLabel(kind: AgentRun["kind"]) {
+  return kind === "initial_build" ? "Demo 生成" : "Demo 修改";
+}
+
+function getAgentRunStatusLabel(status: AgentRun["status"]) {
+  const labels = {
+    queued: "排队中",
+    starting: "启动中",
+    running: "运行中",
+    succeeded: "已完成",
+    failed: "失败",
+    cancelled: "已取消"
+  };
+
+  return labels[status];
 }
 
 function getDemoStatusLabel(status: NonNullable<DemoSessionController["session"]>["status"]) {
