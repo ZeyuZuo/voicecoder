@@ -431,6 +431,7 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
     }
 
     const sessionId = session.id;
+    const sessionProjectPath = session.projectPath;
     const unlistenPromises = [
       listen<AgentRunStartedPayload>("agent://run-started", (event) => {
         if (event.payload.demoSessionId !== sessionId) {
@@ -469,6 +470,7 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
           changedFiles: event.payload.changedFiles,
           now: event.payload.completedAt
         });
+        dispatchProjectFilesChanged(sessionProjectPath, event.payload.changedFiles);
       }),
       listen<AgentErrorPayload>("agent://error", (event) => {
         if (event.payload.demoSessionId && event.payload.demoSessionId !== sessionId) {
@@ -581,4 +583,35 @@ function nowString() {
 
 function stringifyError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function dispatchProjectFilesChanged(projectPath: string, changedFiles: string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent("voicecoder:project-files-changed", {
+    detail: {
+      projectPath,
+      changedPath: resolveChangedPath(projectPath, changedFiles[0])
+    }
+  }));
+}
+
+function resolveChangedPath(projectPath: string, changedPath: string | undefined) {
+  if (!changedPath) {
+    return undefined;
+  }
+
+  if (isAbsoluteOrVirtualPath(changedPath)) {
+    return changedPath;
+  }
+
+  const cleanProjectPath = projectPath.replace(/\/+$/, "");
+  const cleanChangedPath = changedPath.replace(/^\.?\//, "");
+  return `${cleanProjectPath}/${cleanChangedPath}`;
+}
+
+function isAbsoluteOrVirtualPath(path: string) {
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("browser://");
 }

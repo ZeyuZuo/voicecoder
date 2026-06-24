@@ -306,7 +306,7 @@ cancel_active_agent_run()
 - [x] Step 9：实现 app-server 事件归一化，把 Codex 通知转换成前端 `AgentEvent`。
 - [x] Step 10：新增 Tauri 事件：`agent://run-started`、`agent://event`、`agent://run-completed`、`agent://error`。
 - [x] Step 11：前端订阅 Agent 事件，并在对话区展示运行进度。
-- [ ] Step 12：Agent 运行完成后触发 `voicecoder:project-files-changed`，刷新文件树。
+- [x] Step 12：Agent 运行完成后触发 `voicecoder:project-files-changed`，刷新文件树。
 - [ ] Step 13：新增 `codex_exec_json` 后备 provider，用于诊断和 app-server 不可用时的一次性运行。
 - [ ] Step 14：实现“第一版 demo”启动确认：目标项目、当前分支、运行类型、prompt 摘要。
 - [ ] Step 15：实现 demo 反馈模式：第一版成功后 Composer 文案和操作切换为反馈输入。
