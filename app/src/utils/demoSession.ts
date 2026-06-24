@@ -86,7 +86,9 @@ export type DemoSessionController = {
   session?: DemoSession;
   active: boolean;
   canStartInitialRun: boolean;
+  canStartFeedbackListening: boolean;
   startInitialRun: () => void;
+  startFeedbackListening: () => void;
 };
 
 type StartInitialDemoRunRequest = {
@@ -425,6 +427,17 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
     });
   }, [session]);
 
+  const startFeedbackListening = useCallback(() => {
+    if (!session || session.status !== "preview_ready") {
+      return;
+    }
+
+    dispatch({
+      type: "start_feedback_listening",
+      now: nowString()
+    });
+  }, [session]);
+
   useEffect(() => {
     if (!isTauri() || !session) {
       return;
@@ -501,9 +514,11 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
       session,
       active: Boolean(session),
       canStartInitialRun: session?.status === "ready_to_start",
-      startInitialRun
+      canStartFeedbackListening: session?.status === "preview_ready",
+      startInitialRun,
+      startFeedbackListening
     }),
-    [session, startInitialRun]
+    [session, startInitialRun, startFeedbackListening]
   );
 }
 

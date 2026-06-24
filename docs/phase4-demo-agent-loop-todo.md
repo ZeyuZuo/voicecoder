@@ -309,7 +309,7 @@ cancel_active_agent_run()
 - [x] Step 12：Agent 运行完成后触发 `voicecoder:project-files-changed`，刷新文件树。
 - [x] Step 13：新增 `codex_exec_json` 后备 provider，用于诊断和 app-server 不可用时的一次性运行。
 - [x] Step 14：实现“第一版 demo”启动确认：目标项目、当前分支、运行类型、prompt 摘要。
-- [ ] Step 15：实现 demo 反馈模式：第一版成功后 Composer 文案和操作切换为反馈输入。
+- [x] Step 15：实现 demo 反馈模式：第一版成功后 Composer 文案和操作切换为反馈输入。
 - [ ] Step 16：复用语音链路收集反馈 utterances，但不要进入 Phase 3 需求文档状态机。
 - [ ] Step 17：新增 LLM 反馈整理命令：把反馈 utterances 转成 `summary` 和 `modificationPrompt`。
 - [ ] Step 18：实现后续 `feedback_change` run：复用同一个 `codexThreadId` 发起新 turn。

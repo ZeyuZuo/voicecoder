@@ -52,6 +52,7 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
   const canFinishRequirement = voiceMode && voiceInputPermission.canFinishTurn && voiceInputMode.canFinishTurn;
   const voiceButtonDisabled = voice.status === "transcribing" || !voiceInputPermission.canUseMic;
   const demoPromptSummary = useMemo(() => getDemoPromptSummary(demo.session?.initialCodingPrompt), [demo.session?.initialCodingPrompt]);
+  const demoAction = getDemoAction(demo.session?.status, demo.canStartInitialRun, demo.canStartFeedbackListening);
 
   useEffect(() => {
     if (!demo.canStartInitialRun) {
@@ -149,9 +150,22 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
               </>
             ) : (
               showDemoAction ? (
-                <button className="tool-button accent" disabled={!demo.canStartInitialRun} onClick={() => setDemoConfirmOpen(true)}>
+                <button
+                  className="tool-button accent"
+                  disabled={demoAction.disabled}
+                  onClick={() => {
+                    if (demoAction.kind === "start_initial") {
+                      setDemoConfirmOpen(true);
+                      return;
+                    }
+
+                    if (demoAction.kind === "start_feedback") {
+                      demo.startFeedbackListening();
+                    }
+                  }}
+                >
                   <Play size={14} />
-                  <span>{getDemoActionLabel(demo.session?.status)}</span>
+                  <span>{demoAction.label}</span>
                 </button>
               ) : (
                 <button className="tool-button" disabled={!canFinishRequirement} onClick={finishRequirement}>
@@ -284,8 +298,38 @@ function getVoiceInputMode(
     if (demoStatus === "agent_running" || demoStatus === "agent_modifying") {
       return {
         title: "正在生成 demo",
-        hint: "已创建 DemoSession，后续会接入 Codex 执行事件。",
+        hint: "Codex 正在实现当前需求，右侧文件树会在完成后刷新。",
         finishLabel: "生成中",
+        canFinishTurn: false,
+        disableMic: true
+      };
+    }
+
+    if (demoStatus === "preview_ready") {
+      return {
+        title: "第一版 demo 已生成",
+        hint: "可以继续告诉我哪里需要调整。",
+        finishLabel: "反馈修改",
+        canFinishTurn: false,
+        disableMic: true
+      };
+    }
+
+    if (demoStatus === "feedback_listening") {
+      return {
+        title: "说说哪里需要改",
+        hint: "已进入 demo 反馈模式，下一步会接入语音反馈收集。",
+        finishLabel: "等待反馈",
+        canFinishTurn: false,
+        disableMic: true
+      };
+    }
+
+    if (demoStatus === "feedback_processing") {
+      return {
+        title: "正在整理修改意见",
+        hint: "会把反馈转成下一轮修改指令。",
+        finishLabel: "整理中",
         canFinishTurn: false,
         disableMic: true
       };
@@ -339,16 +383,48 @@ function getVoiceInputMode(
   };
 }
 
-function getDemoActionLabel(status: DemoSessionStatus | undefined) {
+function getDemoAction(
+  status: DemoSessionStatus | undefined,
+  canStartInitialRun: boolean,
+  canStartFeedbackListening: boolean
+) {
   if (status === "agent_running" || status === "agent_modifying") {
-    return "生成中";
+    return {
+      kind: "none" as const,
+      label: "生成中",
+      disabled: true
+    };
   }
 
   if (status === "preview_ready") {
-    return "已生成";
+    return {
+      kind: "start_feedback" as const,
+      label: "反馈修改",
+      disabled: !canStartFeedbackListening
+    };
   }
 
-  return "生成 demo";
+  if (status === "feedback_listening") {
+    return {
+      kind: "none" as const,
+      label: "等待反馈",
+      disabled: true
+    };
+  }
+
+  if (status === "feedback_processing") {
+    return {
+      kind: "none" as const,
+      label: "整理中",
+      disabled: true
+    };
+  }
+
+  return {
+    kind: "start_initial" as const,
+    label: "生成 demo",
+    disabled: !canStartInitialRun
+  };
 }
 
 function getDemoPromptSummary(prompt: string | undefined) {
