@@ -1,4 +1,5 @@
 use crate::env_config::read_local_env;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -103,6 +104,52 @@ impl CodingAgentSandboxMode {
             }),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AgentEvent {
+    ThreadStarted {
+        thread_id: String,
+        created_at: String,
+    },
+    TurnStarted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        created_at: String,
+    },
+    AgentMessage {
+        text: String,
+        created_at: String,
+    },
+    PlanUpdate {
+        text: String,
+        created_at: String,
+    },
+    Command {
+        command: String,
+        status: String,
+        created_at: String,
+    },
+    FileChange {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        change_type: Option<String>,
+        created_at: String,
+    },
+    TurnCompleted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        final_message: Option<String>,
+        created_at: String,
+    },
+    Error {
+        message: String,
+        created_at: String,
+    },
 }
 
 pub(crate) struct CodingAgentProviderRegistry;
@@ -451,6 +498,201 @@ fn build_turn_start_params(
             }
         ]
     })
+}
+
+#[allow(dead_code)]
+fn normalize_codex_notification(notification: &Value) -> Vec<AgentEvent> {
+    normalize_codex_notification_at(notification, &current_agent_event_timestamp())
+}
+
+fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(method) = notification.get("method").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let params = notification.get("params").unwrap_or(&Value::Null);
+
+    match method {
+        "thread/started" => extract_string(params, "/thread/id")
+            .map(|thread_id| {
+                vec![AgentEvent::ThreadStarted {
+                    thread_id,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "turn/started" => vec![AgentEvent::TurnStarted {
+            turn_id: extract_string(params, "/turn/id"),
+            created_at: created_at.to_string(),
+        }],
+        "item/agentMessage/delta" => extract_string(params, "/delta")
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::AgentMessage {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "item/plan/delta" => extract_string(params, "/delta")
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::PlanUpdate {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "turn/plan/updated" => format_turn_plan_update(params)
+            .map(|text| {
+                vec![AgentEvent::PlanUpdate {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "item/started" | "item/completed" => normalize_codex_item(params.get("item"), created_at),
+        "item/fileChange/patchUpdated" => {
+            normalize_codex_file_changes(params.get("changes"), created_at)
+        }
+        "turn/completed" => normalize_codex_turn_completed(params, created_at),
+        "error" | "thread/realtime/error" => vec![AgentEvent::Error {
+            message: format_codex_error(params.get("error").unwrap_or(params)),
+            created_at: created_at.to_string(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_codex_item(item: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
+    let Some(item) = item else {
+        return Vec::new();
+    };
+
+    match item.get("type").and_then(Value::as_str) {
+        Some("agentMessage") => extract_string(item, "/text")
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::AgentMessage {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        Some("plan") => extract_string(item, "/text")
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::PlanUpdate {
+                    text,
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        Some("commandExecution") => {
+            let Some(command) = extract_string(item, "/command") else {
+                return Vec::new();
+            };
+            vec![AgentEvent::Command {
+                command,
+                status: extract_string(item, "/status").unwrap_or_else(|| "unknown".to_string()),
+                created_at: created_at.to_string(),
+            }]
+        }
+        Some("fileChange") => normalize_codex_file_changes(item.get("changes"), created_at),
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_codex_file_changes(changes: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
+    changes
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .filter_map(|change| {
+                    extract_string(change, "/path").map(|path| AgentEvent::FileChange {
+                        path,
+                        change_type: extract_string(change, "/kind/type"),
+                        created_at: created_at.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn normalize_codex_turn_completed(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let mut events = vec![AgentEvent::TurnCompleted {
+        final_message: extract_final_agent_message(params),
+        created_at: created_at.to_string(),
+    }];
+
+    if let Some(error) = params
+        .pointer("/turn/error")
+        .filter(|error| !error.is_null())
+    {
+        events.push(AgentEvent::Error {
+            message: format_codex_error(error),
+            created_at: created_at.to_string(),
+        });
+    }
+
+    events
+}
+
+fn extract_final_agent_message(params: &Value) -> Option<String> {
+    params
+        .pointer("/turn/items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().rev().find_map(|item| {
+                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+                    extract_string(item, "/text").filter(|text| !text.is_empty())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+fn format_turn_plan_update(params: &Value) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(explanation) =
+        extract_string(params, "/explanation").filter(|text| !text.is_empty())
+    {
+        lines.push(explanation);
+    }
+
+    if let Some(plan) = params.get("plan").and_then(Value::as_array) {
+        lines.extend(plan.iter().filter_map(|step| {
+            let step_text = extract_string(step, "/step")?;
+            let status = extract_string(step, "/status").unwrap_or_else(|| "pending".to_string());
+            Some(format!("[{status}] {step_text}"))
+        }));
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn format_codex_error(error: &Value) -> String {
+    extract_string(error, "/message")
+        .or_else(|| extract_string(error, "/error/message"))
+        .or_else(|| extract_string(error, "/message/text"))
+        .unwrap_or_else(|| error.to_string())
+}
+
+fn extract_string(value: &Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn current_agent_event_timestamp() -> String {
+    Utc::now().to_rfc3339()
 }
 
 #[allow(dead_code)]
@@ -959,5 +1201,272 @@ mod tests {
             validate_json_rpc_response(response).unwrap_err(),
             "Codex app-server 响应缺少 result。"
         );
+    }
+
+    #[test]
+    fn normalizes_thread_and_turn_started_notifications() {
+        let thread_events = normalize_codex_notification_at(
+            &json!({
+                "method": "thread/started",
+                "params": {
+                    "thread": {
+                        "id": "thread-1"
+                    }
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let turn_events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1"
+                    }
+                }
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+
+        assert_eq!(
+            thread_events,
+            vec![AgentEvent::ThreadStarted {
+                thread_id: "thread-1".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            turn_events,
+            vec![AgentEvent::TurnStarted {
+                turn_id: Some("turn-1".to_string()),
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_agent_message_and_plan_deltas() {
+        let message_events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "delta": "正在修改首页",
+                    "itemId": "item-1",
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let plan_events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/plan/delta",
+                "params": {
+                    "delta": "实现主要布局",
+                    "itemId": "item-2",
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+
+        assert_eq!(
+            message_events,
+            vec![AgentEvent::AgentMessage {
+                text: "正在修改首页".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            plan_events,
+            vec![AgentEvent::PlanUpdate {
+                text: "实现主要布局".to_string(),
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_turn_plan_updated_notification() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/plan/updated",
+                "params": {
+                    "explanation": "计划已更新",
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "plan": [
+                        { "step": "读取项目结构", "status": "completed" },
+                        { "step": "实现 demo", "status": "inProgress" }
+                    ]
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::PlanUpdate {
+                text: "计划已更新\n[completed] 读取项目结构\n[inProgress] 实现 demo".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_command_execution_items() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "id": "item-1",
+                        "type": "commandExecution",
+                        "command": "npm run check",
+                        "commandActions": [],
+                        "cwd": "/tmp/demo",
+                        "status": "completed"
+                    },
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::Command {
+                command: "npm run check".to_string(),
+                status: "completed".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_file_change_notifications() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/fileChange/patchUpdated",
+                "params": {
+                    "changes": [
+                        {
+                            "path": "/tmp/demo/src/App.tsx",
+                            "kind": { "type": "update" },
+                            "diff": "@@"
+                        },
+                        {
+                            "path": "/tmp/demo/src/styles.css",
+                            "kind": { "type": "add" },
+                            "diff": "@@"
+                        }
+                    ],
+                    "itemId": "item-1",
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::FileChange {
+                    path: "/tmp/demo/src/App.tsx".to_string(),
+                    change_type: Some("update".to_string()),
+                    created_at: "2026-06-24T00:00:00Z".to_string(),
+                },
+                AgentEvent::FileChange {
+                    path: "/tmp/demo/src/styles.css".to_string(),
+                    change_type: Some("add".to_string()),
+                    created_at: "2026-06-24T00:00:00Z".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_turn_completed_with_final_message_and_error() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "failed",
+                        "items": [
+                            {
+                                "id": "item-1",
+                                "type": "agentMessage",
+                                "text": "已完成第一版。"
+                            }
+                        ],
+                        "error": {
+                            "message": "Network blocked"
+                        }
+                    }
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::TurnCompleted {
+                    final_message: Some("已完成第一版。".to_string()),
+                    created_at: "2026-06-24T00:00:00Z".to_string(),
+                },
+                AgentEvent::Error {
+                    message: "Network blocked".to_string(),
+                    created_at: "2026-06-24T00:00:00Z".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn serializes_agent_event_for_frontend_contract() {
+        let value = serde_json::to_value(AgentEvent::FileChange {
+            path: "/tmp/demo/src/App.tsx".to_string(),
+            change_type: Some("update".to_string()),
+            created_at: "2026-06-24T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "type": "file_change",
+                "path": "/tmp/demo/src/App.tsx",
+                "changeType": "update",
+                "createdAt": "2026-06-24T00:00:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_or_incomplete_notifications() {
+        assert!(normalize_codex_notification_at(
+            &json!({
+                "method": "unknown",
+                "params": {}
+            }),
+            "2026-06-24T00:00:00Z",
+        )
+        .is_empty());
+        assert!(normalize_codex_notification_at(
+            &json!({
+                "method": "thread/started",
+                "params": {}
+            }),
+            "2026-06-24T00:00:00Z",
+        )
+        .is_empty());
     }
 }
