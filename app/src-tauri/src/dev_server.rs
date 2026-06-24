@@ -467,6 +467,7 @@ fn spawn_dev_server_output_reader<R>(
 
             match line {
                 Ok(text) => {
+                    let preview_url = extract_dev_server_preview_url(&text);
                     let _ = emit_dev_server_lifecycle_event(
                         &app,
                         DevServerLifecycleEventEnvelope {
@@ -476,6 +477,20 @@ fn spawn_dev_server_output_reader<R>(
                             occurred_at: current_dev_server_timestamp(),
                         },
                     );
+
+                    if let Some(url) = preview_url {
+                        if mark_active_session_ready(&state, &session_id, url.clone()).is_some() {
+                            let _ = emit_dev_server_lifecycle_event(
+                                &app,
+                                DevServerLifecycleEventEnvelope {
+                                    session_id: session_id.clone(),
+                                    project_path: project_path.clone(),
+                                    event: DevServerLifecycleEvent::Ready { url },
+                                    occurred_at: current_dev_server_timestamp(),
+                                },
+                            );
+                        }
+                    }
                 }
                 Err(error) => {
                     let message = format!("读取 dev server 输出失败：{error}");
@@ -634,6 +649,40 @@ fn fail_active_session(
     inner.snapshot.clone()
 }
 
+fn mark_active_session_ready(
+    state: &Arc<Mutex<DevServerStateInner>>,
+    session_id: &str,
+    preview_url: String,
+) -> Option<DevServerSessionSnapshot> {
+    let mut inner = state.lock().ok()?;
+    if !inner
+        .process
+        .as_ref()
+        .is_some_and(|process| process.session_id == session_id)
+    {
+        return None;
+    }
+
+    if let Some(snapshot) = inner
+        .snapshot
+        .as_mut()
+        .filter(|snapshot| snapshot.id == session_id)
+    {
+        if snapshot.preview_url.as_deref() == Some(preview_url.as_str())
+            && snapshot.status == DevServerSessionStatus::Ready
+        {
+            return None;
+        }
+
+        snapshot.status = DevServerSessionStatus::Ready;
+        snapshot.preview_url = Some(preview_url);
+        snapshot.updated_at = current_dev_server_timestamp();
+        return Some(snapshot.clone());
+    }
+
+    None
+}
+
 fn mark_snapshot_stopped(snapshot: &mut Option<DevServerSessionSnapshot>, session_id: &str) {
     if let Some(snapshot) = snapshot
         .as_mut()
@@ -658,6 +707,8 @@ fn kill_dev_server_process(process: &ActiveDevServerProcess) {
 fn terminate_dev_server_process_group(process_id: u32) -> bool {
     Command::new("kill")
         .args(["-TERM", &format!("-{process_id}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -666,6 +717,96 @@ fn terminate_dev_server_process_group(process_id: u32) -> bool {
 #[cfg(not(unix))]
 fn terminate_dev_server_process_group(_process_id: u32) -> bool {
     false
+}
+
+fn extract_dev_server_preview_url(line: &str) -> Option<String> {
+    let clean_line = strip_ansi_escape_sequences(line);
+    let mut search_offset = 0;
+
+    while search_offset < clean_line.len() {
+        let next_http = clean_line[search_offset..].find("http://");
+        let next_https = clean_line[search_offset..].find("https://");
+        let next_url_offset = match (next_http, next_https) {
+            (Some(http), Some(https)) => http.min(https),
+            (Some(http), None) => http,
+            (None, Some(https)) => https,
+            (None, None) => return None,
+        };
+        let url_start = search_offset + next_url_offset;
+        let candidate = trim_dev_server_url_candidate(&clean_line[url_start..]);
+
+        if is_local_dev_server_url(candidate) {
+            return Some(normalize_local_dev_server_url(candidate));
+        }
+
+        search_offset = url_start + candidate.len().max(1);
+    }
+
+    None
+}
+
+fn strip_ansi_escape_sequences(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(char) = chars.next() {
+        if char == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for sequence_char in chars.by_ref() {
+                if sequence_char.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        output.push(char);
+    }
+
+    output
+}
+
+fn trim_dev_server_url_candidate(value: &str) -> &str {
+    let end = value
+        .char_indices()
+        .find_map(|(index, char)| {
+            if char.is_whitespace() || matches!(char, '"' | '\'' | '<' | '>') {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(value.len());
+
+    value[..end].trim_end_matches(|char| matches!(char, '.' | ',' | ')' | ']' | ';'))
+}
+
+fn is_local_dev_server_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+
+    let host_port_end = rest
+        .char_indices()
+        .find_map(|(index, char)| matches!(char, '/' | '?' | '#').then_some(index))
+        .unwrap_or(rest.len());
+    let host_port = &rest[..host_port_end];
+    let host = host_port
+        .trim_start_matches('[')
+        .split_once(']')
+        .map(|(host, _)| host)
+        .or_else(|| host_port.split_once(':').map(|(host, _)| host))
+        .unwrap_or(host_port)
+        .to_ascii_lowercase();
+
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+}
+
+fn normalize_local_dev_server_url(url: &str) -> String {
+    url.replace("://0.0.0.0", "://localhost")
 }
 
 fn build_dev_server_diagnostic(
@@ -865,5 +1006,112 @@ mod tests {
         let state = DevServerState::default();
 
         assert!(state.stop_active_session(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn extracts_vite_local_preview_url() {
+        assert_eq!(
+            extract_dev_server_preview_url("  ➜  Local:   http://localhost:5173/"),
+            Some("http://localhost:5173/".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_next_local_preview_url() {
+        assert_eq!(
+            extract_dev_server_preview_url("   - Local:        http://localhost:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_preview_url_from_ansi_colored_output() {
+        assert_eq!(
+            extract_dev_server_preview_url("\u{1b}[32mLocal:\u{1b}[39m http://localhost:4321/"),
+            Some("http://localhost:4321/".to_string())
+        );
+    }
+
+    #[test]
+    fn normalizes_unspecified_host_preview_url_to_localhost() {
+        assert_eq!(
+            extract_dev_server_preview_url("ready on http://0.0.0.0:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_non_local_preview_urls() {
+        assert_eq!(
+            extract_dev_server_preview_url("Network: http://192.168.1.10:5173/"),
+            None
+        );
+        assert_eq!(
+            extract_dev_server_preview_url("Docs: https://example.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn trims_common_url_trailing_punctuation() {
+        assert_eq!(
+            extract_dev_server_preview_url("Local: (http://127.0.0.1:5173)."),
+            Some("http://127.0.0.1:5173".to_string())
+        );
+    }
+
+    #[test]
+    fn marks_active_session_ready_once_per_url() {
+        let state = Arc::new(Mutex::new(DevServerStateInner {
+            snapshot: Some(create_dev_server_session_snapshot(
+                "dev_server_1".to_string(),
+                "/tmp/demo".to_string(),
+                default_dev_server_command(),
+                "2026-06-24T12:00:00Z".to_string(),
+            )),
+            process: Some(ActiveDevServerProcess {
+                session_id: "dev_server_1".to_string(),
+                child: Arc::new(Mutex::new(spawn_test_process())),
+            }),
+        }));
+
+        let ready_snapshot =
+            mark_active_session_ready(&state, "dev_server_1", "http://localhost:5173".to_string())
+                .unwrap();
+        assert_eq!(ready_snapshot.status, DevServerSessionStatus::Ready);
+        assert_eq!(
+            ready_snapshot.preview_url.as_deref(),
+            Some("http://localhost:5173")
+        );
+        assert!(mark_active_session_ready(
+            &state,
+            "dev_server_1",
+            "http://localhost:5173".to_string()
+        )
+        .is_none());
+
+        let _ = stop_active_session(&state, None);
+    }
+
+    #[cfg(unix)]
+    fn spawn_test_process() -> Child {
+        Command::new("sh")
+            .args(["-c", "sleep 1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(not(unix))]
+    fn spawn_test_process() -> Child {
+        Command::new("cmd")
+            .args(["/C", "timeout", "/T", "1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
     }
 }
