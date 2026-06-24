@@ -199,6 +199,7 @@ pub fn run() {
             voice::send_voice_audio_chunk,
             voice::get_voice_provider_status,
             coding_agent::get_coding_agent_provider_status,
+            coding_agent::start_initial_demo_run,
             llm::get_llm_provider_status,
             llm::test_llm_provider_connection,
             llm::summarize_requirement_state,

@@ -304,7 +304,7 @@ cancel_active_agent_run()
 - [x] Step 7：实现 app-server JSON-RPC 客户端：请求 id 管理、响应匹配、通知分发、子进程退出处理。
 - [x] Step 8：实现 `thread/start` 和 `turn/start`，支持传入 `cwd`、sandbox、prompt。
 - [x] Step 9：实现 app-server 事件归一化，把 Codex 通知转换成前端 `AgentEvent`。
-- [ ] Step 10：新增 Tauri 事件：`agent://run-started`、`agent://event`、`agent://run-completed`、`agent://error`。
+- [x] Step 10：新增 Tauri 事件：`agent://run-started`、`agent://event`、`agent://run-completed`、`agent://error`。
 - [ ] Step 11：前端订阅 Agent 事件，并在对话区展示运行进度。
 - [ ] Step 12：Agent 运行完成后触发 `voicecoder:project-files-changed`，刷新文件树。
 - [ ] Step 13：新增 `codex_exec_json` 后备 provider，用于诊断和 app-server 不可用时的一次性运行。

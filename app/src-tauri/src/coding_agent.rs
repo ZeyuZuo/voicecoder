@@ -6,11 +6,17 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    thread,
 };
+use tauri::{AppHandle, Emitter};
 
 const DEFAULT_CODEX_BIN: &str = "codex";
 const FIRST_APP_SERVER_REQUEST_ID: u64 = 0;
 const DEFAULT_CODEX_SANDBOX: CodingAgentSandboxMode = CodingAgentSandboxMode::WorkspaceWrite;
+const AGENT_RUN_STARTED_EVENT: &str = "agent://run-started";
+const AGENT_EVENT_EVENT: &str = "agent://event";
+const AGENT_RUN_COMPLETED_EVENT: &str = "agent://run-completed";
+const AGENT_ERROR_EVENT: &str = "agent://error";
 
 #[allow(dead_code)]
 pub(crate) trait CodingAgentSession {
@@ -152,6 +158,58 @@ pub enum AgentEvent {
     },
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartInitialDemoRunRequest {
+    demo_session_id: String,
+    run_id: String,
+    project_path: String,
+    prompt: String,
+    #[serde(default)]
+    sandbox: Option<CodingAgentSandboxMode>,
+    #[serde(default)]
+    provider: Option<CodingAgentProviderKind>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunStartedEvent {
+    demo_session_id: String,
+    run_id: String,
+    project_path: String,
+    provider: CodingAgentProviderKind,
+    codex_thread_id: String,
+    codex_turn_id: String,
+    started_at: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEventEnvelope {
+    demo_session_id: String,
+    run_id: String,
+    event: AgentEvent,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunCompletedEvent {
+    demo_session_id: String,
+    run_id: String,
+    final_message: Option<String>,
+    changed_files: Vec<String>,
+    completed_at: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentErrorEvent {
+    demo_session_id: Option<String>,
+    run_id: Option<String>,
+    message: String,
+    occurred_at: String,
+}
+
 pub(crate) struct CodingAgentProviderRegistry;
 
 impl CodingAgentProviderRegistry {
@@ -272,6 +330,127 @@ pub fn get_coding_agent_provider_status() -> CodingAgentProviderStatus {
     }
 }
 
+#[tauri::command]
+pub fn start_initial_demo_run(
+    app: AppHandle,
+    request: StartInitialDemoRunRequest,
+) -> Result<(), String> {
+    validate_start_initial_demo_run_request(&request)?;
+
+    thread::spawn(move || {
+        let demo_session_id = request.demo_session_id.clone();
+        let run_id = request.run_id.clone();
+        if let Err(error) = run_initial_demo_agent(app.clone(), request) {
+            emit_agent_error(&app, Some(demo_session_id), Some(run_id), error);
+        }
+    });
+
+    Ok(())
+}
+
+fn validate_start_initial_demo_run_request(
+    request: &StartInitialDemoRunRequest,
+) -> Result<(), String> {
+    if request.demo_session_id.trim().is_empty() {
+        return Err("启动 demo 生成失败：DemoSession id 不能为空。".to_string());
+    }
+    if request.run_id.trim().is_empty() {
+        return Err("启动 demo 生成失败：AgentRun id 不能为空。".to_string());
+    }
+    validate_coding_agent_start_context(&CodingAgentStartContext {
+        project_path: request.project_path.clone(),
+        prompt: request.prompt.clone(),
+        sandbox: request.sandbox,
+    })
+}
+
+fn run_initial_demo_agent(
+    app: AppHandle,
+    request: StartInitialDemoRunRequest,
+) -> Result<(), String> {
+    let provider = CodingAgentProviderRegistry::resolve_provider(
+        request.provider.unwrap_or(CodingAgentProviderKind::Auto),
+    );
+    if provider != CodingAgentProviderKind::CodexAppServer {
+        return Err("当前后台事件流只支持 codex_app_server provider。".to_string());
+    }
+    CodexAppServerProvider.validate_start()?;
+
+    let context = CodingAgentStartContext {
+        project_path: request.project_path.clone(),
+        prompt: request.prompt.clone(),
+        sandbox: request.sandbox,
+    };
+    let mut session = start_codex_app_server_session(context)?;
+
+    emit_agent_run_started(
+        &app,
+        AgentRunStartedEvent {
+            demo_session_id: request.demo_session_id.clone(),
+            run_id: request.run_id.clone(),
+            project_path: request.project_path.clone(),
+            provider,
+            codex_thread_id: session.codex_thread_id.clone(),
+            codex_turn_id: session.initial_turn_id.clone(),
+            started_at: current_agent_event_timestamp(),
+        },
+    )?;
+
+    let mut summary = AgentRunEventSummary::default();
+    let pending_events = session.take_pending_agent_events();
+    if emit_agent_events(
+        &app,
+        &request.demo_session_id,
+        &request.run_id,
+        pending_events,
+        &mut summary,
+    )? {
+        return finish_agent_run(app, request, session, summary);
+    }
+
+    loop {
+        let events = session.read_next_agent_events()?;
+        if emit_agent_events(
+            &app,
+            &request.demo_session_id,
+            &request.run_id,
+            events,
+            &mut summary,
+        )? {
+            return finish_agent_run(app, request, session, summary);
+        }
+    }
+}
+
+fn finish_agent_run(
+    app: AppHandle,
+    request: StartInitialDemoRunRequest,
+    mut session: CodexAppServerSession,
+    summary: AgentRunEventSummary,
+) -> Result<(), String> {
+    let _ = session.cancel();
+    if let Some(message) = summary.error_message {
+        emit_agent_error(
+            &app,
+            Some(request.demo_session_id),
+            Some(request.run_id),
+            message,
+        );
+        return Ok(());
+    }
+
+    emit_agent_run_completed(
+        &app,
+        AgentRunCompletedEvent {
+            demo_session_id: request.demo_session_id,
+            run_id: request.run_id,
+            final_message: summary.final_message,
+            changed_files: summary.changed_files,
+            completed_at: current_agent_event_timestamp(),
+        },
+    )
+}
+
 fn codex_diagnostic<const N: usize>(
     provider: CodingAgentProviderKind,
     details: [(&str, &str); N],
@@ -355,6 +534,114 @@ impl CodingAgentSession for CodexAppServerSession {
         let _ = self.child.wait();
         Ok(())
     }
+}
+
+impl CodexAppServerSession {
+    fn take_pending_agent_events(&mut self) -> Vec<AgentEvent> {
+        self.client
+            .take_pending_notifications()
+            .iter()
+            .flat_map(normalize_codex_notification)
+            .collect()
+    }
+
+    fn read_next_agent_events(&mut self) -> Result<Vec<AgentEvent>, String> {
+        loop {
+            let message = self.client.read_message(&mut self.child)?;
+            let events = normalize_codex_notification(&message);
+            if !events.is_empty() {
+                return Ok(events);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct AgentRunEventSummary {
+    final_message: Option<String>,
+    changed_files: Vec<String>,
+    error_message: Option<String>,
+    terminal: bool,
+}
+
+fn emit_agent_events(
+    app: &AppHandle,
+    demo_session_id: &str,
+    run_id: &str,
+    events: Vec<AgentEvent>,
+    summary: &mut AgentRunEventSummary,
+) -> Result<bool, String> {
+    for event in events {
+        update_agent_run_summary(summary, &event);
+        emit_agent_event(
+            app,
+            AgentEventEnvelope {
+                demo_session_id: demo_session_id.to_string(),
+                run_id: run_id.to_string(),
+                event,
+            },
+        )?;
+    }
+
+    Ok(summary.terminal)
+}
+
+fn update_agent_run_summary(summary: &mut AgentRunEventSummary, event: &AgentEvent) {
+    match event {
+        AgentEvent::FileChange { path, .. } => append_unique(&mut summary.changed_files, path),
+        AgentEvent::TurnCompleted { final_message, .. } => {
+            if final_message.is_some() {
+                summary.final_message = final_message.clone();
+            }
+            summary.terminal = true;
+        }
+        AgentEvent::Error { message, .. } => {
+            summary.error_message = Some(message.clone());
+            summary.terminal = true;
+        }
+        _ => {}
+    }
+}
+
+fn append_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|candidate| candidate == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn emit_agent_run_started(app: &AppHandle, payload: AgentRunStartedEvent) -> Result<(), String> {
+    app.emit(AGENT_RUN_STARTED_EVENT, payload)
+        .map_err(|error| format!("Failed to emit agent run started event: {error}"))
+}
+
+fn emit_agent_event(app: &AppHandle, payload: AgentEventEnvelope) -> Result<(), String> {
+    app.emit(AGENT_EVENT_EVENT, payload)
+        .map_err(|error| format!("Failed to emit agent event: {error}"))
+}
+
+fn emit_agent_run_completed(
+    app: &AppHandle,
+    payload: AgentRunCompletedEvent,
+) -> Result<(), String> {
+    app.emit(AGENT_RUN_COMPLETED_EVENT, payload)
+        .map_err(|error| format!("Failed to emit agent run completed event: {error}"))
+}
+
+fn emit_agent_error(
+    app: &AppHandle,
+    demo_session_id: Option<String>,
+    run_id: Option<String>,
+    message: String,
+) {
+    let _ = app.emit(
+        AGENT_ERROR_EVENT,
+        AgentErrorEvent {
+            demo_session_id,
+            run_id,
+            message,
+            occurred_at: current_agent_event_timestamp(),
+        },
+    );
 }
 
 fn start_codex_app_server_session(
@@ -1448,6 +1735,96 @@ mod tests {
                 "createdAt": "2026-06-24T00:00:00Z"
             })
         );
+    }
+
+    #[test]
+    fn serializes_agent_event_envelope_for_tauri_event_contract() {
+        let value = serde_json::to_value(AgentEventEnvelope {
+            demo_session_id: "demo-1".to_string(),
+            run_id: "run-1".to_string(),
+            event: AgentEvent::AgentMessage {
+                text: "正在生成 demo".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "demoSessionId": "demo-1",
+                "runId": "run-1",
+                "event": {
+                    "type": "agent_message",
+                    "text": "正在生成 demo",
+                    "createdAt": "2026-06-24T00:00:00Z"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn serializes_agent_run_completed_event_for_tauri_event_contract() {
+        let value = serde_json::to_value(AgentRunCompletedEvent {
+            demo_session_id: "demo-1".to_string(),
+            run_id: "run-1".to_string(),
+            final_message: Some("完成".to_string()),
+            changed_files: vec!["/tmp/demo/src/App.tsx".to_string()],
+            completed_at: "2026-06-24T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "demoSessionId": "demo-1",
+                "runId": "run-1",
+                "finalMessage": "完成",
+                "changedFiles": ["/tmp/demo/src/App.tsx"],
+                "completedAt": "2026-06-24T00:00:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn run_summary_collects_changed_files_final_message_and_errors() {
+        let mut summary = AgentRunEventSummary::default();
+        update_agent_run_summary(
+            &mut summary,
+            &AgentEvent::FileChange {
+                path: "/tmp/demo/src/App.tsx".to_string(),
+                change_type: Some("update".to_string()),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            },
+        );
+        update_agent_run_summary(
+            &mut summary,
+            &AgentEvent::FileChange {
+                path: "/tmp/demo/src/App.tsx".to_string(),
+                change_type: Some("update".to_string()),
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            },
+        );
+        update_agent_run_summary(
+            &mut summary,
+            &AgentEvent::TurnCompleted {
+                final_message: Some("完成".to_string()),
+                created_at: "2026-06-24T00:00:02Z".to_string(),
+            },
+        );
+
+        assert_eq!(summary.changed_files, vec!["/tmp/demo/src/App.tsx"]);
+        assert_eq!(summary.final_message, Some("完成".to_string()));
+        assert!(summary.terminal);
+
+        update_agent_run_summary(
+            &mut summary,
+            &AgentEvent::Error {
+                message: "失败".to_string(),
+                created_at: "2026-06-24T00:00:03Z".to_string(),
+            },
+        );
+        assert_eq!(summary.error_message, Some("失败".to_string()));
     }
 
     #[test]
