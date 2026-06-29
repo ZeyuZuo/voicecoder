@@ -768,7 +768,7 @@ function clearDevServerStartTimeout(timeoutRef: { current: ReturnType<typeof set
   timeoutRef.current = undefined;
 }
 
-function formatDevServerPreviewError(envelope: DevServerLifecycleEventEnvelope) {
+export function formatDevServerPreviewError(envelope: DevServerLifecycleEventEnvelope) {
   const { event } = envelope;
 
   if (event.type === "error") {
@@ -790,7 +790,7 @@ function formatExitCode(exitCode: number | undefined) {
   return typeof exitCode === "number" ? `，退出码 ${exitCode}` : "";
 }
 
-function detectDevServerOutputIssue(text: string) {
+export function detectDevServerOutputIssue(text: string) {
   const normalizedText = text.toLowerCase();
   if (
     normalizedText.includes("eaddrinuse") ||

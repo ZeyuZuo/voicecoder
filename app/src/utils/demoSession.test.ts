@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { DemoSession, RequirementUtterance } from "../types/app";
-import { createDemoSession, demoSessionReducer, demoSessionStoreReducer } from "./demoSession";
+import type { DemoSession, DevServerLifecycleEventEnvelope, RequirementUtterance } from "../types/app";
+import {
+  createDemoSession,
+  demoSessionReducer,
+  demoSessionStoreReducer,
+  detectDevServerOutputIssue,
+  formatDevServerPreviewError
+} from "./demoSession";
 
 test("creates a demo session that is ready to start", () => {
   const session = createTestSession();
@@ -107,6 +113,49 @@ test("agent events update thread metadata and changed files", () => {
   assert.deepEqual(withFile.runs[0].changedFiles, ["/tmp/demo/src/App.tsx"]);
 });
 
+test("agent events update turn metadata and de-duplicate changed files", () => {
+  const running = demoSessionReducer(createTestSession(), {
+    type: "start_agent_run",
+    kind: "initial_build",
+    prompt: "生成 demo",
+    now: "2"
+  });
+  const run = running.runs[0];
+  const withTurn = demoSessionReducer(running, {
+    type: "append_agent_event",
+    runId: run.id,
+    event: {
+      type: "turn_started",
+      turnId: "turn-1",
+      createdAt: "3"
+    },
+    now: "3"
+  });
+  const withFile = demoSessionReducer(withTurn, {
+    type: "append_agent_event",
+    runId: run.id,
+    event: {
+      type: "file_change",
+      path: "/tmp/demo/src/App.tsx",
+      createdAt: "4"
+    },
+    now: "4"
+  });
+  const withDuplicateFile = demoSessionReducer(withFile, {
+    type: "append_agent_event",
+    runId: run.id,
+    event: {
+      type: "file_change",
+      path: "/tmp/demo/src/App.tsx",
+      createdAt: "5"
+    },
+    now: "5"
+  });
+
+  assert.equal(withTurn.runs[0].codexTurnId, "turn-1");
+  assert.deepEqual(withDuplicateFile.runs[0].changedFiles, ["/tmp/demo/src/App.tsx"]);
+});
+
 test("ready dev server event can attach the preview URL after initial build", () => {
   const previewReady = completeInitialBuild(createTestSession());
   const withPreview = demoSessionReducer(previewReady, {
@@ -118,6 +167,34 @@ test("ready dev server event can attach the preview URL after initial build", ()
   assert.equal(withPreview.status, "preview_ready");
   assert.equal(withPreview.currentPreviewUrl, "http://localhost:5173");
   assert.equal(withPreview.updatedAt, "4");
+});
+
+test("preview URL updates are ignored before the initial build has completed", () => {
+  const session = createTestSession();
+  const withPreview = demoSessionReducer(session, {
+    type: "set_preview_url",
+    currentPreviewUrl: "http://localhost:5173",
+    now: "2"
+  });
+
+  assert.equal(withPreview.status, "ready_to_start");
+  assert.equal(withPreview.currentPreviewUrl, undefined);
+});
+
+test("preview URL can update while collecting feedback", () => {
+  const previewReady = completeInitialBuild(createTestSession());
+  const listening = demoSessionReducer(previewReady, {
+    type: "start_feedback_listening",
+    now: "4"
+  });
+  const withPreview = demoSessionReducer(listening, {
+    type: "set_preview_url",
+    currentPreviewUrl: "http://localhost:5173",
+    now: "5"
+  });
+
+  assert.equal(withPreview.status, "preview_ready");
+  assert.equal(withPreview.currentPreviewUrl, "http://localhost:5173");
 });
 
 test("preview failure moves the session to error until a preview URL exists", () => {
@@ -142,6 +219,36 @@ test("preview failure moves the session to error until a preview URL exists", ()
   assert.equal(failed.error, "dev server 启动失败：端口已被占用。");
   assert.equal(ignoredFailure.status, "preview_ready");
   assert.equal(ignoredFailure.currentPreviewUrl, "http://localhost:5173");
+});
+
+test("dev server output issue detection recognizes occupied ports", () => {
+  assert.equal(
+    detectDevServerOutputIssue("Error: listen EADDRINUSE: address already in use :::5173"),
+    "dev server 启动失败：端口已被占用。"
+  );
+  assert.equal(detectDevServerOutputIssue("Local: http://localhost:5173/"), undefined);
+});
+
+test("dev server preview errors are normalized for UI display", () => {
+  assert.equal(
+    formatDevServerPreviewError(devServerEnvelope({
+      type: "error",
+      message: "npm not found"
+    })),
+    "dev server 出错：npm not found"
+  );
+  assert.equal(
+    formatDevServerPreviewError(devServerEnvelope({
+      type: "stopped",
+      reason: "exited",
+      exitCode: 1
+    })),
+    "dev server 在预览 URL 就绪前退出，退出码 1。"
+  );
+  assert.equal(formatDevServerPreviewError(devServerEnvelope({
+    type: "ready",
+    url: "http://localhost:5173"
+  })), undefined);
 });
 
 test("feedback result can start a follow-up change run", () => {
@@ -225,5 +332,14 @@ function utterance(text: string): RequirementUtterance {
     source: "voice",
     text,
     createdAt: "1"
+  };
+}
+
+function devServerEnvelope(event: DevServerLifecycleEventEnvelope["event"]): DevServerLifecycleEventEnvelope {
+  return {
+    sessionId: "dev_server_1",
+    projectPath: "/tmp/demo",
+    event,
+    occurredAt: "1"
   };
 }
