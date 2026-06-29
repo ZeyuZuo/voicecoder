@@ -885,6 +885,10 @@ mod tests {
         assert_eq!(diagnostic.executable.as_deref(), Some("npm"));
         assert_eq!(diagnostic.version.as_deref(), Some("10.0.0"));
         assert!(diagnostic.missing_dependencies.is_empty());
+        assert_eq!(
+            diagnostic.details.get("defaultCommand").map(String::as_str),
+            Some("npm run dev")
+        );
     }
 
     #[test]
@@ -1057,6 +1061,22 @@ mod tests {
         assert_eq!(
             extract_dev_server_preview_url("Local: (http://127.0.0.1:5173)."),
             Some("http://127.0.0.1:5173".to_string())
+        );
+    }
+
+    #[test]
+    fn keeps_local_preview_url_query_and_hash() {
+        assert_eq!(
+            extract_dev_server_preview_url("Local: http://localhost:5173/?mode=demo#top"),
+            Some("http://localhost:5173/?mode=demo#top".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_ipv6_local_preview_url() {
+        assert_eq!(
+            extract_dev_server_preview_url("Local: http://[::1]:5173/"),
+            Some("http://[::1]:5173/".to_string())
         );
     }
 

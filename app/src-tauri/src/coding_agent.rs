@@ -1571,6 +1571,44 @@ mod tests {
     }
 
     #[test]
+    fn provider_diagnostics_include_stable_metadata() {
+        let app_server_diagnostic = CodexAppServerProvider.diagnostic();
+        let exec_json_diagnostic = CodexExecJsonProvider.diagnostic();
+
+        assert_eq!(
+            app_server_diagnostic.provider,
+            CodingAgentProviderKind::CodexAppServer
+        );
+        assert_eq!(
+            app_server_diagnostic
+                .details
+                .get("transport")
+                .map(String::as_str),
+            Some("stdio")
+        );
+        assert_eq!(
+            app_server_diagnostic
+                .details
+                .get("command")
+                .map(String::as_str),
+            Some("codex app-server --stdio")
+        );
+        assert_eq!(
+            exec_json_diagnostic.provider,
+            CodingAgentProviderKind::CodexExecJson
+        );
+        assert_eq!(
+            exec_json_diagnostic
+                .details
+                .get("transport")
+                .map(String::as_str),
+            Some("process-jsonl")
+        );
+        assert!(app_server_diagnostic.executable.is_some());
+        assert!(exec_json_diagnostic.executable.is_some());
+    }
+
+    #[test]
     fn builds_initialize_request_with_voicecoder_client_info() {
         let request = build_initialize_request();
 
@@ -1858,6 +1896,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_json_rpc_response_formats_error_objects_without_message() {
+        let response = json!({
+            "id": 3,
+            "error": {
+                "code": -32603,
+                "data": {
+                    "reason": "internal"
+                }
+            }
+        });
+
+        assert_eq!(
+            validate_json_rpc_response(response).unwrap_err(),
+            "Codex app-server request 失败：{\"code\":-32603,\"data\":{\"reason\":\"internal\"}}"
+        );
+    }
+
+    #[test]
     fn validate_json_rpc_response_rejects_message_without_result() {
         let response = json!({
             "method": "turn/started",
@@ -2010,6 +2066,32 @@ mod tests {
             vec![AgentEvent::Command {
                 command: "npm run check".to_string(),
                 status: "completed".to_string(),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_command_execution_items_without_status_as_unknown() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/started",
+                "params": {
+                    "item": {
+                        "id": "item-1",
+                        "type": "commandExecution",
+                        "command": "npm run dev"
+                    }
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::Command {
+                command: "npm run dev".to_string(),
+                status: "unknown".to_string(),
                 created_at: "2026-06-24T00:00:00Z".to_string(),
             }]
         );
@@ -2204,6 +2286,31 @@ mod tests {
         );
         assert_eq!(
             file_events,
+            vec![AgentEvent::FileChange {
+                path: "src/App.tsx".to_string(),
+                change_type: Some("update".to_string()),
+                created_at: "2026-06-24T00:00:02Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_codex_exec_json_single_file_change_with_camel_case_change_type() {
+        let events = normalize_codex_exec_json_event_at(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item-3",
+                    "type": "file_change",
+                    "path": "src/App.tsx",
+                    "changeType": "update"
+                }
+            }),
+            "2026-06-24T00:00:02Z",
+        );
+
+        assert_eq!(
+            events,
             vec![AgentEvent::FileChange {
                 path: "src/App.tsx".to_string(),
                 change_type: Some("update".to_string()),
