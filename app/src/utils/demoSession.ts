@@ -118,6 +118,11 @@ type StartInitialDemoRunRequest = {
   provider?: CodingAgentProviderKind;
 };
 
+type SaveDemoSessionLogRequest = {
+  projectPath: string;
+  demoSession: DemoSession;
+};
+
 type AgentRunStartedPayload = {
   demoSessionId: string;
   runId: string;
@@ -444,6 +449,14 @@ export function useDemoSession(
     });
   }, [projectPath, requirementState]);
 
+  useEffect(() => {
+    if (!isTauri() || !session) {
+      return;
+    }
+
+    persistDemoSessionLog(session);
+  }, [session]);
+
   const startInitialRun = useCallback(() => {
     if (!session || session.status !== "ready_to_start") {
       return;
@@ -724,6 +737,17 @@ function startDemoDevServer(projectPath: string, demoSessionId: string, onError:
 
   void invoke("start_demo_dev_server", { request }).catch((error) => {
     onError(`启动 dev server 失败：${stringifyError(error)}`);
+  });
+}
+
+function persistDemoSessionLog(session: DemoSession) {
+  const request: SaveDemoSessionLogRequest = {
+    projectPath: session.projectPath,
+    demoSession: session
+  };
+
+  void invoke("save_demo_session_log", { request }).catch((error) => {
+    console.warn("Failed to save DemoSession log.", error);
   });
 }
 

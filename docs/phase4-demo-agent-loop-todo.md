@@ -335,7 +335,7 @@ cancel_active_agent_run()
 - [x] Step 20：Agent 初次生成完成后自动启动 dev server，并把 preview URL 写入 DemoSession。
 - [x] Step 21：前端订阅 dev server 事件，在右侧浏览器 tab 打开 preview URL。
 - [x] Step 22：处理 dev server 失败、端口占用、启动超时，并在对话区展示错误。
-- [ ] Step 23：保存 DemoSession / AgentRun / preview 基础日志到项目 `.voicecoder` 目录，避免刷新后完全丢失。
+- [x] Step 23：保存 DemoSession / AgentRun / preview 基础日志到项目 `.voicecoder` 目录，避免刷新后完全丢失。
 - [ ] Step 24：补充单元测试：Agent 事件归一化、DemoSession reducer、preview URL 状态、dev server URL 解析。
 - [ ] Step 25：补充 Rust 测试：JSON-RPC message parser、Codex event parser、provider diagnostics、dev server parser。
 - [ ] Step 26：用测试前端项目手动验收：生成第一版 demo、自动启动 dev server、右侧浏览器展示 demo、刷新文件树。
