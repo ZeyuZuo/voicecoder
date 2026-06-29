@@ -6,10 +6,12 @@ import type {
   AgentRun,
   AgentRunKind,
   CodingAgentProviderKind,
+  DevServerLifecycleEventEnvelope,
   DemoFeedbackTurn,
   DemoSession,
   RequirementState,
-  RequirementUtterance
+  RequirementUtterance,
+  StartDevServerRequest
 } from "../types/app";
 import { createId } from "./project";
 
@@ -51,6 +53,11 @@ export type DemoSessionAction =
       finalMessage?: string;
       changedFiles?: string[];
       currentPreviewUrl?: string;
+    }
+  | {
+      type: "set_preview_url";
+      currentPreviewUrl: string;
+      now: string;
     }
   | {
       type: "fail_agent_run";
@@ -275,6 +282,20 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
     };
   }
 
+  if (action.type === "set_preview_url") {
+    if (!canAttachPreviewUrl(session)) {
+      return session;
+    }
+
+    return {
+      ...session,
+      currentPreviewUrl: action.currentPreviewUrl,
+      status: "preview_ready",
+      error: undefined,
+      updatedAt: action.now
+    };
+  }
+
   if (action.type === "fail_agent_run") {
     const run = findRun(session, action.runId);
     if (!run || isTerminalRunStatus(run.status)) {
@@ -484,6 +505,22 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
           now: event.payload.completedAt
         });
         dispatchProjectFilesChanged(sessionProjectPath, event.payload.changedFiles);
+        startDemoDevServer(sessionProjectPath, sessionId);
+      }),
+      listen<DevServerLifecycleEventEnvelope>("dev-server://event", (event) => {
+        if (event.payload.projectPath !== sessionProjectPath) {
+          return;
+        }
+
+        if (event.payload.event.type !== "ready") {
+          return;
+        }
+
+        dispatch({
+          type: "set_preview_url",
+          currentPreviewUrl: event.payload.event.url,
+          now: event.payload.occurredAt
+        });
       }),
       listen<AgentErrorPayload>("agent://error", (event) => {
         if (event.payload.demoSessionId && event.payload.demoSessionId !== sessionId) {
@@ -536,6 +573,14 @@ function canStartAgentRun(session: DemoSession, kind: AgentRunKind) {
 
 function hasActiveRun(session: DemoSession) {
   return session.runs.some((run) => !isTerminalRunStatus(run.status));
+}
+
+function canAttachPreviewUrl(session: DemoSession) {
+  return (
+    session.status === "preview_ready" ||
+    session.status === "feedback_listening" ||
+    session.status === "feedback_processing"
+  );
 }
 
 function isTerminalRunStatus(status: AgentRun["status"]) {
@@ -598,6 +643,17 @@ function nowString() {
 
 function stringifyError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function startDemoDevServer(projectPath: string, demoSessionId: string) {
+  const request: StartDevServerRequest = {
+    projectPath,
+    sessionId: `dev_server_${demoSessionId}`
+  };
+
+  void invoke("start_demo_dev_server", { request }).catch((error) => {
+    console.warn("Failed to start demo dev server.", error);
+  });
 }
 
 function dispatchProjectFilesChanged(projectPath: string, changedFiles: string[]) {

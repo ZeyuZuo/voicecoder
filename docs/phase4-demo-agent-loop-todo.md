@@ -332,7 +332,7 @@ cancel_active_agent_run()
 - [x] Step 17：新增 Tauri `dev_server` 模块，定义 dev server session / diagnostic / lifecycle event。
 - [x] Step 18：实现 `npm run dev` 自动启动：管理子进程、cwd、stdout/stderr、停止旧进程。
 - [x] Step 19：解析 dev server 输出中的本地 URL，例如 `http://localhost:5173`。
-- [ ] Step 20：Agent 初次生成完成后自动启动 dev server，并把 preview URL 写入 DemoSession。
+- [x] Step 20：Agent 初次生成完成后自动启动 dev server，并把 preview URL 写入 DemoSession。
 - [ ] Step 21：前端订阅 dev server 事件，在右侧浏览器 tab 打开 preview URL。
 - [ ] Step 22：处理 dev server 失败、端口占用、启动超时，并在对话区展示错误。
 - [ ] Step 23：保存 DemoSession / AgentRun / preview 基础日志到项目 `.voicecoder` 目录，避免刷新后完全丢失。

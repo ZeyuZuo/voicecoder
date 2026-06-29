@@ -107,6 +107,19 @@ test("agent events update thread metadata and changed files", () => {
   assert.deepEqual(withFile.runs[0].changedFiles, ["/tmp/demo/src/App.tsx"]);
 });
 
+test("ready dev server event can attach the preview URL after initial build", () => {
+  const previewReady = completeInitialBuild(createTestSession());
+  const withPreview = demoSessionReducer(previewReady, {
+    type: "set_preview_url",
+    currentPreviewUrl: "http://localhost:5173",
+    now: "4"
+  });
+
+  assert.equal(withPreview.status, "preview_ready");
+  assert.equal(withPreview.currentPreviewUrl, "http://localhost:5173");
+  assert.equal(withPreview.updatedAt, "4");
+});
+
 test("feedback result can start a follow-up change run", () => {
   const previewReady = completeInitialBuild(createTestSession());
   const listening = demoSessionReducer(previewReady, {
