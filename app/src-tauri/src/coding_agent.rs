@@ -944,6 +944,10 @@ fn initialize_params() -> Value {
             "name": "voicecoder",
             "title": "VoiceCoder",
             "version": env!("CARGO_PKG_VERSION")
+        },
+        "capabilities": {
+            "experimentalApi": true,
+            "requestAttestation": false
         }
     })
 }
@@ -1625,6 +1629,18 @@ mod tests {
                 .pointer("/params/clientInfo/name")
                 .and_then(Value::as_str),
             Some("voicecoder")
+        );
+        assert_eq!(
+            request
+                .pointer("/params/capabilities/experimentalApi")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            request
+                .pointer("/params/capabilities/requestAttestation")
+                .and_then(Value::as_bool),
+            Some(false)
         );
     }
 
