@@ -10,7 +10,8 @@ import type {
 import {
   createVoiceRequirementSession,
   getVoiceInputPermission,
-  requirementSessionReducer
+  requirementSessionReducer,
+  shouldApplyLiveSummaryResult
 } from "./requirementState";
 
 test("final transcript does not create a requirement session before voice start", () => {
@@ -115,6 +116,48 @@ test("live understanding updates summary and open gaps without leaving listening
   assert.equal(next?.requirementState.summary, "用户想做网页端贪吃蛇游戏。");
   assert.equal(next?.requirementState.openGaps.length, 1);
   assert.equal(next?.requirementState.openGaps[0].status, "open");
+});
+
+test("live summary result ordering accepts newer coverage and rejects stale rewrites", () => {
+  assert.equal(
+    shouldApplyLiveSummaryResult(
+      {
+        requestId: 2,
+        utteranceCount: 2
+      },
+      {
+        requestId: 1,
+        utteranceCount: 1
+      }
+    ),
+    true
+  );
+  assert.equal(
+    shouldApplyLiveSummaryResult(
+      {
+        requestId: 1,
+        utteranceCount: 1
+      },
+      {
+        requestId: 2,
+        utteranceCount: 1
+      }
+    ),
+    false
+  );
+  assert.equal(
+    shouldApplyLiveSummaryResult(
+      {
+        requestId: 3,
+        utteranceCount: 1
+      },
+      {
+        requestId: 2,
+        utteranceCount: 2
+      }
+    ),
+    false
+  );
 });
 
 test("finish action enters finalizing and final LLM result enters document ready", () => {

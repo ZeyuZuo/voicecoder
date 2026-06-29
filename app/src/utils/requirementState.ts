@@ -16,6 +16,11 @@ const LIVE_SUMMARY_QUIET_DELAY_MS = 6000;
 const LIVE_SUMMARY_MAX_INTERVAL_MS = 30000;
 const LIVE_SUMMARY_BATCH_UTTERANCES = 3;
 
+type LiveSummaryRequestSnapshot = {
+  requestId: number;
+  utteranceCount: number;
+};
+
 export type RequirementSessionAction =
   | {
       type: "start_voice_session";
@@ -369,6 +374,11 @@ export function useVoiceRequirementSession(voice: {
   const lastSummaryAtRef = useRef(0);
   const summaryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>();
   const liveSummaryRequestRef = useRef(0);
+  const liveSummaryInFlightRef = useRef<(LiveSummaryRequestSnapshot & { requirementId: string }) | undefined>();
+  const lastAppliedLiveSummaryRef = useRef<LiveSummaryRequestSnapshot>({
+    requestId: 0,
+    utteranceCount: 0
+  });
   const processRequestRef = useRef(0);
   const finalizingRequestRequirementIdRef = useRef<string | undefined>();
   const projectPathRef = useRef<string | undefined>(projectPath);
@@ -416,7 +426,15 @@ export function useVoiceRequirementSession(voice: {
 
   const applyLiveSummary = useCallback(() => {
     const currentSession = sessionRef.current;
-    if (!currentSession?.requirementState.utterances.length) {
+    if (
+      !currentSession?.requirementState.utterances.length ||
+      currentSession.requirementState.status !== "listening"
+    ) {
+      return;
+    }
+
+    const requirementId = currentSession.requirementState.id;
+    if (liveSummaryInFlightRef.current?.requirementId === requirementId) {
       return;
     }
 
@@ -427,8 +445,12 @@ export function useVoiceRequirementSession(voice: {
 
     const requestId = liveSummaryRequestRef.current + 1;
     liveSummaryRequestRef.current = requestId;
-    const requirementId = currentSession.requirementState.id;
     const summarizedUtteranceCount = currentSession.requirementState.utterances.length;
+    liveSummaryInFlightRef.current = {
+      requestId,
+      requirementId,
+      utteranceCount: summarizedUtteranceCount
+    };
 
     void invokeTauri<RequirementSummaryResult>("summarize_requirement_state", {
       request: {
@@ -436,16 +458,31 @@ export function useVoiceRequirementSession(voice: {
       }
     })
       .then((result) => {
-        if (liveSummaryRequestRef.current !== requestId) {
-          return;
+        if (liveSummaryInFlightRef.current?.requestId === requestId) {
+          liveSummaryInFlightRef.current = undefined;
         }
 
         const latestSession = sessionRef.current;
-        if (!latestSession || latestSession.requirementState.id !== requirementId) {
+        if (
+          !latestSession ||
+          latestSession.requirementState.id !== requirementId ||
+          latestSession.requirementState.status !== "listening" ||
+          !shouldApplyLiveSummaryResult(
+            {
+              requestId,
+              utteranceCount: summarizedUtteranceCount
+            },
+            lastAppliedLiveSummaryRef.current
+          )
+        ) {
           return;
         }
 
         lastSummarizedUtteranceCountRef.current = summarizedUtteranceCount;
+        lastAppliedLiveSummaryRef.current = {
+          requestId,
+          utteranceCount: summarizedUtteranceCount
+        };
         lastSummaryAtRef.current = Date.now();
         dispatch({
           type: "apply_live_summary",
@@ -455,7 +492,23 @@ export function useVoiceRequirementSession(voice: {
         });
       })
       .catch((error) => {
-        if (liveSummaryRequestRef.current !== requestId) {
+        if (liveSummaryInFlightRef.current?.requestId === requestId) {
+          liveSummaryInFlightRef.current = undefined;
+        }
+
+        const latestSession = sessionRef.current;
+        if (
+          !latestSession ||
+          latestSession.requirementState.id !== requirementId ||
+          latestSession.requirementState.status !== "listening" ||
+          !shouldApplyLiveSummaryResult(
+            {
+              requestId,
+              utteranceCount: summarizedUtteranceCount
+            },
+            lastAppliedLiveSummaryRef.current
+          )
+        ) {
           return;
         }
 
@@ -503,6 +556,7 @@ export function useVoiceRequirementSession(voice: {
     }
 
     liveSummaryRequestRef.current += 1;
+    liveSummaryInFlightRef.current = undefined;
     lastSummarizedUtteranceCountRef.current = currentSession.requirementState.utterances.length;
     dispatch({
       type: "mark_finalizing",
@@ -741,6 +795,21 @@ function clearSummaryTimer(timer: ReturnType<typeof setTimeout> | undefined) {
   if (timer) {
     clearTimeout(timer);
   }
+}
+
+export function shouldApplyLiveSummaryResult(
+  candidate: LiveSummaryRequestSnapshot,
+  lastApplied: LiveSummaryRequestSnapshot
+) {
+  if (candidate.utteranceCount < lastApplied.utteranceCount) {
+    return false;
+  }
+
+  if (candidate.utteranceCount === lastApplied.utteranceCount && candidate.requestId <= lastApplied.requestId) {
+    return false;
+  }
+
+  return true;
 }
 
 function nowString() {
