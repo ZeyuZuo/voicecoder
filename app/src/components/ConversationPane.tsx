@@ -25,11 +25,22 @@ import type { AgentEvent, AgentRun } from "../types/app";
 import { Composer } from "./Composer";
 
 export function ConversationPane() {
-  const { currentProject, maximizedPane, sidebarCollapsed, workspaceCollapsed, toggleMaximizedPane, toggleSidebar, toggleWorkspace } = useAppState();
+  const {
+    currentProject,
+    maximizedPane,
+    openBrowserPreview,
+    sidebarCollapsed,
+    workspaceCollapsed,
+    toggleMaximizedPane,
+    toggleSidebar,
+    toggleWorkspace
+  } = useAppState();
   const maximized = maximizedPane === "conversation";
   const voice = useVoiceSession();
   const requirement = useVoiceRequirementSession(voice, currentProject?.path);
-  const demo = useDemoSession(requirement.session?.requirementState, currentProject?.path);
+  const demo = useDemoSession(requirement.session?.requirementState, currentProject?.path, {
+    onPreviewReady: openBrowserPreview
+  });
   const voiceMode = voice.status !== "idle" || voice.segments.length > 0 || requirement.active;
 
   return (

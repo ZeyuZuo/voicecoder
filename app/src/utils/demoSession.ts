@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type {
   AgentEvent,
   AgentRun,
@@ -96,6 +96,10 @@ export type DemoSessionController = {
   canStartFeedbackListening: boolean;
   startInitialRun: () => void;
   startFeedbackListening: () => void;
+};
+
+export type UseDemoSessionOptions = {
+  onPreviewReady?: (url: string) => void;
 };
 
 type StartInitialDemoRunRequest = {
@@ -380,8 +384,17 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
   return session;
 }
 
-export function useDemoSession(requirementState: RequirementState | undefined, projectPath: string | undefined): DemoSessionController {
+export function useDemoSession(
+  requirementState: RequirementState | undefined,
+  projectPath: string | undefined,
+  options: UseDemoSessionOptions = {}
+): DemoSessionController {
   const [session, dispatch] = useReducer(demoSessionStoreReducer, undefined);
+  const onPreviewReadyRef = useRef(options.onPreviewReady);
+
+  useEffect(() => {
+    onPreviewReadyRef.current = options.onPreviewReady;
+  }, [options.onPreviewReady]);
 
   useEffect(() => {
     if (
@@ -521,6 +534,7 @@ export function useDemoSession(requirementState: RequirementState | undefined, p
           currentPreviewUrl: event.payload.event.url,
           now: event.payload.occurredAt
         });
+        onPreviewReadyRef.current?.(event.payload.event.url);
       }),
       listen<AgentErrorPayload>("agent://error", (event) => {
         if (event.payload.demoSessionId && event.payload.demoSessionId !== sessionId) {
