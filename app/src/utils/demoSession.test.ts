@@ -120,6 +120,30 @@ test("ready dev server event can attach the preview URL after initial build", ()
   assert.equal(withPreview.updatedAt, "4");
 });
 
+test("preview failure moves the session to error until a preview URL exists", () => {
+  const previewReady = completeInitialBuild(createTestSession());
+  const failed = demoSessionReducer(previewReady, {
+    type: "fail_preview",
+    error: "dev server 启动失败：端口已被占用。",
+    now: "4"
+  });
+  const withPreview = demoSessionReducer(previewReady, {
+    type: "set_preview_url",
+    currentPreviewUrl: "http://localhost:5173",
+    now: "4"
+  });
+  const ignoredFailure = demoSessionReducer(withPreview, {
+    type: "fail_preview",
+    error: "dev server stopped",
+    now: "5"
+  });
+
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "dev server 启动失败：端口已被占用。");
+  assert.equal(ignoredFailure.status, "preview_ready");
+  assert.equal(ignoredFailure.currentPreviewUrl, "http://localhost:5173");
+});
+
 test("feedback result can start a follow-up change run", () => {
   const previewReady = completeInitialBuild(createTestSession());
   const listening = demoSessionReducer(previewReady, {

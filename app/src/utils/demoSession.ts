@@ -15,6 +15,8 @@ import type {
 } from "../types/app";
 import { createId } from "./project";
 
+const DEV_SERVER_START_TIMEOUT_MS = 45_000;
+
 export type CreateDemoSessionInput = {
   projectPath: string;
   requirementId: string;
@@ -57,6 +59,11 @@ export type DemoSessionAction =
   | {
       type: "set_preview_url";
       currentPreviewUrl: string;
+      now: string;
+    }
+  | {
+      type: "fail_preview";
+      error: string;
       now: string;
     }
   | {
@@ -300,6 +307,19 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
     };
   }
 
+  if (action.type === "fail_preview") {
+    if (!canFailPreview(session)) {
+      return session;
+    }
+
+    return {
+      ...session,
+      status: "error",
+      error: action.error,
+      updatedAt: action.now
+    };
+  }
+
   if (action.type === "fail_agent_run") {
     const run = findRun(session, action.runId);
     if (!run || isTerminalRunStatus(run.status)) {
@@ -391,10 +411,17 @@ export function useDemoSession(
 ): DemoSessionController {
   const [session, dispatch] = useReducer(demoSessionStoreReducer, undefined);
   const onPreviewReadyRef = useRef(options.onPreviewReady);
+  const devServerTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>();
 
   useEffect(() => {
     onPreviewReadyRef.current = options.onPreviewReady;
   }, [options.onPreviewReady]);
+
+  useEffect(() => {
+    return () => {
+      clearDevServerStartTimeout(devServerTimeoutRef);
+    };
+  }, []);
 
   useEffect(() => {
     if (
@@ -518,23 +545,49 @@ export function useDemoSession(
           now: event.payload.completedAt
         });
         dispatchProjectFilesChanged(sessionProjectPath, event.payload.changedFiles);
-        startDemoDevServer(sessionProjectPath, sessionId);
+        startDevServerTimeout(devServerTimeoutRef, (message) => {
+          dispatch({
+            type: "fail_preview",
+            error: message,
+            now: nowString()
+          });
+        });
+        startDemoDevServer(sessionProjectPath, sessionId, (message) => {
+          clearDevServerStartTimeout(devServerTimeoutRef);
+          dispatch({
+            type: "fail_preview",
+            error: message,
+            now: nowString()
+          });
+        });
       }),
       listen<DevServerLifecycleEventEnvelope>("dev-server://event", (event) => {
         if (event.payload.projectPath !== sessionProjectPath) {
           return;
         }
 
-        if (event.payload.event.type !== "ready") {
+        if (event.payload.event.type === "ready") {
+          clearDevServerStartTimeout(devServerTimeoutRef);
+          dispatch({
+            type: "set_preview_url",
+            currentPreviewUrl: event.payload.event.url,
+            now: event.payload.occurredAt
+          });
+          onPreviewReadyRef.current?.(event.payload.event.url);
           return;
         }
 
+        const previewError = formatDevServerPreviewError(event.payload);
+        if (!previewError) {
+          return;
+        }
+
+        clearDevServerStartTimeout(devServerTimeoutRef);
         dispatch({
-          type: "set_preview_url",
-          currentPreviewUrl: event.payload.event.url,
+          type: "fail_preview",
+          error: previewError,
           now: event.payload.occurredAt
         });
-        onPreviewReadyRef.current?.(event.payload.event.url);
       }),
       listen<AgentErrorPayload>("agent://error", (event) => {
         if (event.payload.demoSessionId && event.payload.demoSessionId !== sessionId) {
@@ -595,6 +648,10 @@ function canAttachPreviewUrl(session: DemoSession) {
     session.status === "feedback_listening" ||
     session.status === "feedback_processing"
   );
+}
+
+function canFailPreview(session: DemoSession) {
+  return canAttachPreviewUrl(session) && !session.currentPreviewUrl;
 }
 
 function isTerminalRunStatus(status: AgentRun["status"]) {
@@ -659,15 +716,68 @@ function stringifyError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function startDemoDevServer(projectPath: string, demoSessionId: string) {
+function startDemoDevServer(projectPath: string, demoSessionId: string, onError: (message: string) => void) {
   const request: StartDevServerRequest = {
     projectPath,
     sessionId: `dev_server_${demoSessionId}`
   };
 
   void invoke("start_demo_dev_server", { request }).catch((error) => {
-    console.warn("Failed to start demo dev server.", error);
+    onError(`启动 dev server 失败：${stringifyError(error)}`);
   });
+}
+
+function startDevServerTimeout(timeoutRef: { current: ReturnType<typeof setTimeout> | undefined }, onTimeout: (message: string) => void) {
+  clearDevServerStartTimeout(timeoutRef);
+  timeoutRef.current = setTimeout(() => {
+    timeoutRef.current = undefined;
+    onTimeout("dev server 启动超时：45 秒内没有检测到本地预览 URL。");
+  }, DEV_SERVER_START_TIMEOUT_MS);
+}
+
+function clearDevServerStartTimeout(timeoutRef: { current: ReturnType<typeof setTimeout> | undefined }) {
+  if (!timeoutRef.current) {
+    return;
+  }
+
+  clearTimeout(timeoutRef.current);
+  timeoutRef.current = undefined;
+}
+
+function formatDevServerPreviewError(envelope: DevServerLifecycleEventEnvelope) {
+  const { event } = envelope;
+
+  if (event.type === "error") {
+    return `dev server 出错：${event.message}`;
+  }
+
+  if (event.type === "stopped") {
+    return `dev server 在预览 URL 就绪前退出${formatExitCode(event.exitCode)}。`;
+  }
+
+  if (event.type === "output") {
+    return detectDevServerOutputIssue(event.text);
+  }
+
+  return undefined;
+}
+
+function formatExitCode(exitCode: number | undefined) {
+  return typeof exitCode === "number" ? `，退出码 ${exitCode}` : "";
+}
+
+function detectDevServerOutputIssue(text: string) {
+  const normalizedText = text.toLowerCase();
+  if (
+    normalizedText.includes("eaddrinuse") ||
+    normalizedText.includes("address already in use") ||
+    normalizedText.includes("port is already in use") ||
+    normalizedText.includes("port already in use")
+  ) {
+    return "dev server 启动失败：端口已被占用。";
+  }
+
+  return undefined;
 }
 
 function dispatchProjectFilesChanged(projectPath: string, changedFiles: string[]) {
