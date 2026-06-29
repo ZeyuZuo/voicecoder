@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { DemoSession, DevServerLifecycleEventEnvelope, RequirementUtterance } from "../types/app";
 import {
+  createInitialDemoPrompt,
   createDemoSession,
   demoSessionReducer,
   demoSessionStoreReducer,
@@ -16,6 +17,16 @@ test("creates a demo session that is ready to start", () => {
   assert.equal(session.projectPath, "/tmp/demo");
   assert.equal(session.requirementId, "requirement-1");
   assert.equal(session.initialCodingPrompt, "请实现第一版 demo。");
+});
+
+test("initial demo prompt requires npm dev server compatibility", () => {
+  const prompt = createInitialDemoPrompt(createTestSession());
+
+  assert.ok(/Node\.js 前端项目/.test(prompt));
+  assert.ok(/package\.json/.test(prompt));
+  assert.ok(/scripts\.dev/.test(prompt));
+  assert.ok(/npm run dev/.test(prompt));
+  assert.ok(/不要只生成裸 index\.html/.test(prompt));
 });
 
 test("store reducer creates a demo session from confirmed requirement input", () => {

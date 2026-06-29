@@ -698,7 +698,7 @@ function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
 }
 
-function createInitialDemoPrompt(session: DemoSession) {
+export function createInitialDemoPrompt(session: DemoSession) {
   return [
     "你正在为 VoiceCoder 生成第一版可运行 demo。",
     "",
@@ -710,6 +710,13 @@ function createInitialDemoPrompt(session: DemoSession) {
     "",
     "Coding Prompt：",
     session.initialCodingPrompt,
+    "",
+    "运行约束：",
+    "- 必须生成或保持一个 Node.js 前端项目。",
+    "- 项目根目录必须有 package.json。",
+    "- package.json 必须包含可用的 scripts.dev。",
+    "- 用户会在项目根目录通过 npm run dev 启动预览。",
+    "- 不要只生成裸 index.html / script.js / styles.css 静态文件项目，除非同时补齐 package.json 和 npm run dev 启动链路。",
     "",
     "请基于当前项目实现第一版 demo。优先保证可运行、可展示、交互完整。",
     "完成后给出简短变更摘要和后续可改进点。"
