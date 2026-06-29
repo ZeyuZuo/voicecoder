@@ -730,6 +730,9 @@ export function createInitialDemoPrompt(session: DemoSession) {
     "- package.json 必须包含可用的 scripts.dev。",
     "- 用户会在项目根目录通过 npm run dev 启动预览。",
     "- 不要只生成裸 index.html / script.js / styles.css 静态文件项目，除非同时补齐 package.json 和 npm run dev 启动链路。",
+    "- 不要启动 dev server，不要运行 npm run dev / npm start / vite --host / node server 等长驻服务。",
+    "- 可以运行不会长驻的本地静态检查，例如 npm run build、npm test、node --check 或 tsc --noEmit；如果依赖缺失，不要联网安装，说明即可。",
+    "- 生成完成后，VoiceCoder 会在后台统一启动 npm run dev 并打开预览。",
     "",
     "请基于当前项目实现第一版 demo。优先保证可运行、可展示、交互完整。",
     "完成后给出简短变更摘要和后续可改进点。"

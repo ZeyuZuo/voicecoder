@@ -731,6 +731,8 @@ fn start_codex_exec_json_session(
 fn build_codex_exec_json_args(context: &CodingAgentStartContext) -> Vec<String> {
     let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
     vec![
+        "--ask-for-approval".to_string(),
+        "on-failure".to_string(),
         "exec".to_string(),
         "--json".to_string(),
         "--sandbox".to_string(),
@@ -992,6 +994,7 @@ fn build_thread_start_params(project_path: &str, sandbox: CodingAgentSandboxMode
     json!({
         "cwd": project_path,
         "runtimeWorkspaceRoots": [project_path],
+        "approvalPolicy": "on-failure",
         "sandbox": sandbox.app_server_thread_sandbox(),
         "threadSource": "user"
     })
@@ -1008,6 +1011,7 @@ fn build_turn_start_params(
         "cwd": project_path,
         "runtimeWorkspaceRoots": [project_path],
         "sandboxPolicy": sandbox.app_server_turn_sandbox_policy(project_path),
+        "approvalPolicy": "on-failure",
         "input": [
             {
                 "type": "text",
@@ -1703,6 +1707,10 @@ mod tests {
             Some("workspace-write")
         );
         assert_eq!(
+            params.get("approvalPolicy").and_then(Value::as_str),
+            Some("on-failure")
+        );
+        assert_eq!(
             params
                 .pointer("/runtimeWorkspaceRoots/0")
                 .and_then(Value::as_str),
@@ -1738,6 +1746,10 @@ mod tests {
         assert_eq!(
             params.pointer("/input/0/text").and_then(Value::as_str),
             Some("Build the demo")
+        );
+        assert_eq!(
+            params.get("approvalPolicy").and_then(Value::as_str),
+            Some("on-failure")
         );
         assert_eq!(
             params
@@ -1789,6 +1801,8 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "--ask-for-approval",
+                "on-failure",
                 "exec",
                 "--json",
                 "--sandbox",

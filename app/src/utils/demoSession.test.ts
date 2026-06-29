@@ -27,6 +27,8 @@ test("initial demo prompt requires npm dev server compatibility", () => {
   assert.ok(/scripts\.dev/.test(prompt));
   assert.ok(/npm run dev/.test(prompt));
   assert.ok(/不要只生成裸 index\.html/.test(prompt));
+  assert.ok(/不要启动 dev server/.test(prompt));
+  assert.ok(/VoiceCoder 会在后台统一启动 npm run dev/.test(prompt));
 });
 
 test("store reducer creates a demo session from confirmed requirement input", () => {
