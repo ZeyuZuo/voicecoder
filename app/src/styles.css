@@ -843,6 +843,12 @@ button {
   box-shadow: 0 12px 34px rgb(31 33 36 / 7%);
 }
 
+.agent-progress-panel.is-compact {
+  gap: 14px;
+  padding: 14px;
+  box-shadow: none;
+}
+
 .agent-progress-panel.is-failed {
   border-color: #f2c8c1;
   background: rgb(255 247 245 / 94%);
@@ -883,6 +889,7 @@ button {
 .agent-progress-events {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .agent-progress-event {
@@ -916,8 +923,14 @@ button {
   color: #343a42;
   font-size: 12.5px;
   line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.agent-progress-panel:not(.is-compact) .agent-progress-event p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .composer-shell {
@@ -1605,6 +1618,43 @@ button {
   margin: 0 0 18px;
   color: #74777c;
   line-height: 1.55;
+}
+
+.workspace-demo-panel {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+  padding: 24px;
+  background: #f7f8f6;
+  overflow: auto;
+}
+
+.workspace-demo-panel-heading {
+  display: grid;
+  gap: 5px;
+}
+
+.workspace-demo-panel-heading span {
+  color: #25272b;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.workspace-demo-panel-heading p,
+.workspace-demo-error {
+  margin: 0;
+  color: #737a84;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.workspace-demo-error {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff0ec;
+  color: #a43627;
 }
 
 .browser-preview {

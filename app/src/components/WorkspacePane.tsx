@@ -13,7 +13,9 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppState } from "../providers/AppStateProvider";
-import type { BrowserPreviewState, Project, WorkspaceTabKind } from "../types/app";
+import type { BrowserPreviewState, DemoSession, Project, WorkspaceTabKind } from "../types/app";
+import { DEMO_SESSION_UPDATED_EVENT } from "../utils/demoSession";
+import { DemoProgressPanel } from "./DemoProgressPanel";
 import { FileExplorer } from "./workspace/FileExplorer";
 
 const launcherItems = [
@@ -61,6 +63,8 @@ export function WorkspacePane() {
   } = useAppState();
   const maximized = maximizedPane === "workspace";
   const activeTab = workspaceMode === "launcher" ? undefined : workspaceTabs.find((tab) => tab.id === activeWorkspaceTabId);
+  const demoSession = useWorkspaceDemoSession(currentProject?.path);
+  const showDemoProgress = Boolean(demoSession?.runs.length && !demoSession.currentPreviewUrl);
 
   return (
     <section className="workspace-pane">
@@ -100,7 +104,9 @@ export function WorkspacePane() {
         </div>
       </header>
 
-      {!activeTab ? (
+      {showDemoProgress && demoSession ? (
+        <DemoWorkspacePanel session={demoSession} />
+      ) : !activeTab ? (
         <div className="workspace-launcher">
           <div className="launcher-grid">
             {launcherItems.map((item) => {
@@ -126,6 +132,52 @@ export function WorkspacePane() {
       )}
     </section>
   );
+}
+
+function DemoWorkspacePanel({ session }: { session: DemoSession }) {
+  return (
+    <div className="workspace-demo-panel">
+      <div className="workspace-demo-panel-heading">
+        <span>Demo 生成</span>
+        <p>右侧会在 dev server URL 就绪后自动切换到浏览器预览。</p>
+      </div>
+      {session.error ? <p className="workspace-demo-error">{session.error}</p> : null}
+      <DemoProgressPanel session={session} compact />
+    </div>
+  );
+}
+
+function useWorkspaceDemoSession(projectPath: string | undefined) {
+  const [session, setSession] = useState<DemoSession | undefined>();
+
+  useEffect(() => {
+    const handleDemoSessionUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<{ session?: DemoSession }>).detail;
+      const nextSession = detail?.session;
+      if (!nextSession || (projectPath && nextSession.projectPath !== projectPath)) {
+        return;
+      }
+
+      setSession(nextSession);
+    };
+
+    window.addEventListener(DEMO_SESSION_UPDATED_EVENT, handleDemoSessionUpdate);
+    return () => {
+      window.removeEventListener(DEMO_SESSION_UPDATED_EVENT, handleDemoSessionUpdate);
+    };
+  }, [projectPath]);
+
+  useEffect(() => {
+    setSession((currentSession) => {
+      if (!currentSession || !projectPath || currentSession.projectPath === projectPath) {
+        return currentSession;
+      }
+
+      return undefined;
+    });
+  }, [projectPath]);
+
+  return session;
 }
 
 function WorkspaceTabContent({

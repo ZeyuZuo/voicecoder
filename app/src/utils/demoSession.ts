@@ -16,6 +16,7 @@ import type {
 import { createId } from "./project";
 
 const DEV_SERVER_START_TIMEOUT_MS = 45_000;
+export const DEMO_SESSION_UPDATED_EVENT = "voicecoder:demo-session-updated";
 
 export type CreateDemoSessionInput = {
   projectPath: string;
@@ -455,6 +456,18 @@ export function useDemoSession(
     }
 
     persistDemoSessionLog(session);
+  }, [session]);
+
+  useEffect(() => {
+    if (!session || typeof window === "undefined") {
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent(DEMO_SESSION_UPDATED_EVENT, {
+      detail: {
+        session
+      }
+    }));
   }, [session]);
 
   const startInitialRun = useCallback(() => {
