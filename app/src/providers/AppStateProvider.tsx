@@ -332,6 +332,7 @@ function normalizePreviewUrl(url: string) {
 
 function getWorkspaceTabTitle(kind: WorkspaceTabKind): string {
   const titles: Record<WorkspaceTabKind, string> = {
+    demo: "Demo 生成",
     files: "文件",
     browser: "浏览器",
     review: "审查",

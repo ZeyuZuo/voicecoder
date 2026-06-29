@@ -1,4 +1,5 @@
 import {
+  Bot,
   Code2,
   ExternalLink,
   FileText,
@@ -11,7 +12,7 @@ import {
   SquareTerminal,
   X
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppState } from "../providers/AppStateProvider";
 import type { BrowserPreviewState, DemoSession, Project, WorkspaceTabKind } from "../types/app";
 import { DEMO_SESSION_UPDATED_EVENT } from "../utils/demoSession";
@@ -64,7 +65,16 @@ export function WorkspacePane() {
   const maximized = maximizedPane === "workspace";
   const activeTab = workspaceMode === "launcher" ? undefined : workspaceTabs.find((tab) => tab.id === activeWorkspaceTabId);
   const demoSession = useWorkspaceDemoSession(currentProject?.path);
-  const showDemoProgress = Boolean(demoSession?.runs.length && !demoSession.currentPreviewUrl);
+  const openedDemoSessionIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!demoSession?.runs.length || openedDemoSessionIdsRef.current.has(demoSession.id)) {
+      return;
+    }
+
+    openedDemoSessionIdsRef.current.add(demoSession.id);
+    openWorkspaceTab("demo");
+  }, [demoSession?.id, demoSession?.runs.length, openWorkspaceTab]);
 
   return (
     <section className="workspace-pane">
@@ -104,33 +114,42 @@ export function WorkspacePane() {
         </div>
       </header>
 
-      {showDemoProgress && demoSession ? (
-        <DemoWorkspacePanel session={demoSession} />
-      ) : !activeTab ? (
-        <div className="workspace-launcher">
-          <div className="launcher-grid">
-            {launcherItems.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button className="launcher-card" key={item.mode} onClick={() => openWorkspaceTab(item.mode)}>
-                  <Icon size={32} />
-                  <span>{item.title}</span>
-                  <small>{item.description}</small>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+      {!activeTab ? (
+        <WorkspaceLauncher onOpenWorkspaceTab={openWorkspaceTab} />
       ) : (
         <WorkspaceTabContent
           browserPreview={browserPreview}
           currentProject={currentProject}
+          demoSession={demoSession}
           kind={activeTab.kind}
           onOpenBrowserPreview={openBrowserPreview}
           onOpenLauncher={() => setWorkspaceMode("launcher")}
         />
       )}
     </section>
+  );
+}
+
+function WorkspaceLauncher({
+  onOpenWorkspaceTab
+}: {
+  onOpenWorkspaceTab: (kind: WorkspaceTabKind) => void;
+}) {
+  return (
+    <div className="workspace-launcher">
+      <div className="launcher-grid">
+        {launcherItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button className="launcher-card" key={item.mode} onClick={() => onOpenWorkspaceTab(item.mode)}>
+              <Icon size={32} />
+              <span>{item.title}</span>
+              <small>{item.description}</small>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -184,15 +203,32 @@ function WorkspaceTabContent({
   browserPreview,
   kind,
   currentProject,
+  demoSession,
   onOpenBrowserPreview,
   onOpenLauncher
 }: {
   browserPreview: BrowserPreviewState;
   kind: WorkspaceTabKind;
   currentProject?: Project;
+  demoSession?: DemoSession;
   onOpenBrowserPreview: (url: string) => void;
   onOpenLauncher: () => void;
 }) {
+  if (kind === "demo") {
+    return demoSession ? <DemoWorkspacePanel session={demoSession} /> : (
+      <div className="workspace-placeholder">
+        <div className="workspace-placeholder-icon">
+          <Bot size={30} />
+        </div>
+        <h2>Demo 生成</h2>
+        <p>点击生成 demo 后，这里会显示 Codex 交互过程。</p>
+        <button className="tool-button" onClick={onOpenLauncher}>
+          返回工具入口
+        </button>
+      </div>
+    );
+  }
+
   if (kind === "files") {
     return <FileExplorer project={currentProject} />;
   }
@@ -275,6 +311,7 @@ function BrowserPreview({
 
 function getWorkspaceTitle(mode: WorkspaceTabKind) {
   const titles: Record<WorkspaceTabKind, string> = {
+    demo: "Demo 生成",
     files: "文件",
     browser: "浏览器",
     review: "审查",
@@ -286,6 +323,7 @@ function getWorkspaceTitle(mode: WorkspaceTabKind) {
 
 function getWorkspaceIcon(kind: WorkspaceTabKind) {
   const icons: Record<WorkspaceTabKind, typeof FolderOpen> = {
+    demo: Bot,
     files: FolderOpen,
     browser: Globe2,
     review: FileText,

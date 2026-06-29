@@ -12,11 +12,11 @@ export type Conversation = {
   lastActivity: string;
 };
 
-export type WorkspaceMode = "launcher" | "files" | "browser" | "review" | "terminal";
+export type WorkspaceMode = "launcher" | "demo" | "files" | "browser" | "review" | "terminal";
 
 export type ComposerMode = "idle" | "project-menu-open" | "submitting";
 
-export type WorkspaceTabKind = "files" | "browser" | "review" | "terminal";
+export type WorkspaceTabKind = "demo" | "files" | "browser" | "review" | "terminal";
 
 export type WorkspaceTab = {
   id: string;
