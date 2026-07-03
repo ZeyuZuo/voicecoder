@@ -31,6 +31,7 @@ type AppStateContextValue = {
   setWorkspaceMode: (mode: WorkspaceMode) => void;
   openWorkspaceTab: (kind: WorkspaceTabKind) => void;
   openBrowserPreview: (url: string) => void;
+  clearBrowserPreview: () => void;
   selectWorkspaceTab: (tabId: string) => void;
   closeWorkspaceTab: (tabId: string) => void;
   toggleSidebar: () => void;
@@ -262,6 +263,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setWorkspaceCollapsed(false);
   };
 
+  const clearBrowserPreview = () => {
+    setBrowserPreview({
+      updatedAt: Date.now().toString()
+    });
+  };
+
   const selectWorkspaceTab = (tabId: string) => {
     const tab = workspaceTabs.find((candidate) => candidate.id === tabId);
 
@@ -308,6 +315,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setWorkspaceMode,
       openWorkspaceTab,
       openBrowserPreview,
+      clearBrowserPreview,
       selectWorkspaceTab,
       closeWorkspaceTab,
       toggleSidebar,

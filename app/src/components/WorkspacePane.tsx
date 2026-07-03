@@ -263,8 +263,11 @@ function BrowserPreview({
   useEffect(() => {
     if (preview.url) {
       setDraftUrl(preview.url);
+      return;
     }
-  }, [preview.url]);
+
+    setDraftUrl("http://localhost:5173");
+  }, [preview.updatedAt, preview.url]);
 
   const openDraftUrl = () => {
     if (!draftUrl.trim()) {

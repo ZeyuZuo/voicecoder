@@ -150,23 +150,31 @@ export function Composer({ requirement, demo, voice, voiceMode }: ComposerProps)
               </>
             ) : (
               showDemoAction ? (
-                <button
-                  className="tool-button accent"
-                  disabled={demoAction.disabled}
-                  onClick={() => {
-                    if (demoAction.kind === "start_initial") {
-                      setDemoConfirmOpen(true);
-                      return;
-                    }
+                <>
+                  <button
+                    className="tool-button accent"
+                    disabled={demoAction.disabled}
+                    onClick={() => {
+                      if (demoAction.kind === "start_initial") {
+                        setDemoConfirmOpen(true);
+                        return;
+                      }
 
-                    if (demoAction.kind === "start_feedback") {
-                      demo.startFeedbackListening();
-                    }
-                  }}
-                >
-                  <Play size={14} />
-                  <span>{demoAction.label}</span>
-                </button>
+                      if (demoAction.kind === "start_feedback") {
+                        demo.startFeedbackListening();
+                      }
+                    }}
+                  >
+                    <Play size={14} />
+                    <span>{demoAction.label}</span>
+                  </button>
+                  {demoAction.kind === "start_feedback" && demo.canStopPreview ? (
+                    <button className="tool-button" onClick={demo.stopPreview}>
+                      <Square size={14} />
+                      <span>停止演示</span>
+                    </button>
+                  ) : null}
+                </>
               ) : (
                 <button className="tool-button" disabled={!canFinishRequirement} onClick={finishRequirement}>
                   <Square size={14} />

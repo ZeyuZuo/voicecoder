@@ -20,6 +20,7 @@ import { Composer } from "./Composer";
 
 export function ConversationPane() {
   const {
+    clearBrowserPreview,
     currentProject,
     maximizedPane,
     openBrowserPreview,
@@ -33,7 +34,8 @@ export function ConversationPane() {
   const voice = useVoiceSession();
   const requirement = useVoiceRequirementSession(voice, currentProject?.path);
   const demo = useDemoSession(requirement.session?.requirementState, currentProject?.path, {
-    onPreviewReady: openBrowserPreview
+    onPreviewReady: openBrowserPreview,
+    onPreviewStopped: clearBrowserPreview
   });
   const voiceMode = voice.status !== "idle" || voice.segments.length > 0 || requirement.active;
 

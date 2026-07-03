@@ -182,6 +182,24 @@ test("ready dev server event can attach the preview URL after initial build", ()
   assert.equal(withPreview.updatedAt, "4");
 });
 
+test("stopping preview clears the current URL while keeping the generated demo ready", () => {
+  const previewReady = completeInitialBuild(createTestSession());
+  const withPreview = demoSessionReducer(previewReady, {
+    type: "set_preview_url",
+    currentPreviewUrl: "http://localhost:5173",
+    now: "4"
+  });
+  const stopped = demoSessionReducer(withPreview, {
+    type: "stop_preview",
+    now: "5"
+  });
+
+  assert.equal(stopped.status, "preview_ready");
+  assert.equal(stopped.currentPreviewUrl, undefined);
+  assert.equal(stopped.error, undefined);
+  assert.equal(stopped.updatedAt, "5");
+});
+
 test("preview URL updates are ignored before the initial build has completed", () => {
   const session = createTestSession();
   const withPreview = demoSessionReducer(session, {
@@ -261,6 +279,10 @@ test("dev server preview errors are normalized for UI display", () => {
   assert.equal(formatDevServerPreviewError(devServerEnvelope({
     type: "ready",
     url: "http://localhost:5173"
+  })), undefined);
+  assert.equal(formatDevServerPreviewError(devServerEnvelope({
+    type: "stopped",
+    reason: "user"
   })), undefined);
 });
 

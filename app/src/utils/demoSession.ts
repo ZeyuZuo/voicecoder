@@ -11,7 +11,8 @@ import type {
   DemoSession,
   RequirementState,
   RequirementUtterance,
-  StartDevServerRequest
+  StartDevServerRequest,
+  StopDevServerRequest
 } from "../types/app";
 import { createId } from "./project";
 
@@ -68,6 +69,15 @@ export type DemoSessionAction =
       now: string;
     }
   | {
+      type: "stop_preview";
+      now: string;
+    }
+  | {
+      type: "fail_stop_preview";
+      error: string;
+      now: string;
+    }
+  | {
       type: "fail_agent_run";
       runId: string;
       error: string;
@@ -102,12 +112,15 @@ export type DemoSessionController = {
   active: boolean;
   canStartInitialRun: boolean;
   canStartFeedbackListening: boolean;
+  canStopPreview: boolean;
   startInitialRun: () => void;
   startFeedbackListening: () => void;
+  stopPreview: () => void;
 };
 
 export type UseDemoSessionOptions = {
   onPreviewReady?: (url: string) => void;
+  onPreviewStopped?: () => void;
 };
 
 type StartInitialDemoRunRequest = {
@@ -326,6 +339,27 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
     };
   }
 
+  if (action.type === "stop_preview") {
+    if (!session.currentPreviewUrl) {
+      return session;
+    }
+
+    return {
+      ...session,
+      currentPreviewUrl: undefined,
+      error: undefined,
+      updatedAt: action.now
+    };
+  }
+
+  if (action.type === "fail_stop_preview") {
+    return {
+      ...session,
+      error: action.error,
+      updatedAt: action.now
+    };
+  }
+
   if (action.type === "fail_agent_run") {
     const run = findRun(session, action.runId);
     if (!run || isTerminalRunStatus(run.status)) {
@@ -417,11 +451,16 @@ export function useDemoSession(
 ): DemoSessionController {
   const [session, dispatch] = useReducer(demoSessionStoreReducer, undefined);
   const onPreviewReadyRef = useRef(options.onPreviewReady);
+  const onPreviewStoppedRef = useRef(options.onPreviewStopped);
   const devServerTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>();
 
   useEffect(() => {
     onPreviewReadyRef.current = options.onPreviewReady;
   }, [options.onPreviewReady]);
+
+  useEffect(() => {
+    onPreviewStoppedRef.current = options.onPreviewStopped;
+  }, [options.onPreviewStopped]);
 
   useEffect(() => {
     return () => {
@@ -523,6 +562,39 @@ export function useDemoSession(
       type: "start_feedback_listening",
       now: nowString()
     });
+  }, [session]);
+
+  const stopPreview = useCallback(() => {
+    if (!session?.currentPreviewUrl) {
+      return;
+    }
+
+    clearDevServerStartTimeout(devServerTimeoutRef);
+
+    if (!isTauri()) {
+      dispatch({
+        type: "stop_preview",
+        now: nowString()
+      });
+      onPreviewStoppedRef.current?.();
+      return;
+    }
+
+    void stopDemoDevServer(session.id)
+      .then(() => {
+        dispatch({
+          type: "stop_preview",
+          now: nowString()
+        });
+        onPreviewStoppedRef.current?.();
+      })
+      .catch((error) => {
+        dispatch({
+          type: "fail_stop_preview",
+          error: `停止 dev server 失败：${stringifyError(error)}`,
+          now: nowString()
+        });
+      });
   }, [session]);
 
   useEffect(() => {
@@ -645,10 +717,12 @@ export function useDemoSession(
       active: Boolean(session),
       canStartInitialRun: session?.status === "ready_to_start",
       canStartFeedbackListening: session?.status === "preview_ready",
+      canStopPreview: canStopPreview(session),
       startInitialRun,
-      startFeedbackListening
+      startFeedbackListening,
+      stopPreview
     }),
-    [session, startInitialRun, startFeedbackListening]
+    [session, startInitialRun, startFeedbackListening, stopPreview]
   );
 }
 
@@ -678,6 +752,15 @@ function canAttachPreviewUrl(session: DemoSession) {
 
 function canFailPreview(session: DemoSession) {
   return canAttachPreviewUrl(session) && !session.currentPreviewUrl;
+}
+
+function canStopPreview(session: DemoSession | undefined) {
+  return Boolean(
+    session?.currentPreviewUrl &&
+      (session.status === "preview_ready" ||
+        session.status === "feedback_listening" ||
+        session.status === "feedback_processing")
+  );
 }
 
 function isTerminalRunStatus(status: AgentRun["status"]) {
@@ -755,12 +838,24 @@ function stringifyError(error: unknown) {
 function startDemoDevServer(projectPath: string, demoSessionId: string, onError: (message: string) => void) {
   const request: StartDevServerRequest = {
     projectPath,
-    sessionId: `dev_server_${demoSessionId}`
+    sessionId: getDemoDevServerSessionId(demoSessionId)
   };
 
   void invoke("start_demo_dev_server", { request }).catch((error) => {
     onError(`启动 dev server 失败：${stringifyError(error)}`);
   });
+}
+
+function stopDemoDevServer(demoSessionId: string) {
+  const request: StopDevServerRequest = {
+    sessionId: getDemoDevServerSessionId(demoSessionId)
+  };
+
+  return invoke("stop_demo_dev_server", { request });
+}
+
+function getDemoDevServerSessionId(demoSessionId: string) {
+  return `dev_server_${demoSessionId}`;
 }
 
 function persistDemoSessionLog(session: DemoSession) {
@@ -799,6 +894,10 @@ export function formatDevServerPreviewError(envelope: DevServerLifecycleEventEnv
   }
 
   if (event.type === "stopped") {
+    if (event.reason === "user") {
+      return undefined;
+    }
+
     return `dev server 在预览 URL 就绪前退出${formatExitCode(event.exitCode)}。`;
   }
 
