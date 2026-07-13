@@ -1,0 +1,19 @@
+{
+  "id": 9002,
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "itemId": "item-command-fixture",
+    "startedAtMs": 1783900801000,
+    "approvalId": null,
+    "environmentId": null,
+    "reason": "需要访问本地开发服务",
+    "command": "npm run check",
+    "cwd": "/tmp/voicecoder-demo",
+    "commandActions": null,
+    "proposedExecpolicyAmendment": null,
+    "proposedNetworkPolicyAmendments": null,
+    "networkApprovalContext": null
+  }
+}

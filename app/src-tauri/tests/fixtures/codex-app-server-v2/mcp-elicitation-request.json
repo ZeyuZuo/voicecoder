@@ -1,0 +1,24 @@
+{
+  "id": "mcp-9005",
+  "method": "mcpServer/elicitation/request",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "serverName": "deployment",
+    "mode": "form",
+    "_meta": null,
+    "message": "请选择预览环境",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {
+        "environment": {
+          "type": "string",
+          "title": "环境",
+          "enum": ["staging", "production"],
+          "default": "staging"
+        }
+      },
+      "required": ["environment"]
+    }
+  }
+}

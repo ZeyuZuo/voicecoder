@@ -1,6 +1,8 @@
 # Codex app-server v2 protocol fixtures
 
-These fixtures lock the subset of the app-server v2 protocol used by VoiceCoder Milestone 0.
+These fixtures lock the app-server v2 protocol subset used by VoiceCoder, including
+thread/turn startup, item updates, automatic review, approval requests, user input,
+MCP elicitation, and server-request resolution.
 
 Baseline: `codex-cli 0.144.1`, generated with:
 

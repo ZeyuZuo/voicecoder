@@ -254,6 +254,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(dev_server::DevServerState::default())
         .manage(voice::VoiceState::default())
+        .manage(coding_agent::CodingAgentRequestState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
@@ -270,6 +271,7 @@ pub fn run() {
             voice::get_voice_provider_status,
             coding_agent::get_coding_agent_provider_status,
             coding_agent::start_initial_demo_run,
+            coding_agent::resolve_coding_agent_server_request,
             llm::get_llm_provider_status,
             llm::test_llm_provider_connection,
             llm::summarize_requirement_state,

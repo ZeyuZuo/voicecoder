@@ -1,0 +1,20 @@
+{
+  "id": "permission-9003",
+  "method": "item/permissions/requestApproval",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "itemId": "item-permission-fixture",
+    "environmentId": null,
+    "startedAtMs": 1783900802000,
+    "cwd": "/tmp/voicecoder-demo",
+    "reason": "需要写入生成目录",
+    "permissions": {
+      "network": { "enabled": true },
+      "fileSystem": {
+        "read": null,
+        "write": ["/tmp/voicecoder-demo/generated"]
+      }
+    }
+  }
+}

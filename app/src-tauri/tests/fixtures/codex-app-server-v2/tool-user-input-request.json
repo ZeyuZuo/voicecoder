@@ -1,0 +1,23 @@
+{
+  "id": 9004,
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "itemId": "item-user-input-fixture",
+    "autoResolutionMs": 60000,
+    "questions": [
+      {
+        "id": "theme",
+        "header": "主题",
+        "question": "Demo 应优先使用哪种主题？",
+        "isOther": false,
+        "isSecret": false,
+        "options": [
+          { "label": "浅色", "description": "适合白天演示。" },
+          { "label": "深色", "description": "适合暗色工作区。" }
+        ]
+      }
+    ]
+  }
+}

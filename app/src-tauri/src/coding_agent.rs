@@ -9,13 +9,13 @@ use std::{
     path::Path,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
         Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 
 const DEFAULT_CODEX_BIN: &str = "codex";
 const FIRST_APP_SERVER_REQUEST_ID: u64 = 0;
@@ -25,6 +25,8 @@ const CODEX_APPROVAL_POLICY_ENV: &str = "VOICECODER_CODEX_APPROVAL_POLICY";
 const CODEX_APPROVALS_REVIEWER_ENV: &str = "VOICECODER_CODEX_APPROVALS_REVIEWER";
 const APP_SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const APP_SERVER_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_SERVER_AUTO_REVIEW_TIMEOUT: Duration = Duration::from_secs(120);
+const APP_SERVER_USER_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
 const APP_SERVER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const APP_SERVER_TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const APP_SERVER_STDERR_TAIL_LINES: usize = 20;
@@ -348,6 +350,34 @@ pub enum AgentEvent {
         rationale: Option<String>,
         created_at: String,
     },
+    ServerRequest {
+        request_id: Value,
+        request_key: String,
+        method: String,
+        kind: String,
+        status: String,
+        requires_user_input: bool,
+        auto_review: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
+        details: Value,
+        expires_at: String,
+        created_at: String,
+    },
+    ServerRequestResolved {
+        request_id: Value,
+        request_key: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resolution: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        created_at: String,
+    },
     Diagnostic {
         level: String,
         message: String,
@@ -429,6 +459,68 @@ pub struct StartInitialDemoRunRequest {
     sandbox: Option<CodingAgentSandboxMode>,
     #[serde(default)]
     provider: Option<CodingAgentProviderKind>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCodingAgentServerRequestRequest {
+    run_id: String,
+    request_id: Value,
+    action: String,
+    #[serde(default)]
+    answers: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    content: Option<Value>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ServerRequestResolution {
+    request_id: Value,
+    action: String,
+    answers: BTreeMap<String, Vec<String>>,
+    content: Option<Value>,
+    scope: Option<String>,
+}
+
+#[derive(Clone, Default)]
+pub struct CodingAgentRequestState {
+    responders: Arc<Mutex<BTreeMap<String, Sender<ServerRequestResolution>>>>,
+}
+
+impl CodingAgentRequestState {
+    fn register(&self, run_id: &str) -> Result<Receiver<ServerRequestResolution>, String> {
+        let (sender, receiver) = mpsc::channel();
+        let mut responders = self
+            .responders
+            .lock()
+            .map_err(|_| "Coding Agent 请求响应注册表已损坏。".to_string())?;
+        if responders.contains_key(run_id) {
+            return Err(format!("AgentRun `{run_id}` 已经存在活动请求通道。"));
+        }
+        responders.insert(run_id.to_string(), sender);
+        Ok(receiver)
+    }
+
+    fn unregister(&self, run_id: &str) {
+        if let Ok(mut responders) = self.responders.lock() {
+            responders.remove(run_id);
+        }
+    }
+
+    fn resolve(&self, run_id: &str, resolution: ServerRequestResolution) -> Result<(), String> {
+        let responders = self
+            .responders
+            .lock()
+            .map_err(|_| "Coding Agent 请求响应注册表已损坏。".to_string())?;
+        let sender = responders
+            .get(run_id)
+            .ok_or_else(|| format!("AgentRun `{run_id}` 当前没有可响应的 app-server 请求。"))?;
+        sender
+            .send(resolution)
+            .map_err(|_| format!("AgentRun `{run_id}` 的 app-server 请求通道已经关闭。"))
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -579,7 +671,9 @@ impl CodingAgentProvider for CodexAppServerProvider {
     ) -> Result<Box<dyn CodingAgentSession + Send>, String> {
         self.validate_start()?;
         let log_id = format!("provider-{}", Utc::now().timestamp_millis());
-        Ok(Box::new(start_codex_app_server_session(context, &log_id)?))
+        Ok(Box::new(start_codex_app_server_session(
+            context, &log_id, None,
+        )?))
     }
 }
 
@@ -647,19 +741,43 @@ pub fn get_coding_agent_provider_status() -> CodingAgentProviderStatus {
 #[tauri::command]
 pub fn start_initial_demo_run(
     app: AppHandle,
+    request_state: State<'_, CodingAgentRequestState>,
     request: StartInitialDemoRunRequest,
 ) -> Result<(), String> {
     validate_start_initial_demo_run_request(&request)?;
+    let request_receiver = request_state.register(&request.run_id)?;
+    let request_state = request_state.inner().clone();
 
     thread::spawn(move || {
         let demo_session_id = request.demo_session_id.clone();
         let run_id = request.run_id.clone();
-        if let Err(error) = run_initial_demo_agent(app.clone(), request) {
+        let result = run_initial_demo_agent(app.clone(), request, request_receiver);
+        request_state.unregister(&run_id);
+        if let Err(error) = result {
             emit_agent_error(&app, Some(demo_session_id), Some(run_id), error);
         }
     });
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn resolve_coding_agent_server_request(
+    request_state: State<'_, CodingAgentRequestState>,
+    request: ResolveCodingAgentServerRequestRequest,
+) -> Result<(), String> {
+    validate_request_id(&request.request_id)?;
+    validate_server_request_action(&request.action)?;
+    request_state.resolve(
+        &request.run_id,
+        ServerRequestResolution {
+            request_id: request.request_id,
+            action: request.action,
+            answers: request.answers,
+            content: request.content,
+            scope: request.scope,
+        },
+    )
 }
 
 fn validate_start_initial_demo_run_request(
@@ -678,9 +796,27 @@ fn validate_start_initial_demo_run_request(
     })
 }
 
+fn validate_request_id(request_id: &Value) -> Result<(), String> {
+    if request_id.is_string() || request_id.as_i64().is_some() || request_id.as_u64().is_some() {
+        return Ok(());
+    }
+    Err("响应 app-server 请求失败：requestId 必须是字符串或整数。".to_string())
+}
+
+fn validate_server_request_action(action: &str) -> Result<(), String> {
+    if matches!(
+        action,
+        "accept" | "acceptForSession" | "decline" | "cancel" | "submit"
+    ) {
+        return Ok(());
+    }
+    Err(format!("响应 app-server 请求失败：不支持操作 `{action}`。"))
+}
+
 fn run_initial_demo_agent(
     app: AppHandle,
     request: StartInitialDemoRunRequest,
+    request_receiver: Receiver<ServerRequestResolution>,
 ) -> Result<(), String> {
     let requested_provider = request.provider.unwrap_or(CodingAgentProviderKind::Auto);
     let provider = CodingAgentProviderRegistry::resolve_provider(requested_provider);
@@ -688,7 +824,8 @@ fn run_initial_demo_agent(
     match provider {
         CodingAgentProviderKind::CodexAppServer => {
             resolve_coding_agent_permission_settings()?;
-            let result = run_app_server_demo_agent(app.clone(), request.clone(), provider);
+            let result =
+                run_app_server_demo_agent(app.clone(), request.clone(), provider, request_receiver);
             if result.is_ok() || !can_fallback_to_codex_exec_json(requested_provider) {
                 return result;
             }
@@ -714,13 +851,15 @@ fn run_app_server_demo_agent(
     app: AppHandle,
     request: StartInitialDemoRunRequest,
     provider: CodingAgentProviderKind,
+    request_receiver: Receiver<ServerRequestResolution>,
 ) -> Result<(), String> {
     let context = CodingAgentStartContext {
         project_path: request.project_path.clone(),
         prompt: request.prompt.clone(),
         sandbox: request.sandbox,
     };
-    let mut session = start_codex_app_server_session(context, &request.run_id)?;
+    let mut session =
+        start_codex_app_server_session(context, &request.run_id, Some(request_receiver))?;
 
     emit_agent_run_started(
         &app,
@@ -758,26 +897,42 @@ fn run_app_server_demo_agent(
 
     let mut summary = AgentRunEventSummary::default();
     let pending_events = session.take_pending_agent_events();
-    if emit_agent_events(
+    match emit_agent_events(
         &app,
         &request.demo_session_id,
         &request.run_id,
         pending_events,
         &mut summary,
-    )? {
-        return finish_agent_run(app, request, session, summary);
+    ) {
+        Ok(true) => return finish_agent_run(app, request, session, summary),
+        Ok(false) => {}
+        Err(error) => {
+            let _ = session.cancel();
+            return Err(error);
+        }
     }
 
     loop {
-        let events = session.read_next_agent_events()?;
-        if emit_agent_events(
+        let events = match session.read_next_agent_events() {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = session.cancel();
+                return Err(error);
+            }
+        };
+        match emit_agent_events(
             &app,
             &request.demo_session_id,
             &request.run_id,
             events,
             &mut summary,
-        )? {
-            return finish_agent_run(app, request, session, summary);
+        ) {
+            Ok(true) => return finish_agent_run(app, request, session, summary),
+            Ok(false) => {}
+            Err(error) => {
+                let _ = session.cancel();
+                return Err(error);
+            }
         }
     }
 }
@@ -1148,6 +1303,7 @@ struct CodexAppServerSession {
 
 impl CodingAgentSession for CodexAppServerSession {
     fn cancel(&mut self) -> Result<(), String> {
+        let _ = self.client.cancel_pending_server_requests();
         let stop_result = if self
             .child
             .try_wait()
@@ -1317,6 +1473,7 @@ fn emit_agent_error(
 fn start_codex_app_server_session(
     context: CodingAgentStartContext,
     run_id: &str,
+    request_receiver: Option<Receiver<ServerRequestResolution>>,
 ) -> Result<CodexAppServerSession, String> {
     validate_coding_agent_start_context(&context)?;
     let codex_version = validate_codex_executable()?;
@@ -1344,7 +1501,14 @@ fn start_codex_app_server_session(
         let _ = child.kill();
         return Err("Codex app-server stderr 不可用。".to_string());
     };
-    let mut client = CodexAppServerClient::new(stdin, stdout, stderr, transport_log);
+    let mut client = CodexAppServerClient::new(
+        stdin,
+        stdout,
+        stderr,
+        transport_log,
+        request_receiver,
+        permission_settings.approvals_reviewer,
+    );
     if let Err(error) = initialize_codex_app_server(&mut child, &mut client) {
         let error = cleanup_child_with_error(&mut child, error);
         client.join_readers();
@@ -1550,6 +1714,19 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
         "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
             normalize_auto_approval_review(params, created_at)
         }
+        "serverRequest/resolved" => params
+            .get("requestId")
+            .filter(|request_id| validate_request_id(request_id).is_ok())
+            .map(|request_id| {
+                vec![server_request_resolved_event(
+                    request_id.clone(),
+                    "resolved".to_string(),
+                    Some("server".to_string()),
+                    Some("Codex 已完成该请求的处理".to_string()),
+                    created_at.to_string(),
+                )]
+            })
+            .unwrap_or_default(),
         "item/started" => normalize_codex_item_lifecycle(params, created_at, false),
         "item/completed" => normalize_codex_item_lifecycle(params, created_at, true),
         "thread/compacted" => normalize_codex_context_compacted(params, created_at),
@@ -3093,7 +3270,39 @@ enum AppServerReaderEvent {
 struct PendingServerRequest {
     request_id: Value,
     method: String,
+    params: Value,
+    handling: ServerRequestHandling,
     deadline: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ServerRequestHandling {
+    AutoReview,
+    UserDecision,
+    UserInput { auto_resolve: bool },
+    McpElicitation,
+    Unsupported,
+}
+
+impl ServerRequestHandling {
+    fn allows_client_resolution(self) -> bool {
+        !matches!(self, Self::AutoReview | Self::Unsupported)
+    }
+
+    fn requires_user_input(self) -> bool {
+        matches!(
+            self,
+            Self::UserDecision | Self::UserInput { .. } | Self::McpElicitation
+        )
+    }
+}
+
+struct BuiltServerRequestResponse {
+    response: Value,
+    log_payload: Value,
+    status: String,
+    resolution: String,
+    message: String,
 }
 
 #[derive(Clone, Default)]
@@ -3195,6 +3404,8 @@ struct CodexAppServerClient {
     pending_responses: BTreeMap<u64, Value>,
     pending_agent_events: VecDeque<AgentEvent>,
     pending_server_requests: VecDeque<PendingServerRequest>,
+    server_request_resolutions: Option<Receiver<ServerRequestResolution>>,
+    approvals_reviewer: CodingAgentApprovalsReviewer,
     last_heartbeat_notice: Instant,
 }
 
@@ -3204,6 +3415,8 @@ impl CodexAppServerClient {
         stdout: ChildStdout,
         stderr: ChildStderr,
         transport_log: AppServerTransportLog,
+        server_request_resolutions: Option<Receiver<ServerRequestResolution>>,
+        approvals_reviewer: CodingAgentApprovalsReviewer,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let heartbeat = SharedAppServerHeartbeat::default();
@@ -3229,6 +3442,8 @@ impl CodexAppServerClient {
             pending_responses: BTreeMap::new(),
             pending_agent_events: VecDeque::new(),
             pending_server_requests: VecDeque::new(),
+            server_request_resolutions,
+            approvals_reviewer,
             last_heartbeat_notice: Instant::now(),
         }
     }
@@ -3270,6 +3485,7 @@ impl CodexAppServerClient {
 
         let deadline = Instant::now() + APP_SERVER_RESPONSE_TIMEOUT;
         loop {
+            self.process_server_request_resolutions()?;
             self.resolve_expired_server_requests()?;
             if Instant::now() >= deadline {
                 return Err(self.transport_error_context(
@@ -3302,6 +3518,7 @@ impl CodexAppServerClient {
 
     fn read_next_agent_events(&mut self, child: &mut Child) -> Result<Vec<AgentEvent>, String> {
         loop {
+            self.process_server_request_resolutions()?;
             if !self.pending_agent_events.is_empty() {
                 return Ok(self.take_pending_agent_events());
             }
@@ -3386,6 +3603,9 @@ impl CodexAppServerClient {
                 self.pending_responses.insert(request_id, message);
             }
             JsonRpcInboundKind::Notification { method } => {
+                if method == "serverRequest/resolved" {
+                    self.clear_resolved_server_request(&message);
+                }
                 let events = normalize_codex_notification_at(&message, &received_at);
                 if events.is_empty() {
                     self.pending_agent_events.push_back(AgentEvent::Diagnostic {
@@ -3401,21 +3621,39 @@ impl CodexAppServerClient {
                 }
             }
             JsonRpcInboundKind::ServerRequest { request_id, method } => {
+                let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+                let handling =
+                    classify_server_request_handling(&method, &params, self.approvals_reviewer);
+                let timeout = server_request_timeout(handling, &params);
+                let expires_at = server_request_expiry_timestamp(timeout);
                 self.pending_server_requests
                     .push_back(PendingServerRequest {
-                        request_id,
+                        request_id: request_id.clone(),
                         method: method.clone(),
-                        deadline: Instant::now() + APP_SERVER_SERVER_REQUEST_TIMEOUT,
+                        params: params.clone(),
+                        handling,
+                        deadline: Instant::now() + timeout,
                     });
-                self.pending_agent_events.push_back(AgentEvent::Diagnostic {
-                    level: "warning".to_string(),
-                    message: format!(
-                        "收到尚未接入 UI 的 app-server 主动请求；若未处理将在 {} 秒后安全拒绝",
-                        APP_SERVER_SERVER_REQUEST_TIMEOUT.as_secs()
-                    ),
-                    method: Some(method),
-                    created_at: received_at,
-                });
+                self.pending_agent_events
+                    .push_back(build_server_request_event(
+                        request_id,
+                        method.clone(),
+                        params,
+                        handling,
+                        expires_at,
+                        received_at.clone(),
+                    ));
+                if handling == ServerRequestHandling::Unsupported {
+                    self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                        level: "warning".to_string(),
+                        message: format!(
+                            "VoiceCoder 不支持 app-server 主动请求 `{method}`；将在 {} 秒后安全取消",
+                            APP_SERVER_SERVER_REQUEST_TIMEOUT.as_secs()
+                        ),
+                        method: Some(method),
+                        created_at: received_at,
+                    });
+                }
             }
             JsonRpcInboundKind::Unknown { reason } => {
                 self.pending_agent_events.push_back(AgentEvent::Diagnostic {
@@ -3433,6 +3671,76 @@ impl CodexAppServerClient {
         Ok(None)
     }
 
+    fn process_server_request_resolutions(&mut self) -> Result<(), String> {
+        loop {
+            let resolution = match self.server_request_resolutions.as_ref() {
+                Some(receiver) => match receiver.try_recv() {
+                    Ok(resolution) => resolution,
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return Ok(()),
+                },
+                None => return Ok(()),
+            };
+            self.resolve_server_request_from_client(resolution)?;
+        }
+    }
+
+    fn resolve_server_request_from_client(
+        &mut self,
+        resolution: ServerRequestResolution,
+    ) -> Result<(), String> {
+        let Some(index) = self
+            .pending_server_requests
+            .iter()
+            .position(|request| request.request_id == resolution.request_id)
+        else {
+            self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                level: "warning".to_string(),
+                message: "收到已失效或不存在的 app-server 请求响应，已忽略".to_string(),
+                method: None,
+                created_at: current_agent_event_timestamp(),
+            });
+            return Ok(());
+        };
+        let request = self
+            .pending_server_requests
+            .remove(index)
+            .expect("pending server request index must exist");
+        if !request.handling.allows_client_resolution() {
+            self.pending_server_requests.insert(index, request);
+            self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                level: "warning".to_string(),
+                message: "该审批已由 Codex 自动审查接管，忽略页面的重复响应".to_string(),
+                method: None,
+                created_at: current_agent_event_timestamp(),
+            });
+            return Ok(());
+        }
+
+        let built = build_server_request_response(&request, &resolution)?;
+        self.write_json_line_with_log_payload(
+            &built.response,
+            "server_request_response",
+            &built.log_payload,
+        )?;
+        self.pending_agent_events
+            .push_back(server_request_resolved_event(
+                request.request_id,
+                built.status,
+                Some(built.resolution),
+                Some(built.message),
+                current_agent_event_timestamp(),
+            ));
+        Ok(())
+    }
+
+    fn clear_resolved_server_request(&mut self, notification: &Value) {
+        let Some(request_id) = notification.pointer("/params/requestId") else {
+            return;
+        };
+        self.pending_server_requests
+            .retain(|request| request.request_id != *request_id);
+    }
+
     fn resolve_expired_server_requests(&mut self) -> Result<(), String> {
         let now = Instant::now();
         let mut pending = VecDeque::new();
@@ -3443,21 +3751,48 @@ impl CodexAppServerClient {
                 continue;
             }
 
-            let response = build_json_rpc_error_response(
-                request.request_id,
-                -32002,
-                "VoiceCoder 尚未实现该 app-server 主动请求，已在超时后安全拒绝。",
-            );
-            self.write_json_line(&response, "server_request_timeout_response")?;
-            self.pending_agent_events.push_back(AgentEvent::Diagnostic {
-                level: "warning".to_string(),
-                message: "app-server 主动请求等待超时，已安全拒绝".to_string(),
-                method: Some(request.method),
-                created_at: current_agent_event_timestamp(),
-            });
+            let built = build_server_request_timeout_response(&request)?;
+            self.write_json_line_with_log_payload(
+                &built.response,
+                "server_request_timeout_response",
+                &built.log_payload,
+            )?;
+            self.pending_agent_events
+                .push_back(server_request_resolved_event(
+                    request.request_id,
+                    built.status,
+                    Some(built.resolution),
+                    Some(built.message),
+                    current_agent_event_timestamp(),
+                ));
         }
 
         self.pending_server_requests = pending;
+        Ok(())
+    }
+
+    fn cancel_pending_server_requests(&mut self) -> Result<(), String> {
+        while let Some(request) = self.pending_server_requests.pop_front() {
+            let built = if request.handling == ServerRequestHandling::Unsupported {
+                unsupported_server_request_response(request.request_id.clone(), &request.method)
+            } else {
+                build_server_request_response(
+                    &request,
+                    &ServerRequestResolution {
+                        request_id: request.request_id.clone(),
+                        action: "cancel".to_string(),
+                        answers: BTreeMap::new(),
+                        content: None,
+                        scope: None,
+                    },
+                )?
+            };
+            self.write_json_line_with_log_payload(
+                &built.response,
+                "server_request_run_cancel_response",
+                &built.log_payload,
+            )?;
+        }
         Ok(())
     }
 
@@ -3523,9 +3858,19 @@ impl CodexAppServerClient {
     }
 
     fn write_json_line(&mut self, value: &Value, kind: &str) -> Result<(), String> {
+        self.write_json_line_with_log_payload(value, kind, value)
+    }
+
+    fn write_json_line_with_log_payload(
+        &mut self,
+        value: &Value,
+        kind: &str,
+        log_payload: &Value,
+    ) -> Result<(), String> {
         let line = serde_json::to_string(value)
             .map_err(|error| format!("序列化 Codex app-server 消息失败：{error}"))?;
-        self.transport_log.record("outbound", kind, value.clone())?;
+        self.transport_log
+            .record("outbound", kind, log_payload.clone())?;
         self.stdin
             .write_all(line.as_bytes())
             .and_then(|_| self.stdin.write_all(b"\n"))
@@ -3653,6 +3998,496 @@ fn classify_json_rpc_message(message: &Value) -> JsonRpcInboundKind {
     }
 }
 
+fn classify_server_request_handling(
+    method: &str,
+    params: &Value,
+    approvals_reviewer: CodingAgentApprovalsReviewer,
+) -> ServerRequestHandling {
+    if is_approval_server_request(method) {
+        return if approvals_reviewer == CodingAgentApprovalsReviewer::User {
+            ServerRequestHandling::UserDecision
+        } else {
+            ServerRequestHandling::AutoReview
+        };
+    }
+    match method {
+        "item/tool/requestUserInput" => ServerRequestHandling::UserInput {
+            auto_resolve: params
+                .get("autoResolutionMs")
+                .and_then(Value::as_u64)
+                .is_some(),
+        },
+        "mcpServer/elicitation/request" => ServerRequestHandling::McpElicitation,
+        _ => ServerRequestHandling::Unsupported,
+    }
+}
+
+fn is_approval_server_request(method: &str) -> bool {
+    matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/permissions/requestApproval"
+            | "applyPatchApproval"
+            | "execCommandApproval"
+    )
+}
+
+fn server_request_timeout(handling: ServerRequestHandling, params: &Value) -> Duration {
+    match handling {
+        ServerRequestHandling::AutoReview => APP_SERVER_AUTO_REVIEW_TIMEOUT,
+        ServerRequestHandling::UserInput { auto_resolve: true } => params
+            .get("autoResolutionMs")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .unwrap_or(APP_SERVER_USER_DECISION_TIMEOUT),
+        ServerRequestHandling::UserDecision
+        | ServerRequestHandling::UserInput {
+            auto_resolve: false,
+        }
+        | ServerRequestHandling::McpElicitation => APP_SERVER_USER_DECISION_TIMEOUT,
+        ServerRequestHandling::Unsupported => APP_SERVER_SERVER_REQUEST_TIMEOUT,
+    }
+}
+
+fn server_request_expiry_timestamp(timeout: Duration) -> String {
+    let timeout = chrono::Duration::from_std(timeout).unwrap_or_else(|_| chrono::Duration::zero());
+    (Utc::now() + timeout).to_rfc3339()
+}
+
+fn build_server_request_event(
+    request_id: Value,
+    method: String,
+    params: Value,
+    handling: ServerRequestHandling,
+    expires_at: String,
+    created_at: String,
+) -> AgentEvent {
+    AgentEvent::ServerRequest {
+        request_key: server_request_key(&request_id),
+        request_id,
+        kind: server_request_kind(&method).to_string(),
+        status: if handling == ServerRequestHandling::AutoReview {
+            "auto_reviewing".to_string()
+        } else if handling == ServerRequestHandling::Unsupported {
+            "unsupported".to_string()
+        } else {
+            "pending".to_string()
+        },
+        requires_user_input: handling.requires_user_input(),
+        auto_review: handling == ServerRequestHandling::AutoReview,
+        thread_id: extract_string(&params, "/threadId"),
+        turn_id: extract_string(&params, "/turnId"),
+        item_id: extract_string(&params, "/itemId"),
+        details: project_server_request_details(&method, &params),
+        method,
+        expires_at,
+        created_at,
+    }
+}
+
+fn server_request_kind(method: &str) -> &'static str {
+    match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => "command_approval",
+        "item/fileChange/requestApproval" | "applyPatchApproval" => "file_approval",
+        "item/permissions/requestApproval" => "permissions_approval",
+        "item/tool/requestUserInput" => "user_input",
+        "mcpServer/elicitation/request" => "mcp_elicitation",
+        _ => "unsupported",
+    }
+}
+
+fn project_server_request_details(method: &str, params: &Value) -> Value {
+    let mut details = Map::new();
+    match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => {
+            copy_ui_sensitive_text(
+                &mut details,
+                params,
+                "command",
+                AGENT_UI_STATUS_MESSAGE_CHARS,
+            );
+            copy_ui_text(&mut details, params, "cwd", AGENT_UI_TEXT_PREVIEW_CHARS);
+            copy_ui_sensitive_text(
+                &mut details,
+                params,
+                "reason",
+                AGENT_UI_STATUS_MESSAGE_CHARS,
+            );
+        }
+        "item/fileChange/requestApproval" | "applyPatchApproval" => {
+            copy_ui_sensitive_text(
+                &mut details,
+                params,
+                "reason",
+                AGENT_UI_STATUS_MESSAGE_CHARS,
+            );
+            copy_ui_text(
+                &mut details,
+                params,
+                "grantRoot",
+                AGENT_UI_TEXT_PREVIEW_CHARS,
+            );
+        }
+        "item/permissions/requestApproval" => {
+            copy_ui_sensitive_text(
+                &mut details,
+                params,
+                "reason",
+                AGENT_UI_STATUS_MESSAGE_CHARS,
+            );
+            copy_ui_text(&mut details, params, "cwd", AGENT_UI_TEXT_PREVIEW_CHARS);
+            if let Some(permissions) = params.get("permissions") {
+                details.insert(
+                    "permissions".to_string(),
+                    project_ui_safe_value(permissions),
+                );
+            }
+        }
+        "item/tool/requestUserInput" => {
+            if let Some(questions) = params.get("questions") {
+                details.insert("questions".to_string(), project_ui_safe_value(questions));
+            }
+            if let Some(auto_resolution_ms) = params.get("autoResolutionMs") {
+                details.insert("autoResolutionMs".to_string(), auto_resolution_ms.clone());
+            }
+        }
+        "mcpServer/elicitation/request" => {
+            for key in ["serverName", "mode", "message", "url", "elicitationId"] {
+                copy_ui_sensitive_text(&mut details, params, key, AGENT_UI_STATUS_MESSAGE_CHARS);
+            }
+            if let Some(schema) = params.get("requestedSchema") {
+                details.insert("requestedSchema".to_string(), project_ui_safe_value(schema));
+            }
+        }
+        _ => {}
+    }
+    Value::Object(details)
+}
+
+fn server_request_key(request_id: &Value) -> String {
+    match request_id {
+        Value::String(value) => format!("string:{value}"),
+        Value::Number(value) => format!("number:{value}"),
+        _ => format!("unknown:{request_id}"),
+    }
+}
+
+fn server_request_resolved_event(
+    request_id: Value,
+    status: String,
+    resolution: Option<String>,
+    message: Option<String>,
+    created_at: String,
+) -> AgentEvent {
+    AgentEvent::ServerRequestResolved {
+        request_key: server_request_key(&request_id),
+        request_id,
+        status,
+        resolution,
+        message,
+        created_at,
+    }
+}
+
+fn build_server_request_response(
+    request: &PendingServerRequest,
+    resolution: &ServerRequestResolution,
+) -> Result<BuiltServerRequestResponse, String> {
+    if request.method == "item/tool/requestUserInput"
+        && matches!(resolution.action.as_str(), "cancel" | "decline")
+    {
+        let response = build_json_rpc_error_response(
+            request.request_id.clone(),
+            -32003,
+            "VoiceCoder 用户取消了输入请求。",
+        );
+        let (status, resolution_name, message) = server_request_action_outcome(&resolution.action);
+        return Ok(BuiltServerRequestResponse {
+            response,
+            log_payload: json!({
+                "id": request.request_id,
+                "error": { "code": -32003, "message": "User input cancelled" }
+            }),
+            status: status.to_string(),
+            resolution: resolution_name.to_string(),
+            message: message.to_string(),
+        });
+    }
+    let result = match request.method.as_str() {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            let decision = match resolution.action.as_str() {
+                "accept" | "submit" => "accept",
+                "acceptForSession" => "acceptForSession",
+                "decline" => "decline",
+                "cancel" => "cancel",
+                action => return Err(format!("审批请求不支持操作 `{action}`。")),
+            };
+            json!({ "decision": decision })
+        }
+        "item/permissions/requestApproval" => {
+            build_permissions_approval_result(&request.params, resolution)?
+        }
+        "item/tool/requestUserInput" => build_tool_user_input_result(&request.params, resolution)?,
+        "mcpServer/elicitation/request" => build_mcp_elicitation_result(resolution)?,
+        "applyPatchApproval" | "execCommandApproval" => {
+            let decision = match resolution.action.as_str() {
+                "accept" | "submit" => "approved",
+                "acceptForSession" => "approved_for_session",
+                "decline" => "denied",
+                "cancel" => "abort",
+                action => return Err(format!("旧版审批请求不支持操作 `{action}`。")),
+            };
+            json!({ "decision": decision })
+        }
+        method => {
+            return Ok(unsupported_server_request_response(
+                request.request_id.clone(),
+                method,
+            ));
+        }
+    };
+    let response = build_json_rpc_result_response(request.request_id.clone(), result);
+    let (status, resolution_name, message) = server_request_action_outcome(&resolution.action);
+    let log_payload = if matches!(
+        request.method.as_str(),
+        "item/tool/requestUserInput" | "mcpServer/elicitation/request"
+    ) {
+        json!({
+            "id": request.request_id,
+            "result": "[REDACTED_USER_INPUT]"
+        })
+    } else {
+        response.clone()
+    };
+    Ok(BuiltServerRequestResponse {
+        response,
+        log_payload,
+        status: status.to_string(),
+        resolution: resolution_name.to_string(),
+        message: message.to_string(),
+    })
+}
+
+fn build_permissions_approval_result(
+    params: &Value,
+    resolution: &ServerRequestResolution,
+) -> Result<Value, String> {
+    if matches!(resolution.action.as_str(), "decline" | "cancel") {
+        return Ok(json!({
+            "permissions": {},
+            "scope": "turn",
+            "strictAutoReview": false
+        }));
+    }
+    if !matches!(
+        resolution.action.as_str(),
+        "accept" | "acceptForSession" | "submit"
+    ) {
+        return Err(format!("权限请求不支持操作 `{}`。", resolution.action));
+    }
+    let requested = params
+        .get("permissions")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "权限请求缺少 permissions。".to_string())?;
+    let mut granted = Map::new();
+    for key in ["network", "fileSystem"] {
+        if let Some(value) = requested.get(key).filter(|value| !value.is_null()) {
+            granted.insert(key.to_string(), value.clone());
+        }
+    }
+    let scope = if resolution.action == "acceptForSession"
+        || resolution.scope.as_deref() == Some("session")
+    {
+        "session"
+    } else {
+        "turn"
+    };
+    Ok(json!({
+        "permissions": Value::Object(granted),
+        "scope": scope,
+        "strictAutoReview": false
+    }))
+}
+
+fn build_tool_user_input_result(
+    params: &Value,
+    resolution: &ServerRequestResolution,
+) -> Result<Value, String> {
+    if matches!(resolution.action.as_str(), "cancel" | "decline") {
+        return Err("用户输入请求已取消。".to_string());
+    }
+    if !matches!(resolution.action.as_str(), "accept" | "submit") {
+        return Err(format!("用户输入请求不支持操作 `{}`。", resolution.action));
+    }
+    let allowed_ids = params
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .filter_map(|question| extract_string(question, "/id"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if resolution.answers.len() > 16 {
+        return Err("用户输入回答数量超过上限。".to_string());
+    }
+    let mut answers = Map::new();
+    for (question_id, values) in &resolution.answers {
+        if !allowed_ids.iter().any(|allowed| allowed == question_id) {
+            return Err(format!("用户输入包含未知问题 `{question_id}`。"));
+        }
+        if values.len() > 16
+            || values
+                .iter()
+                .any(|value| value.chars().count() > AGENT_UI_LONG_TEXT_CHARS)
+        {
+            return Err(format!("问题 `{question_id}` 的回答超过安全上限。"));
+        }
+        answers.insert(question_id.clone(), json!({ "answers": values }));
+    }
+    Ok(json!({ "answers": Value::Object(answers) }))
+}
+
+fn build_mcp_elicitation_result(resolution: &ServerRequestResolution) -> Result<Value, String> {
+    let action = match resolution.action.as_str() {
+        "accept" | "submit" => "accept",
+        "decline" => "decline",
+        "cancel" => "cancel",
+        action => return Err(format!("MCP elicitation 不支持操作 `{action}`。")),
+    };
+    if resolution
+        .content
+        .as_ref()
+        .map(|content| content.to_string().chars().count() > AGENT_UI_LONG_TEXT_CHARS)
+        .unwrap_or(false)
+    {
+        return Err("MCP elicitation 回答超过安全上限。".to_string());
+    }
+    Ok(json!({
+        "action": action,
+        "content": if action == "accept" {
+            resolution.content.clone().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+        "_meta": Value::Null
+    }))
+}
+
+fn server_request_action_outcome(action: &str) -> (&'static str, &'static str, &'static str) {
+    match action {
+        "accept" => ("resolved", "accepted", "已批准本次请求"),
+        "acceptForSession" => ("resolved", "accepted_for_session", "已批准本次会话中的请求"),
+        "decline" => ("declined", "declined", "已拒绝该请求"),
+        "cancel" => ("cancelled", "cancelled", "已取消该请求"),
+        "submit" => ("resolved", "submitted", "已提交回答"),
+        _ => ("failed", "invalid", "请求响应无效"),
+    }
+}
+
+fn build_server_request_timeout_response(
+    request: &PendingServerRequest,
+) -> Result<BuiltServerRequestResponse, String> {
+    if let ServerRequestHandling::UserInput { auto_resolve: true } = request.handling {
+        let resolution = ServerRequestResolution {
+            request_id: request.request_id.clone(),
+            action: "submit".to_string(),
+            answers: recommended_user_input_answers(&request.params),
+            content: None,
+            scope: None,
+        };
+        let mut built = build_server_request_response(request, &resolution)?;
+        built.status = "auto_resolved".to_string();
+        built.resolution = "recommended_defaults".to_string();
+        built.message = "等待回答超时，已使用每个问题的推荐首选项继续".to_string();
+        return Ok(built);
+    }
+
+    if request.handling == ServerRequestHandling::Unsupported {
+        return Ok(unsupported_server_request_response(
+            request.request_id.clone(),
+            &request.method,
+        ));
+    }
+
+    let resolution = ServerRequestResolution {
+        request_id: request.request_id.clone(),
+        action: "cancel".to_string(),
+        answers: BTreeMap::new(),
+        content: None,
+        scope: None,
+    };
+    let mut built = match build_server_request_response(request, &resolution) {
+        Ok(built) => built,
+        Err(_) if request.method == "item/tool/requestUserInput" => BuiltServerRequestResponse {
+            response: build_json_rpc_error_response(
+                request.request_id.clone(),
+                -32003,
+                "VoiceCoder 等待用户输入超时，已取消请求。",
+            ),
+            log_payload: json!({
+                "id": request.request_id,
+                "error": { "code": -32003, "message": "User input timed out" }
+            }),
+            status: "timed_out".to_string(),
+            resolution: "timeout".to_string(),
+            message: "等待用户输入超时，已取消请求".to_string(),
+        },
+        Err(error) => return Err(error),
+    };
+    built.status = "timed_out".to_string();
+    built.resolution = "timeout".to_string();
+    built.message = if request.handling == ServerRequestHandling::AutoReview {
+        "Codex 自动审批超时，已安全取消请求".to_string()
+    } else {
+        "等待用户决定超时，已安全取消请求".to_string()
+    };
+    Ok(built)
+}
+
+fn recommended_user_input_answers(params: &Value) -> BTreeMap<String, Vec<String>> {
+    params
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .filter_map(|question| {
+                    let id = extract_string(question, "/id")?;
+                    let label = question
+                        .pointer("/options/0/label")
+                        .and_then(Value::as_str)?;
+                    Some((id, vec![label.to_string()]))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn unsupported_server_request_response(
+    request_id: Value,
+    method: &str,
+) -> BuiltServerRequestResponse {
+    let response = build_json_rpc_error_response(
+        request_id,
+        -32601,
+        "VoiceCoder 不支持该 app-server 主动请求。",
+    );
+    BuiltServerRequestResponse {
+        log_payload: response.clone(),
+        response,
+        status: "failed".to_string(),
+        resolution: "unsupported".to_string(),
+        message: format!("VoiceCoder 不支持请求 `{method}`，已安全拒绝"),
+    }
+}
+
+fn build_json_rpc_result_response(id: Value, result: Value) -> Value {
+    json!({ "id": id, "result": result })
+}
+
 fn build_json_rpc_error_response(id: Value, code: i64, message: &str) -> Value {
     json!({
         "id": id,
@@ -3776,6 +4611,17 @@ mod tests {
         include_str!("../tests/fixtures/codex-app-server-v2/file-change-started-notification.json");
     const FILE_CHANGE_APPROVAL_REQUEST_FIXTURE: &str =
         include_str!("../tests/fixtures/codex-app-server-v2/file-change-approval-request.json");
+    const COMMAND_APPROVAL_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/command-approval-request.json");
+    const PERMISSIONS_APPROVAL_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/permissions-approval-request.json");
+    const TOOL_USER_INPUT_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/tool-user-input-request.json");
+    const MCP_ELICITATION_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/mcp-elicitation-request.json");
+    const SERVER_REQUEST_RESOLVED_FIXTURE: &str = include_str!(
+        "../tests/fixtures/codex-app-server-v2/server-request-resolved-notification.json"
+    );
     const AUTO_APPROVAL_COMPLETED_FIXTURE: &str = include_str!(
         "../tests/fixtures/codex-app-server-v2/auto-approval-completed-notification.json"
     );
@@ -4062,6 +4908,259 @@ mod tests {
     }
 
     #[test]
+    fn approval_requests_are_routed_to_auto_review_by_default() {
+        let request: Value = serde_json::from_str(COMMAND_APPROVAL_REQUEST_FIXTURE).unwrap();
+        let params = request.get("params").unwrap();
+
+        assert_eq!(
+            classify_server_request_handling(
+                "item/commandExecution/requestApproval",
+                params,
+                CodingAgentApprovalsReviewer::AutoReview,
+            ),
+            ServerRequestHandling::AutoReview
+        );
+        assert_eq!(
+            classify_server_request_handling(
+                "item/commandExecution/requestApproval",
+                params,
+                CodingAgentApprovalsReviewer::User,
+            ),
+            ServerRequestHandling::UserDecision
+        );
+
+        let event = build_server_request_event(
+            request.get("id").unwrap().clone(),
+            "item/commandExecution/requestApproval".to_string(),
+            params.clone(),
+            ServerRequestHandling::AutoReview,
+            "2026-07-13T00:02:00Z".to_string(),
+            "2026-07-13T00:00:00Z".to_string(),
+        );
+        assert!(matches!(
+            event,
+            AgentEvent::ServerRequest {
+                kind,
+                status,
+                requires_user_input: false,
+                auto_review: true,
+                ..
+            } if kind == "command_approval" && status == "auto_reviewing"
+        ));
+    }
+
+    #[test]
+    fn server_request_fixtures_cover_approval_input_elicitation_and_resolution() {
+        for (fixture, method) in [
+            (
+                COMMAND_APPROVAL_REQUEST_FIXTURE,
+                "item/commandExecution/requestApproval",
+            ),
+            (
+                FILE_CHANGE_APPROVAL_REQUEST_FIXTURE,
+                "item/fileChange/requestApproval",
+            ),
+            (
+                PERMISSIONS_APPROVAL_REQUEST_FIXTURE,
+                "item/permissions/requestApproval",
+            ),
+            (
+                TOOL_USER_INPUT_REQUEST_FIXTURE,
+                "item/tool/requestUserInput",
+            ),
+            (
+                MCP_ELICITATION_REQUEST_FIXTURE,
+                "mcpServer/elicitation/request",
+            ),
+        ] {
+            let request: Value = serde_json::from_str(fixture).unwrap();
+            assert_eq!(request.get("method").and_then(Value::as_str), Some(method));
+            assert!(validate_request_id(request.get("id").unwrap()).is_ok());
+        }
+
+        let notification: Value = serde_json::from_str(SERVER_REQUEST_RESOLVED_FIXTURE).unwrap();
+        assert_eq!(
+            normalize_codex_notification_at(&notification, "2026-07-13T00:00:03Z"),
+            vec![AgentEvent::ServerRequestResolved {
+                request_id: json!(9002),
+                request_key: "number:9002".to_string(),
+                status: "resolved".to_string(),
+                resolution: Some("server".to_string()),
+                message: Some("Codex 已完成该请求的处理".to_string()),
+                created_at: "2026-07-13T00:00:03Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn typed_approval_responses_match_current_app_server_schema() {
+        let command = pending_request_from_fixture(
+            COMMAND_APPROVAL_REQUEST_FIXTURE,
+            ServerRequestHandling::UserDecision,
+        );
+        let accepted = build_server_request_response(
+            &command,
+            &test_resolution(command.request_id.clone(), "accept"),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.response.pointer("/result/decision"),
+            Some(&json!("accept"))
+        );
+        assert_eq!(accepted.log_payload, accepted.response);
+
+        let file = pending_request_from_fixture(
+            FILE_CHANGE_APPROVAL_REQUEST_FIXTURE,
+            ServerRequestHandling::UserDecision,
+        );
+        let accepted_for_session = build_server_request_response(
+            &file,
+            &test_resolution(file.request_id.clone(), "acceptForSession"),
+        )
+        .unwrap();
+        assert_eq!(
+            accepted_for_session.response.pointer("/result/decision"),
+            Some(&json!("acceptForSession"))
+        );
+    }
+
+    #[test]
+    fn permissions_response_grants_only_requested_profile_or_denies_with_empty_profile() {
+        let request = pending_request_from_fixture(
+            PERMISSIONS_APPROVAL_REQUEST_FIXTURE,
+            ServerRequestHandling::UserDecision,
+        );
+        let mut accept = test_resolution(request.request_id.clone(), "acceptForSession");
+        accept.scope = Some("session".to_string());
+        let granted = build_server_request_response(&request, &accept).unwrap();
+        assert_eq!(
+            granted.response.pointer("/result/scope"),
+            Some(&json!("session"))
+        );
+        assert_eq!(
+            granted
+                .response
+                .pointer("/result/permissions/network/enabled"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            granted
+                .response
+                .pointer("/result/permissions/fileSystem/write/0"),
+            Some(&json!("/tmp/voicecoder-demo/generated"))
+        );
+
+        let denied = build_server_request_response(
+            &request,
+            &test_resolution(request.request_id.clone(), "decline"),
+        )
+        .unwrap();
+        assert_eq!(
+            denied.response.pointer("/result/permissions"),
+            Some(&json!({}))
+        );
+        assert_eq!(
+            denied.response.pointer("/result/scope"),
+            Some(&json!("turn"))
+        );
+    }
+
+    #[test]
+    fn user_input_response_is_typed_redacted_and_auto_resolves_to_recommended_option() {
+        let request = pending_request_from_fixture(
+            TOOL_USER_INPUT_REQUEST_FIXTURE,
+            ServerRequestHandling::UserInput { auto_resolve: true },
+        );
+        let mut resolution = test_resolution(request.request_id.clone(), "submit");
+        resolution
+            .answers
+            .insert("theme".to_string(), vec!["深色".to_string()]);
+        let answered = build_server_request_response(&request, &resolution).unwrap();
+        assert_eq!(
+            answered.response.pointer("/result/answers/theme/answers/0"),
+            Some(&json!("深色"))
+        );
+        assert_eq!(
+            answered.log_payload.pointer("/result"),
+            Some(&json!("[REDACTED_USER_INPUT]"))
+        );
+
+        let timed_out = build_server_request_timeout_response(&request).unwrap();
+        assert_eq!(timed_out.status, "auto_resolved");
+        assert_eq!(
+            timed_out
+                .response
+                .pointer("/result/answers/theme/answers/0"),
+            Some(&json!("浅色"))
+        );
+    }
+
+    #[test]
+    fn mcp_elicitation_response_keeps_content_out_of_transport_log() {
+        let request = pending_request_from_fixture(
+            MCP_ELICITATION_REQUEST_FIXTURE,
+            ServerRequestHandling::McpElicitation,
+        );
+        let mut resolution = test_resolution(request.request_id.clone(), "accept");
+        resolution.content = Some(json!({ "environment": "staging" }));
+        let accepted = build_server_request_response(&request, &resolution).unwrap();
+        assert_eq!(
+            accepted.response.pointer("/result/action"),
+            Some(&json!("accept"))
+        );
+        assert_eq!(
+            accepted.response.pointer("/result/content/environment"),
+            Some(&json!("staging"))
+        );
+        assert_eq!(
+            accepted.log_payload.pointer("/result"),
+            Some(&json!("[REDACTED_USER_INPUT]"))
+        );
+    }
+
+    #[test]
+    fn request_registry_routes_resolutions_and_removes_finished_runs() {
+        let state = CodingAgentRequestState::default();
+        let receiver = state.register("run-request-test").unwrap();
+        state
+            .resolve("run-request-test", test_resolution(json!(42), "decline"))
+            .unwrap();
+        assert_eq!(receiver.recv().unwrap().request_id, json!(42));
+        state.unregister("run-request-test");
+        assert!(state
+            .resolve("run-request-test", test_resolution(json!(42), "decline"),)
+            .is_err());
+    }
+
+    fn pending_request_from_fixture(
+        fixture: &str,
+        handling: ServerRequestHandling,
+    ) -> PendingServerRequest {
+        let request: Value = serde_json::from_str(fixture).unwrap();
+        PendingServerRequest {
+            request_id: request.get("id").unwrap().clone(),
+            method: request
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
+            params: request.get("params").unwrap().clone(),
+            handling,
+            deadline: Instant::now() + Duration::from_secs(60),
+        }
+    }
+
+    fn test_resolution(request_id: Value, action: &str) -> ServerRequestResolution {
+        ServerRequestResolution {
+            request_id,
+            action: action.to_string(),
+            answers: BTreeMap::new(),
+            content: None,
+            scope: None,
+        }
+    }
+
+    #[test]
     fn transport_log_records_jsonl_and_sanitizes_run_id() {
         let root = std::env::temp_dir().join(format!(
             "voicecoder-transport-log-{}-{}",
@@ -4122,7 +5221,7 @@ mod tests {
             sandbox: Some(CodingAgentSandboxMode::ReadOnly),
         };
         let result = (|| -> Result<(), String> {
-            let mut session = start_codex_app_server_session(context, "smoke")?;
+            let mut session = start_codex_app_server_session(context, "smoke", None)?;
             let deadline = Instant::now() + Duration::from_secs(120);
 
             loop {
