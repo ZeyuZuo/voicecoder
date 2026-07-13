@@ -10,6 +10,7 @@ import {
   getCompletedFileChangePaths,
   isAgentTimelineNearBottom,
   parseAgentFileChanges,
+  parseUnifiedDiffFileStats,
   parseUnifiedDiffStats
 } from "./agentProgress";
 import type { AgentRun } from "../types/app";
@@ -73,6 +74,51 @@ test("parses aggregate unified diff without counting file headers", () => {
     additions: 2,
     deletions: 2,
     files: 2
+  });
+});
+
+test("counts raw file bodies for added and deleted fileChange items", () => {
+  const changes = parseAgentFileChanges({
+    changes: [
+      {
+        path: "/tmp/demo/src/new.ts",
+        kind: { type: "add" },
+        diff: "const one = 1;\nconst two = 2;\n"
+      },
+      {
+        path: "/tmp/demo/src/old.ts",
+        kind: { type: "delete" },
+        diff: "old line one\nold line two\n"
+      }
+    ]
+  }, "file-item-raw");
+
+  assert.deepEqual(changes.map(({ additions, deletions }) => ({ additions, deletions })), [
+    { additions: 2, deletions: 0 },
+    { additions: 0, deletions: 2 }
+  ]);
+});
+
+test("parses per-file stats from the authoritative turn diff", () => {
+  const stats = parseUnifiedDiffFileStats([
+    "diff --git a/src/new.ts b/src/new.ts",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/src/new.ts",
+    "@@ -0,0 +1,2 @@",
+    "+one",
+    "+two",
+    "diff --git a/src/App.tsx b/src/App.tsx",
+    "--- a/src/App.tsx",
+    "+++ b/src/App.tsx",
+    "@@ -1 +1 @@",
+    "-old",
+    "+new"
+  ].join("\n"));
+
+  assert.deepEqual(stats, {
+    "src/new.ts": { additions: 2, deletions: 0, kind: "add" },
+    "src/App.tsx": { additions: 1, deletions: 1 }
   });
 });
 

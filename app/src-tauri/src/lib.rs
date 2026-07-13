@@ -202,7 +202,6 @@ pub fn run() {
             read_git_branch,
             save_requirement_document,
             demo_session_log::save_demo_session_log,
-            demo_session_log::load_latest_demo_session_log,
             dev_server::get_dev_server_snapshot,
             dev_server::get_dev_server_diagnostic,
             dev_server::start_demo_dev_server,

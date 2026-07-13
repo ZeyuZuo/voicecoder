@@ -62,7 +62,7 @@ export function parseAgentFileChanges(data: Record<string, unknown>, itemId: str
     const kind = normalizeFileChangeKind(readString(kindRecord?.type) ?? readString(record.kind));
     const movePath = readString(kindRecord?.move_path) ?? readString(kindRecord?.movePath);
     const diff = readString(record.diff) ?? "";
-    const stats = countUnifiedDiffLines(diff);
+    const stats = countFileChangeDiffLines(diff, kind);
 
     return [{
       itemId,
@@ -130,6 +130,63 @@ export function parseUnifiedDiffStats(diff: string): AgentDiffStats {
   };
 }
 
+export function parseUnifiedDiffFileStats(diff: string) {
+  const statsByPath: Record<string, {
+    additions: number;
+    deletions: number;
+    kind?: AgentFileChangeKind;
+  }> = {};
+  let currentPath: string | undefined;
+  let oldPath: string | undefined;
+
+  const selectPath = (path: string | undefined) => {
+    if (!path || path === "/dev/null") {
+      return;
+    }
+    currentPath = path;
+    statsByPath[currentPath] ??= { additions: 0, deletions: 0 };
+  };
+
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      currentPath = undefined;
+      oldPath = match?.[1];
+      selectPath(match?.[2]);
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      oldPath = normalizeDiffPath(line.slice(4));
+      if (oldPath === "/dev/null" && currentPath) {
+        statsByPath[currentPath].kind = "add";
+      }
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const newPath = normalizeDiffPath(line.slice(4));
+      selectPath(newPath === "/dev/null" ? oldPath : newPath);
+      if (currentPath) {
+        if (newPath === "/dev/null") {
+          statsByPath[currentPath].kind = "delete";
+        } else if (oldPath === "/dev/null") {
+          statsByPath[currentPath].kind = "add";
+        }
+      }
+      continue;
+    }
+    if (!currentPath) {
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      statsByPath[currentPath].additions += 1;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      statsByPath[currentPath].deletions += 1;
+    }
+  }
+
+  return statsByPath;
+}
+
 export function countUnifiedDiffLines(diff: string) {
   let additions = 0;
   let deletions = 0;
@@ -143,6 +200,37 @@ export function countUnifiedDiffLines(diff: string) {
   }
 
   return { additions, deletions };
+}
+
+function countFileChangeDiffLines(diff: string, kind: AgentFileChangeKind) {
+  if (looksLikeUnifiedDiff(diff)) {
+    return countUnifiedDiffLines(diff);
+  }
+
+  const lineCount = countTextLines(diff);
+  if (kind === "add") {
+    return { additions: lineCount, deletions: 0 };
+  }
+  if (kind === "delete") {
+    return { additions: 0, deletions: lineCount };
+  }
+  return { additions: 0, deletions: 0 };
+}
+
+function looksLikeUnifiedDiff(diff: string) {
+  return /^(?:diff --git |@@ )/m.test(diff)
+    || (/^--- /m.test(diff) && /^\+\+\+ /m.test(diff));
+}
+
+function countTextLines(text: string) {
+  if (!text) {
+    return 0;
+  }
+  const lines = text.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.length;
 }
 
 export function getCompletedFileChangePaths(itemType: string, item: Record<string, unknown>) {

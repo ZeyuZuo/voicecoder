@@ -1,14 +1,15 @@
-//! Atomic, redacted DemoSession snapshots and latest-session recovery.
+//! Atomic, redacted DemoSession snapshots for local audit logs.
 
 use crate::log_sanitizer::sanitize_json_for_log;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(test)]
+use std::time::SystemTime;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    time::SystemTime,
 };
 
 const DEMO_SESSION_LOG_SCHEMA_VERSION: u64 = 2;
@@ -28,9 +29,10 @@ pub(crate) struct SavedDemoSessionLog {
     path: String,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct LoadedDemoSessionLog {
+struct TestDemoSessionLog {
     schema_version: u64,
     saved_at: String,
     path: String,
@@ -81,10 +83,10 @@ pub(crate) fn save_demo_session_log(
     })
 }
 
-#[tauri::command]
-pub(crate) fn load_latest_demo_session_log(
+#[cfg(test)]
+fn read_latest_demo_session_log_for_test(
     project_path: String,
-) -> Result<Option<LoadedDemoSessionLog>, String> {
+) -> Result<Option<TestDemoSessionLog>, String> {
     let project_root = validated_project_root(&project_path)?;
     let voicecoder_dir = project_root.join(".voicecoder");
     if !voicecoder_dir.is_dir() {
@@ -124,7 +126,7 @@ pub(crate) fn load_latest_demo_session_log(
         };
         restrict_log_permissions(&path)?;
 
-        return Ok(Some(LoadedDemoSessionLog {
+        return Ok(Some(TestDemoSessionLog {
             schema_version: payload
                 .get("schemaVersion")
                 .and_then(Value::as_u64)
@@ -260,7 +262,7 @@ mod tests {
             demo_session: session,
         })
         .unwrap();
-        let loaded = load_latest_demo_session_log(display_path(&root))
+        let loaded = read_latest_demo_session_log_for_test(display_path(&root))
             .unwrap()
             .unwrap();
         let content = fs::read_to_string(&saved.path).unwrap();
@@ -311,7 +313,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = load_latest_demo_session_log(display_path(&root))
+        let loaded = read_latest_demo_session_log_for_test(display_path(&root))
             .unwrap()
             .unwrap();
 
@@ -336,7 +338,7 @@ mod tests {
 
         save("2026-07-13T10:00:02Z", "succeeded");
         save("2026-07-13T10:00:01Z", "running");
-        let loaded = load_latest_demo_session_log(display_path(&root))
+        let loaded = read_latest_demo_session_log_for_test(display_path(&root))
             .unwrap()
             .unwrap();
 

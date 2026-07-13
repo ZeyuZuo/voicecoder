@@ -14,10 +14,18 @@ function assertDoesNotMatch(actual: string, pattern: RegExp) {
 }
 
 function getUniqueArticleContaining(html: string, text: string) {
-  const matches = (html.match(/<article\b[\s\S]*?<\/article>/g) ?? [])
+  const matches = getArticles(html)
     .filter((article) => article.includes(text));
   assert.equal(matches.length, 1, `Expected one article containing ${JSON.stringify(text)}`);
   return matches[0];
+}
+
+function getArticles(html: string) {
+  return html.match(/<article\b[\s\S]*?<\/article>/g) ?? [];
+}
+
+function getDomainArticles(html: string) {
+  return getArticles(html).filter((article) => !article.includes("agent-working-card"));
 }
 
 function createRunningTestSession(runId: string): DemoSession {
@@ -66,17 +74,6 @@ function completedItemEvent(
     createdAt
   };
 }
-
-test("labels a timeline restored from the local DemoSession log", () => {
-  const session = {
-    ...createRunningTestSession("run-recovered"),
-    recoveredAt: "2026-07-13T01:01:00Z"
-  };
-
-  const html = renderToStaticMarkup(<DemoProgressPanel session={session} />);
-
-  assertMatches(html, /已恢复本地时间线/);
-});
 
 test("renders live file stats and completed command metadata from Agent items", () => {
   const session = createDemoSession({
@@ -187,6 +184,42 @@ test("renders live file stats and completed command metadata from Agent items", 
   assert.ok(/命令未获批准/.test(html));
 });
 
+test("uses the authoritative turn diff for per-file stats", () => {
+  const running = createRunningTestSession("run-file-stats");
+  const updated = appendTestEvents(running, "run-file-stats", [
+    completedItemEvent(1, "fileChange", {
+      id: "file-added",
+      type: "fileChange",
+      status: "completed",
+      changes: [{
+        path: "/tmp/demo/src/new.ts",
+        kind: { type: "update" },
+        diff: "@@ -1 +1 @@\n-old\n+const two = 2;\n"
+      }]
+    }),
+    {
+      type: "turn_diff_updated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      diff: [
+        "diff --git a/src/new.ts b/src/new.ts",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/src/new.ts",
+        "@@ -0,0 +1,2 @@",
+        "+const one = 1;",
+        "+const two = 2;"
+      ].join("\n"),
+      createdAt: "2026-07-13T01:00:02Z"
+    }
+  ]);
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
+
+  assertMatches(html, /src\/new\.ts[\s\S]*\+2[\s\S]*-0/);
+  assertMatches(html, /新增[\s\S]*src\/new\.ts/);
+});
+
 test("renders file and command cards as soon as items start", () => {
   const session = createDemoSession({
     projectPath: "/tmp/demo",
@@ -266,11 +299,27 @@ test("renders a continuous structured timeline with aggregated files and actiona
   });
   const events = [
     ...Array.from({ length: 7 }, (_, index) => ({
-      type: "diagnostic" as const,
-      level: "info",
-      message: `时间线事件 ${index + 1}`,
+      type: "command" as const,
+      command: `时间线事件 ${index + 1}`,
+      status: "completed",
       createdAt: `2026-07-13T00:00:0${index + 1}Z`
     })),
+    {
+      type: "thread_started" as const,
+      threadId: "thread-internal",
+      createdAt: "2026-07-13T00:00:07Z"
+    },
+    {
+      type: "turn_started" as const,
+      turnId: "turn-internal",
+      createdAt: "2026-07-13T00:00:07Z"
+    },
+    {
+      type: "diagnostic" as const,
+      level: "warning",
+      message: "内部协议版本提醒",
+      createdAt: "2026-07-13T00:00:07Z"
+    },
     {
       type: "plan_updated" as const,
       threadId: "thread-1",
@@ -420,6 +469,11 @@ test("renders a continuous structured timeline with aggregated files and actiona
   assertMatches(html, /网络较慢，但运行仍在继续/);
   assertMatches(html, /运行失败/);
   assertMatches(html, /构建进程已经终止/);
+  assertDoesNotMatch(html, /thread-internal/);
+  assertDoesNotMatch(html, /turn-internal/);
+  assertDoesNotMatch(html, /内部协议版本提醒/);
+  assert.ok(html.lastIndexOf("执行计划") > html.lastIndexOf("构建进程已经终止"));
+  assertMatches(html, /<\/section><article class="agent-timeline-card agent-plan-card">/);
   assertMatches(html, /1 个文件/);
   assertMatches(html, /\+2/);
   assertMatches(html, /-1/);
@@ -445,9 +499,9 @@ test("keeps the full timeline visible after the preview becomes ready", () => {
     runId: "run-complete",
     now: "2026-07-13T00:00:08Z",
     events: Array.from({ length: 8 }, (_, index) => ({
-      type: "diagnostic" as const,
-      level: "info",
-      message: `保留事件 ${index + 1}`,
+      type: "command" as const,
+      command: `保留事件 ${index + 1}`,
+      status: "completed",
       createdAt: `2026-07-13T00:00:0${index + 1}Z`
     }))
   });
@@ -490,10 +544,21 @@ test("shows a waiting hint when an active run has no progress beyond the thresho
     now: startedAt
   });
 
-  const html = renderToStaticMarkup(<DemoProgressPanel session={running} compact />);
+  const withPlan = appendTestEvents(running, "run-waiting", [{
+    type: "plan_updated",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    plan: [{ step: "生成页面代码", status: "inProgress" }],
+    createdAt: startedAt
+  }]);
+  const html = renderToStaticMarkup(<DemoProgressPanel session={withPlan} compact />);
 
-  assertMatches(html, /最后进展于 \d+ 秒前/);
-  assertMatches(html, /仍在等待 Codex/);
+  assertMatches(html, /Working\.\.\./);
+  assertDoesNotMatch(html, /正在执行：生成页面代码/);
+  assertDoesNotMatch(html, /暂无新的 Codex 事件/);
+  assertDoesNotMatch(html, /仍在等待 Codex/);
+  assertDoesNotMatch(html.slice(0, html.indexOf('role="log"')), /Working\.\.\./);
+  assertMatches(html, /Working\.\.\.[\s\S]*<\/section><article class="agent-timeline-card agent-plan-card">/);
 });
 
 test("renders every ThreadItem family once as a bounded domain card", () => {
@@ -679,9 +744,9 @@ test("renders every ThreadItem family once as a bounded domain card", () => {
 
   const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
 
-  assert.equal((html.match(/<article\b/g) ?? []).length, 19);
+  assert.equal(getDomainArticles(html).length, 18);
   assert.equal((html.match(/长对话上下文整理完成/g) ?? []).length, 1);
-  assertMatches(html, /用户输入已提交/);
+  assertDoesNotMatch(html, /用户输入已提交/);
   assertMatches(html, /Hook 已补充上下文/);
   assertMatches(html, /Codex 过程说明/);
   assertMatches(html, /分析完成/);
@@ -888,7 +953,7 @@ test("aggregates routine hooks while keeping failed hooks prominent", () => {
 
   const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
 
-  assert.equal((html.match(/<article\b/g) ?? []).length, 2);
+  assert.equal(getDomainArticles(html).length, 2);
   assertMatches(getUniqueArticleContaining(html, "Hooks · 80 次"), /工具调用前 × 80/);
   assertMatches(getUniqueArticleContaining(html, "Hook · 工具调用后"), /format hook failed/);
 });

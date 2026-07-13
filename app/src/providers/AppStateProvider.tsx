@@ -5,7 +5,7 @@ import type { BrowserPreviewState, Conversation, Project, WorkspaceMode, Workspa
 import { registerBrowserDirectory } from "../utils/browserFileSystem";
 import { createId, getProjectName } from "../utils/project";
 
-type PersistedState = {
+type AppState = {
   projects: Project[];
   conversations: Conversation[];
   currentProjectId?: string;
@@ -40,57 +40,18 @@ type AppStateContextValue = {
   setPrompt: (value: string) => void;
 };
 
-const STORAGE_KEY = "voicecoder.phase1.state";
-
-const initialConversations: Conversation[] = [];
-
-const initialProjects: Project[] = [];
-
-function loadState(): PersistedState {
-  if (typeof window === "undefined") {
-    return {
-      projects: initialProjects,
-      conversations: initialConversations,
-      currentProjectId: undefined
-    };
-  }
-
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return {
-        projects: initialProjects,
-        conversations: initialConversations,
-        currentProjectId: undefined
-      };
-    }
-
-    const parsed = JSON.parse(raw) as PersistedState;
-    const projects = parsed.projects ?? [];
-    const currentProjectExists = projects.some((project) => project.id === parsed.currentProjectId);
-
-    return {
-      projects,
-      conversations: parsed.conversations ?? [],
-      currentProjectId: currentProjectExists ? parsed.currentProjectId : undefined
-    };
-  } catch {
-    return {
-      projects: initialProjects,
-      conversations: initialConversations,
-      currentProjectId: undefined
-    };
-  }
-}
-
-function persist(state: PersistedState) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+function createInitialState(): AppState {
+  return {
+    projects: [],
+    conversations: [],
+    currentProjectId: undefined
+  };
 }
 
 const AppStateContext = createContext<AppStateContextValue | null>(null);
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<PersistedState>(() => loadState());
+  const [state, setState] = useState<AppState>(createInitialState);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("launcher");
   const [workspaceTabs, setWorkspaceTabs] = useState<WorkspaceTab[]>([]);
   const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState<string | undefined>();
@@ -106,9 +67,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     [state.currentProjectId, state.projects]
   );
 
-  const updateState = (nextState: PersistedState) => {
+  const updateState = (nextState: AppState) => {
     setState(nextState);
-    persist(nextState);
   };
 
   const addProject = ({ name, path }: { name: string; path: string }) => {

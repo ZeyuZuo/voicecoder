@@ -33,10 +33,6 @@ import {
   parseUnifiedDiffStats
 } from "./agentProgress";
 import { createId } from "./project";
-import {
-  recoverPersistedDemoSessionSnapshot,
-  usePersistedDemoSessionRecovery
-} from "./demoSessionRecovery";
 
 const DEV_SERVER_START_TIMEOUT_MS = 45_000;
 const AGENT_STRUCTURED_PREVIEW_LIMIT = 4_000;
@@ -148,10 +144,6 @@ export type DemoSessionStoreAction =
       type: "create_demo_session";
       input: CreateDemoSessionInput;
     }
-  | {
-      type: "restore_demo_session";
-      session: DemoSession;
-    }
   | DemoSessionAction;
 
 export type DemoSessionController = {
@@ -240,10 +232,6 @@ export function demoSessionStoreReducer(
   session: DemoSession | undefined,
   action: DemoSessionStoreAction
 ): DemoSession | undefined {
-  if (action.type === "restore_demo_session") {
-    return action.session;
-  }
-
   if (action.type === "create_demo_session") {
     if (
       session &&
@@ -261,14 +249,6 @@ export function demoSessionStoreReducer(
   }
 
   return demoSessionReducer(session, action);
-}
-
-export function recoverDemoSessionSnapshot(
-  snapshot: unknown,
-  activeRunIds: ReadonlySet<string>,
-  now: string
-): DemoSession | undefined {
-  return recoverPersistedDemoSessionSnapshot(snapshot, activeRunIds, now, applyAgentEvent);
 }
 
 export function demoSessionReducer(session: DemoSession, action: DemoSessionAction): DemoSession {
@@ -533,7 +513,6 @@ export function useDemoSession(
   options: UseDemoSessionOptions = {}
 ): DemoSessionController {
   const [session, dispatch] = useReducer(demoSessionStoreReducer, undefined);
-  const recoveryReady = usePersistedDemoSessionRecovery(projectPath, dispatch, applyAgentEvent);
   const onPreviewReadyRef = useRef(options.onPreviewReady);
   const onPreviewStoppedRef = useRef(options.onPreviewStopped);
   const devServerTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>();
@@ -554,7 +533,6 @@ export function useDemoSession(
 
   useEffect(() => {
     if (
-      !recoveryReady ||
       !projectPath ||
       requirementState?.status !== "confirmed" ||
       !requirementState.requirementDocument.trim()
@@ -572,7 +550,7 @@ export function useDemoSession(
         now: nowString()
       }
     });
-  }, [projectPath, recoveryReady, requirementState]);
+  }, [projectPath, requirementState]);
 
   useEffect(() => {
     if (!isTauri() || !session) {
@@ -1222,7 +1200,9 @@ function appendRetainedAgentEvent(events: AgentEvent[], event: AgentEvent) {
 
 function shouldRetainAgentEvent(event: AgentEvent) {
   if (
-    (event.type === "diagnostic" && event.level === "debug") ||
+    (event.type === "diagnostic" && event.level !== "error") ||
+    event.type === "thread_started" ||
+    event.type === "turn_started" ||
     event.type === "turn_diff_updated" ||
     event.type === "item_delta" ||
     event.type === "hook_run_updated" ||

@@ -328,9 +328,9 @@ AgentRun
 - 自动审查拒绝不会表现为卡死。
 - 任何不能自动处理的 server request 都有明确 UI 和超时结果。
 
-## Milestone 7：日志、恢复和协议兼容
+## Milestone 7：日志和协议兼容
 
-目标：出现版本变化、崩溃或页面刷新时仍可排查和恢复。
+目标：出现版本变化、崩溃或页面刷新时仍可通过日志排查，同时每次启动保持全新页面。
 
 完成日期：2026-07-13
 
@@ -338,7 +338,7 @@ AgentRun
 - [x] 7.2 保存 app-server stderr、Codex 版本、启动参数和退出信息。
 - [x] 7.3 原始日志进行敏感字段过滤，不写入 token 或凭证。
 - [x] 7.4 DemoSession 日志保存结构化 Item 状态，而不只保存扁平事件。
-- [x] 7.5 应用刷新后可以加载最近一次 DemoSession 时间线。
+- [x] 7.5 DemoSession 快照仅作为本地审计日志，应用启动和刷新时不读取或恢复。
 - [x] 7.6 保存 codexThreadId，并为后续 `thread/resume` 做准备。
 - [x] 7.7 启动时比较当前 CLI 版本和上次验收版本，版本变化时给出提示。
 - [x] 7.8 在 CI 或开发检查中验证使用到的字段仍存在于生成 schema。
@@ -348,8 +348,8 @@ AgentRun
 
 - app-server 与 `exec --json` 后备路径都按 AgentRun 写独立 JSONL；日志包含 transport、Codex 版本、协议基线、sandbox、审批策略、脱敏后的启动参数、stderr 和结构化退出原因。
 - 所有 JSONL 和 DemoSession 快照在写盘前经过同一套递归字段/文本脱敏；Unix 文件权限固定为 `0600`。用户输入、token、API key、Authorization、Cookie、密码、私钥和常见内联凭证不会原样落盘。
-- DemoSession 使用 schema v2 原子快照，保存 `itemsById`、`itemOrder`、文件、计划、warning/error、runtime 和 `codexThreadId`；并阻止旧的异步保存覆盖较新状态。加载时跳过损坏快照，恢复最近一个有效时间线。
-- 页面刷新时先查询 Rust 侧 AgentRun 是否仍活动：活动 Run 保持订阅，已退出的 Run 明确收敛为失败并取消未决请求；恢复后的页面显示“已恢复本地时间线”。旧版只有扁平事件的快照会重放为结构化 Item。
+- DemoSession 使用 schema v2 原子快照，保存 `itemsById`、`itemOrder`、文件、计划、warning/error、runtime 和 `codexThreadId`；并阻止旧的异步保存覆盖较新状态。这些快照只用于离线排查，不参与应用状态初始化。
+- 页面启动和刷新时不读取项目、对话或 DemoSession 历史状态；React 状态始终从空项目、空对话和空工作区开始。
 - 本里程碑只保存并校验 `thread/resume` 所需的 thread id、cwd、sandbox 和审批字段，不自动继续旧 thread；真正发起后续 turn 时再启用 resume，避免刷新自动触发写操作。
 - 当前运行版本与 `codex-cli 0.144.1` 基线不一致时，provider diagnostic 和时间线给出兼容警告；未知消息继续写入受限协议日志并降级为 diagnostic，不终止 AgentRun。
 - `npm run check` 已接入生成 schema 守卫：校验版本 manifest、thread start/resume、turn、Item/delta、完成通知和五类主动请求字段，并检查协议 fixture 没有使用 schema 中不存在的参数。
@@ -357,7 +357,7 @@ AgentRun
 验证基线：
 
 - 前端类型检查、schema 兼容检查、生产构建与 78 个单元/SSR 测试通过。
-- Rust `cargo check` 与 141 个非 ignored 测试通过；2 个依赖真实账号/服务的 smoke 测试保持 ignored。
+- Rust `cargo check` 与 145 个非 ignored 测试通过；3 个依赖真实账号/服务的 smoke 测试保持 ignored。
 - 真实 `codex-cli 0.144.1` app-server 只读 transport smoke test 单独启用后通过，全程未触发人工审批。
 
 退出标准：
@@ -401,7 +401,7 @@ AgentRun
 - [ ] 8.15 触发一次自动审批批准和一次自动审批拒绝。
 - [ ] 8.16 模拟可重试网络错误和最终失败。
 - [ ] 8.17 模拟未知 notification，确认主流程继续运行。
-- [ ] 8.18 运行期间刷新页面，确认可以恢复时间线。
+- [ ] 8.18 运行期间刷新页面，确认回到全新页面且不恢复时间线。
 - [ ] 8.19 Agent 完成后自动启动 dev server 并打开 preview。
 
 最终验收标准：

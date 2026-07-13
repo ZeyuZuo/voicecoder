@@ -51,7 +51,8 @@ import {
   getAgentLatestProgressAt,
   getAgentOutputPreview,
   getAgentProgressAgeMs,
-  isAgentTimelineNearBottom
+  isAgentTimelineNearBottom,
+  parseUnifiedDiffFileStats
 } from "../utils/agentProgress";
 
 type DemoProgressPanelProps = {
@@ -73,12 +74,6 @@ type AgentTimelineEntry =
       id: string;
       occurredAt: string;
       items: AgentItem[];
-    }
-  | {
-      kind: "plan";
-      id: string;
-      occurredAt: string;
-      plan: AgentPlan;
     }
   | {
       kind: "warning";
@@ -138,7 +133,14 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
     () => latestRun ? getAgentProgressVersion(latestRun, latestProgressAt) : "idle",
     [latestRun, latestProgressAt]
   );
-  const timeline = useAgentTimelineAutoScroll(latestRun?.id, progressVersion);
+  const progressAgeMs = getAgentProgressAgeMs(latestProgressAt, nowMs);
+  const waitingForCodex = Boolean(
+    latestRun &&
+    !isTerminalAgentRun(latestRun) &&
+    progressAgeMs !== undefined &&
+    progressAgeMs >= AGENT_WAITING_THRESHOLD_MS
+  );
+  const timeline = useAgentTimelineAutoScroll(latestRun?.id, `${progressVersion}:${waitingForCodex}`);
 
   if (!latestRun) {
     return (
@@ -180,52 +182,47 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
   const durationMs = latestRun.startedAt
     ? getAgentItemDurationMs(latestRun.startedAt, latestRun.completedAt, undefined, nowMs)
     : undefined;
-  const progressAgeMs = getAgentProgressAgeMs(latestProgressAt, nowMs);
-  const waitingForCodex = runActive && progressAgeMs !== undefined && progressAgeMs >= AGENT_WAITING_THRESHOLD_MS;
-
   return (
-    <section className={`agent-progress-panel is-${latestRun.status} ${compact ? "is-compact" : ""}`}>
-      <div className="agent-progress-header">
-        <div className="agent-progress-title">
-          <span>{getAgentRunKindLabel(latestRun.kind)}</span>
-          <strong>{getAgentRunStatusLabel(latestRun.status)}</strong>
-          {durationMs !== undefined ? <small>耗时 {formatDuration(durationMs)}</small> : null}
-          {session.recoveredAt ? <small>已恢复本地时间线</small> : null}
+    <>
+      <section className={`agent-progress-panel is-${latestRun.status} ${compact ? "is-compact" : ""}`}>
+        <div className="agent-progress-header">
+          <div className="agent-progress-title">
+            <span>{getAgentRunKindLabel(latestRun.kind)}</span>
+            <strong>{getAgentRunStatusLabel(latestRun.status)}</strong>
+            {durationMs !== undefined ? <small>耗时 {formatDuration(durationMs)}</small> : null}
+          </div>
+          <div className="agent-progress-stats" aria-label="文件变更统计">
+            <span>{changedCount} 个文件</span>
+            <span className="agent-diff-additions">+{diffStats.additions}</span>
+            <span className="agent-diff-deletions">-{diffStats.deletions}</span>
+          </div>
         </div>
-        <div className="agent-progress-stats" aria-label="文件变更统计">
-          <span>{changedCount} 个文件</span>
-          <span className="agent-diff-additions">+{diffStats.additions}</span>
-          <span className="agent-diff-deletions">-{diffStats.deletions}</span>
+
+        <div className="agent-progress-freshness">
+          <Clock size={13} />
+          <span>{formatLatestProgress(progressAgeMs)}</span>
+          {latestRun.tokenUsage ? (
+            <span className="agent-token-usage">
+              Token 本轮 {formatCompactNumber(latestRun.tokenUsage.last.totalTokens)}
+              <span> · 累计 {formatCompactNumber(latestRun.tokenUsage.total.totalTokens)}</span>
+              {latestRun.tokenUsage.modelContextWindow
+                ? <span> · 窗口 {formatCompactNumber(latestRun.tokenUsage.modelContextWindow)}</span>
+                : null}
+            </span>
+          ) : null}
         </div>
-      </div>
 
-      <div className={`agent-progress-freshness ${waitingForCodex ? "is-waiting" : ""}`}>
-        <Clock size={13} />
-        <span>{formatLatestProgress(progressAgeMs)}</span>
-        {waitingForCodex ? <strong>仍在等待 Codex</strong> : null}
-        {latestRun.tokenUsage ? (
-          <span className="agent-token-usage">
-            Token 本轮 {formatCompactNumber(latestRun.tokenUsage.last.totalTokens)}
-            <span> · 累计 {formatCompactNumber(latestRun.tokenUsage.total.totalTokens)}</span>
-            {latestRun.tokenUsage.modelContextWindow
-              ? <span> · 窗口 {formatCompactNumber(latestRun.tokenUsage.modelContextWindow)}</span>
-              : null}
-          </span>
-        ) : null}
-      </div>
-
-      <div className="agent-progress-timeline-shell">
-        <div
-          className="agent-progress-timeline"
-          ref={timeline.ref}
-          onScroll={timeline.onScroll}
-          role="log"
-          aria-label="Codex 生成时间线"
-          aria-live="polite"
-          aria-relevant="additions text"
-        >
-          {timelineEntries.length ? (
-            timelineEntries.map((entry) => (
+        <div className="agent-progress-timeline-shell">
+          <div
+            className="agent-progress-timeline"
+            ref={timeline.ref}
+            onScroll={timeline.onScroll}
+            role="log"
+            aria-label="Codex 生成时间线"
+            aria-live="polite"
+            aria-relevant="additions text"
+          >
+            {timelineEntries.map((entry) => (
               <AgentTimelineEntryView
                 entry={entry}
                 run={latestRun}
@@ -233,21 +230,36 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
                 projectPath={session.projectPath}
                 key={entry.id}
               />
-            ))
-          ) : (
-            <div className="agent-progress-event is-waiting">
-              <Bot size={15} />
-              <p>正在启动 Codex thread</p>
-            </div>
-          )}
+            ))}
+            {waitingForCodex ? (
+              <AgentWorkingCard />
+            ) : !timelineEntries.length ? (
+              <div className="agent-progress-event is-waiting">
+                <Bot size={15} />
+                <p>正在连接 Codex</p>
+              </div>
+            ) : null}
+          </div>
+          {!timeline.autoFollow ? (
+            <button className="agent-timeline-follow" type="button" onClick={timeline.scrollToLatest}>
+              回到最新进展
+            </button>
+          ) : null}
         </div>
-        {!timeline.autoFollow ? (
-          <button className="agent-timeline-follow" type="button" onClick={timeline.scrollToLatest}>
-            回到最新进展
-          </button>
-        ) : null}
-      </div>
-    </section>
+      </section>
+      {latestRun.currentPlan ? (
+        <AgentPlanCard plan={latestRun.currentPlan} occurredAt={latestRun.currentPlan.updatedAt} />
+      ) : null}
+    </>
+  );
+}
+
+function AgentWorkingCard() {
+  return (
+    <article className="agent-timeline-card agent-working-card" role="status">
+      <LoaderCircle className="agent-spin" size={15} />
+      <strong>Working...</strong>
+    </article>
   );
 }
 
@@ -262,9 +274,6 @@ function AgentTimelineEntryView({
   nowMs: number;
   projectPath: string;
 }) {
-  if (entry.kind === "plan") {
-    return <AgentPlanCard plan={entry.plan} occurredAt={entry.occurredAt} />;
-  }
   if (entry.kind === "files") {
     return (
       <FileChangesCard
@@ -692,6 +701,7 @@ function FileChangesCard({
   const changes = Object.values(run.filesByPath ?? {});
   const status = getAggregateFileChangeStatus(items, run);
   const currentDiff = run.aggregateDiff || buildFileChangeDiff(changes, projectPath);
+  const aggregateStatsByPath = parseUnifiedDiffFileStats(run.aggregateDiff);
   const fallbackStats = changes.reduce(
     (stats, change) => ({
       additions: stats.additions + change.additions,
@@ -712,16 +722,20 @@ function FileChangesCard({
       </header>
       {changes.length ? (
         <ul className="agent-file-change-list">
-          {changes.map((change) => (
-            <li key={`${change.path}-${change.movePath ?? ""}`}>
-              <span className={`agent-file-kind is-${change.kind}`}>{getFileChangeKindLabel(change.kind)}</span>
-              <code>{formatFileChangePath(change, projectPath)}</code>
-              <span className="agent-file-stats">
-                <span className="agent-diff-additions">+{change.additions}</span>
-                <span className="agent-diff-deletions">-{change.deletions}</span>
-              </span>
-            </li>
-          ))}
+          {changes.map((change) => {
+            const stats = getFileDisplayStats(change, projectPath, aggregateStatsByPath);
+            const kind = stats.kind ?? change.kind;
+            return (
+              <li key={`${change.path}-${change.movePath ?? ""}`}>
+                <span className={`agent-file-kind is-${kind}`}>{getFileChangeKindLabel(kind)}</span>
+                <code>{formatFileChangePath(change, projectPath)}</code>
+                <span className="agent-file-stats">
+                  <span className="agent-diff-additions">+{stats.additions}</span>
+                  <span className="agent-diff-deletions">-{stats.deletions}</span>
+                </span>
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <p className="agent-work-placeholder">Codex 正在准备文件修改…</p>
@@ -1446,8 +1460,19 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
 
   for (const item of orderedItems) {
     representedItemIds.add(item.id);
+    if (item.type === "userMessage") {
+      continue;
+    }
     if (item.type === "fileChange") {
       fileItems.push(item);
+      continue;
+    }
+    if (
+      item.presentation?.kind === "reasoning" &&
+      item.lifecycle === "completed" &&
+      !item.presentation.summary &&
+      !item.presentation.rawTextAvailable
+    ) {
       continue;
     }
     if (item.type === "plan" && run.currentPlan) {
@@ -1472,15 +1497,6 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
         ?? run.startedAt
         ?? new Date(0).toISOString(),
       items: fileItems
-    });
-  }
-
-  if (run.currentPlan) {
-    push({
-      kind: "plan",
-      id: `plan-${run.currentPlan.turnId}`,
-      occurredAt: run.currentPlan.updatedAt,
-      plan: run.currentPlan
     });
   }
 
@@ -1576,6 +1592,9 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
 
   for (const [index, event] of run.events.entries()) {
     if (
+      event.type === "thread_started" ||
+      event.type === "turn_started" ||
+      (event.type === "diagnostic" && event.level !== "error") ||
       event.type === "warning" ||
       event.type === "error" ||
       event.type === "plan_updated" ||
@@ -1720,6 +1739,23 @@ function formatFileChangePath(change: AgentFileChange, projectPath: string) {
   return change.movePath
     ? `${path} → ${compactProjectPath(change.movePath, projectPath)}`
     : path;
+}
+
+function getFileDisplayStats(
+  change: AgentFileChange,
+  projectPath: string,
+  aggregateStatsByPath: Record<string, {
+    additions: number;
+    deletions: number;
+    kind?: AgentFileChange["kind"];
+  }>
+) {
+  const path = compactProjectPath(change.movePath ?? change.path, projectPath);
+  return aggregateStatsByPath[path] ?? {
+    additions: change.additions,
+    deletions: change.deletions,
+    kind: change.kind
+  };
 }
 
 function compactProjectPath(path: string, projectPath: string) {

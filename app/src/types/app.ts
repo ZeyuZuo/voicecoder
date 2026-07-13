@@ -898,7 +898,6 @@ export type DemoSession = {
   currentPreviewUrl?: string;
   status: DemoSessionStatus;
   error?: string;
-  recoveredAt?: string;
   createdAt: string;
   updatedAt: string;
 };
