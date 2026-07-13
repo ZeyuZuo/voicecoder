@@ -445,6 +445,66 @@ test("agent event batching interval stays within the 50 to 100ms target", () => 
   assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS <= 100);
 });
 
+test("1200 message deltas update one domain item without growing the flat timeline", () => {
+  const running = startTestRun();
+  const deltas = Array.from({ length: 1_200 }, (_, index) => ({
+    type: "item_delta" as const,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "message-1",
+    itemType: "agentMessage",
+    lifecycle: "in_progress" as const,
+    method: "item/agentMessage/delta",
+    delta: "x",
+    createdAt: `2026-07-13T00:00:${String(index % 60).padStart(2, "0")}Z`
+  }));
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "2026-07-13T00:01:00Z",
+    events: [
+      {
+        type: "item_started",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "message-1",
+        itemType: "agentMessage",
+        lifecycle: "in_progress",
+        startedAt: "2026-07-13T00:00:00Z",
+        item: { id: "message-1", type: "agentMessage", text: "", phase: "commentary" },
+        createdAt: "2026-07-13T00:00:00Z"
+      },
+      ...deltas
+    ]
+  });
+
+  assert.equal(updated.runs[0].events.length, 0);
+  assert.equal(updated.runs[0].itemOrder.length, 1);
+  assert.equal(updated.runs[0].itemsById["message-1"].text?.length, 1_200);
+  assert.equal(Object.keys(updated.runs[0].messagesByItemId).length, 1);
+});
+
+test("legacy streaming messages coalesce into one retained timeline event", () => {
+  const running = startTestRun();
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "2026-07-13T00:00:03Z",
+    events: [
+      { type: "agent_message", text: "正在", createdAt: "2026-07-13T00:00:01Z" },
+      { type: "agent_message", text: "兼容", createdAt: "2026-07-13T00:00:02Z" },
+      { type: "agent_message", text: "旧协议", createdAt: "2026-07-13T00:00:03Z" }
+    ]
+  });
+
+  assert.equal(updated.runs[0].events.length, 1);
+  assert.deepEqual(updated.runs[0].events[0], {
+    type: "agent_message",
+    text: "正在兼容旧协议",
+    createdAt: "2026-07-13T00:00:03Z"
+  });
+});
+
 test("file patches update per-file stats and completed snapshot replaces interim changes", () => {
   const running = startTestRun();
   const withPatch = demoSessionReducer(running, {
@@ -511,6 +571,7 @@ test("file patches update per-file stats and completed snapshot replaces interim
     deletions: 1,
     files: 1
   });
+  assert.equal(withPatch.runs[0].aggregateDiffUpdatedAt, "4");
 
   const completed = demoSessionReducer(withPatch, {
     type: "append_agent_event",

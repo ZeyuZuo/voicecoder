@@ -4,11 +4,15 @@ import {
   AGENT_COMMAND_OUTPUT_TAIL_LIMIT,
   appendAgentOutputTail,
   getAgentItemDurationMs,
+  getAgentLatestProgressAt,
   getAgentOutputPreview,
+  getAgentProgressAgeMs,
   getCompletedFileChangePaths,
+  isAgentTimelineNearBottom,
   parseAgentFileChanges,
   parseUnifiedDiffStats
 } from "./agentProgress";
+import type { AgentRun } from "../types/app";
 
 test("parses file changes, kinds, move paths, and per-file diff stats", () => {
   const changes = parseAgentFileChanges({
@@ -101,4 +105,53 @@ test("extracts completed file paths only for file change items", () => {
     ["src/App.tsx", "src/new.css", "src/old.css"]
   );
   assert.deepEqual(getCompletedFileChangePaths("commandExecution", item), []);
+});
+
+test("finds the latest real progress across domain items and run snapshots", () => {
+  const run: AgentRun = {
+    id: "run-1",
+    kind: "initial_build",
+    prompt: "build",
+    status: "running",
+    events: [{
+      type: "thread_started",
+      threadId: "thread-1",
+      createdAt: "2026-07-13T00:00:01Z"
+    }],
+    itemsById: {
+      "message-1": {
+        id: "message-1",
+        type: "agentMessage",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        lifecycle: "in_progress",
+        startedAt: "2026-07-13T00:00:02Z",
+        updatedAt: "2026-07-13T00:00:05Z",
+        data: {},
+        text: "working"
+      }
+    },
+    itemOrder: ["message-1"],
+    messagesByItemId: {},
+    filesByPath: {},
+    aggregateDiff: "diff",
+    aggregateDiffStats: { additions: 1, deletions: 0, files: 1 },
+    aggregateDiffUpdatedAt: "2026-07-13T00:00:04Z",
+    warnings: [],
+    errors: [],
+    changedFiles: [],
+    startedAt: "2026-07-13T00:00:00Z"
+  };
+
+  assert.equal(getAgentLatestProgressAt(run), "2026-07-13T00:00:05Z");
+  assert.equal(
+    getAgentProgressAgeMs("2026-07-13T00:00:05Z", Date.parse("2026-07-13T00:00:20Z")),
+    15_000
+  );
+});
+
+test("timeline follow pauses away from the bottom and resumes near it", () => {
+  assert.equal(isAgentTimelineNearBottom(1_000, 500, 400), false);
+  assert.equal(isAgentTimelineNearBottom(1_000, 555, 400), true);
+  assert.equal(isAgentTimelineNearBottom(1_000, 600, 400), true);
 });

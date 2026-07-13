@@ -1,7 +1,9 @@
-import type { AgentDiffStats, AgentFileChange, AgentFileChangeKind } from "../types/app";
+import type { AgentDiffStats, AgentFileChange, AgentFileChangeKind, AgentRun } from "../types/app";
 
 export const AGENT_COMMAND_OUTPUT_TAIL_LIMIT = 12_000;
 export const AGENT_COMMAND_OUTPUT_PREVIEW_LINES = 6;
+export const AGENT_TIMELINE_BOTTOM_THRESHOLD_PX = 48;
+export const AGENT_WAITING_THRESHOLD_MS = 15_000;
 export const EMPTY_AGENT_DIFF_STATS: AgentDiffStats = {
   additions: 0,
   deletions: 0,
@@ -166,6 +168,47 @@ export function getAgentItemDurationMs(
   return Number.isFinite(startedMs) && Number.isFinite(endedMs)
     ? Math.max(0, endedMs - startedMs)
     : undefined;
+}
+
+export function getAgentLatestProgressAt(run: AgentRun) {
+  const candidates = [
+    run.startedAt,
+    run.completedAt,
+    run.aggregateDiffUpdatedAt,
+    run.currentPlan?.updatedAt,
+    ...run.events.map((event) => event.createdAt),
+    ...Object.values(run.itemsById ?? {}).map((item) => item.updatedAt),
+    ...(run.warnings ?? []).map((warning) => warning.createdAt),
+    ...(run.errors ?? []).map((error) => error.createdAt)
+  ].filter((value): value is string => Boolean(value));
+
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const candidateMs = Date.parse(candidate);
+    if (Number.isFinite(candidateMs) && candidateMs >= latestMs) {
+      latest = candidate;
+      latestMs = candidateMs;
+    }
+  }
+  return latest;
+}
+
+export function getAgentProgressAgeMs(progressAt: string | undefined, nowMs: number) {
+  if (!progressAt) {
+    return undefined;
+  }
+  const progressMs = Date.parse(progressAt);
+  return Number.isFinite(progressMs) ? Math.max(0, nowMs - progressMs) : undefined;
+}
+
+export function isAgentTimelineNearBottom(
+  scrollHeight: number,
+  scrollTop: number,
+  clientHeight: number,
+  thresholdPx = AGENT_TIMELINE_BOTTOM_THRESHOLD_PX
+) {
+  return scrollHeight - scrollTop - clientHeight <= thresholdPx;
 }
 
 function normalizeFileChangeKind(value: string | undefined): AgentFileChangeKind {

@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Main VoiceCoder desktop capability",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "clipboard-manager:allow-write-text"
+  ]
 }

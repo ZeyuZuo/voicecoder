@@ -853,7 +853,7 @@ function isTerminalRunStatus(status: AgentRun["status"]) {
 function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
   const nextRun: AgentRun = {
     ...run,
-    events: shouldRetainAgentEvent(event) ? [...run.events, event] : run.events
+    events: appendRetainedAgentEvent(run.events, event)
   };
 
   if (event.type === "thread_started") {
@@ -885,7 +885,8 @@ function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
       codexThreadId: event.threadId,
       codexTurnId: event.turnId,
       aggregateDiff: event.diff,
-      aggregateDiffStats: parseUnifiedDiffStats(event.diff)
+      aggregateDiffStats: parseUnifiedDiffStats(event.diff),
+      aggregateDiffUpdatedAt: event.createdAt
     };
   }
   if (event.type === "warning") {
@@ -951,13 +952,46 @@ function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
   };
 }
 
+function appendRetainedAgentEvent(events: AgentEvent[], event: AgentEvent) {
+  if (!shouldRetainAgentEvent(event)) {
+    return events;
+  }
+
+  const previous = events[events.length - 1];
+  if (previous?.type === "agent_message" && event.type === "agent_message") {
+    return [
+      ...events.slice(0, -1),
+      {
+        ...event,
+        text: `${previous.text}${event.text}`
+      }
+    ];
+  }
+  if (previous?.type === "plan_update" && event.type === "plan_update") {
+    return [
+      ...events.slice(0, -1),
+      {
+        ...event,
+        text: [previous.text, event.text].filter(Boolean).join(" ")
+      }
+    ];
+  }
+
+  return [...events, event];
+}
+
 function shouldRetainAgentEvent(event: AgentEvent) {
-  if (event.type === "turn_diff_updated") {
+  if (event.type === "turn_diff_updated" || event.type === "item_delta") {
     return false;
   }
   if (
-    (event.type === "item_started" || event.type === "item_delta" || event.type === "item_completed") &&
-    (event.itemType === "fileChange" || event.itemType === "commandExecution")
+    (event.type === "item_started" || event.type === "item_completed") &&
+    (
+      event.itemType === "fileChange" ||
+      event.itemType === "commandExecution" ||
+      event.itemType === "agentMessage" ||
+      event.itemType === "plan"
+    )
   ) {
     return false;
   }

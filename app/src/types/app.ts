@@ -556,6 +556,7 @@ export type AgentRun = {
   filesByPath: Record<string, AgentFileChange>;
   aggregateDiff: string;
   aggregateDiffStats: AgentDiffStats;
+  aggregateDiffUpdatedAt?: string;
   currentPlan?: AgentPlan;
   warnings: AgentWarning[];
   errors: AgentRunError[];
