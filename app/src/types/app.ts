@@ -334,6 +334,60 @@ export type CodingAgentRuntimeMetadata = {
   transportLogPath?: string;
 };
 
+export type AgentMessagePhase = "commentary" | "final_answer" | "unknown";
+
+export type AgentItemLifecycle = "in_progress" | "completed";
+
+export type AgentItem = {
+  id: string;
+  type: string;
+  threadId: string;
+  turnId: string;
+  lifecycle: AgentItemLifecycle;
+  status?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  data: Record<string, unknown>;
+  text?: string;
+  phase?: AgentMessagePhase;
+  output?: string;
+  reasoningSummary?: string;
+};
+
+export type AgentPlanStepStatus = "pending" | "inProgress" | "completed";
+
+export type AgentPlanStep = {
+  step: string;
+  status: AgentPlanStepStatus;
+};
+
+export type AgentPlan = {
+  threadId: string;
+  turnId: string;
+  explanation?: string;
+  steps: AgentPlanStep[];
+  updatedAt: string;
+};
+
+export type AgentWarning = {
+  message: string;
+  threadId?: string;
+  turnId?: string;
+  createdAt: string;
+};
+
+export type AgentRunError = {
+  message: string;
+  retryable: boolean;
+  terminal: boolean;
+  threadId?: string;
+  turnId?: string;
+  createdAt: string;
+};
+
+export type AgentTurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+
 export type AgentEvent =
   | {
       type: "thread_started";
@@ -353,6 +407,49 @@ export type AgentEvent =
   | {
       type: "plan_update";
       text: string;
+      createdAt: string;
+    }
+  | {
+      type: "item_started";
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      itemType: string;
+      lifecycle: "in_progress";
+      status?: string;
+      startedAt: string;
+      item: Record<string, unknown>;
+      createdAt: string;
+    }
+  | {
+      type: "item_delta";
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      itemType: string;
+      lifecycle: "in_progress";
+      method: string;
+      delta: unknown;
+      createdAt: string;
+    }
+  | {
+      type: "item_completed";
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      itemType: string;
+      lifecycle: "completed";
+      status?: string;
+      completedAt: string;
+      item: Record<string, unknown>;
+      createdAt: string;
+    }
+  | {
+      type: "plan_updated";
+      threadId: string;
+      turnId: string;
+      explanation?: string;
+      plan: AgentPlanStep[];
       createdAt: string;
     }
   | {
@@ -383,12 +480,26 @@ export type AgentEvent =
     }
   | {
       type: "turn_completed";
+      threadId?: string;
+      turnId?: string;
+      status: AgentTurnStatus;
       finalMessage?: string;
+      createdAt: string;
+    }
+  | {
+      type: "warning";
+      message: string;
+      threadId?: string;
+      turnId?: string;
       createdAt: string;
     }
   | {
       type: "error";
       message: string;
+      retryable: boolean;
+      terminal: boolean;
+      threadId?: string;
+      turnId?: string;
       createdAt: string;
     };
 
@@ -401,6 +512,12 @@ export type AgentRun = {
   codexTurnId?: string;
   runtime?: CodingAgentRuntimeMetadata;
   events: AgentEvent[];
+  itemsById: Record<string, AgentItem>;
+  itemOrder: string[];
+  messagesByItemId: Record<string, AgentItem>;
+  currentPlan?: AgentPlan;
+  warnings: AgentWarning[];
+  errors: AgentRunError[];
   changedFiles: string[];
   finalMessage?: string;
   error?: string;

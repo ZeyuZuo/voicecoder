@@ -1,4 +1,4 @@
-import { Bot, FileCode2, ListChecks, ShieldCheck, Terminal, XCircle } from "lucide-react";
+import { AlertTriangle, Bot, FileCode2, ListChecks, ShieldCheck, Terminal, XCircle } from "lucide-react";
 import type { AgentEvent, AgentRun, DemoSession } from "../types/app";
 
 type DemoProgressPanelProps = {
@@ -100,12 +100,16 @@ function AgentEventIcon({ event }: { event: AgentEvent }) {
     return <Terminal size={15} />;
   }
 
-  if (event.type === "file_change") {
+  if (event.type === "file_change" || isItemEventOfType(event, "fileChange")) {
     return <FileCode2 size={15} />;
   }
 
-  if (event.type === "plan_update") {
+  if (event.type === "plan_update" || event.type === "plan_updated" || isItemEventOfType(event, "plan")) {
     return <ListChecks size={15} />;
+  }
+
+  if (isItemEventOfType(event, "commandExecution")) {
+    return <Terminal size={15} />;
   }
 
   if (event.type === "approval_review") {
@@ -114,6 +118,10 @@ function AgentEventIcon({ event }: { event: AgentEvent }) {
 
   if (event.type === "error") {
     return <XCircle size={15} />;
+  }
+
+  if (event.type === "warning") {
+    return <AlertTriangle size={15} />;
   }
 
   if (event.type === "diagnostic") {
@@ -140,6 +148,23 @@ function formatAgentEvent(event: AgentEvent) {
     return compactText(event.text);
   }
 
+  if (event.type === "plan_updated") {
+    const steps = event.plan.map((step) => `[${step.status}] ${step.step}`).join(" · ");
+    return compactText([event.explanation, steps].filter(Boolean).join(" · "));
+  }
+
+  if (event.type === "item_started") {
+    return formatItemLifecycleEvent(event.itemType, event.status ?? "inProgress", event.item);
+  }
+
+  if (event.type === "item_delta") {
+    return formatItemDeltaEvent(event);
+  }
+
+  if (event.type === "item_completed") {
+    return formatItemLifecycleEvent(event.itemType, event.status ?? "completed", event.item);
+  }
+
   if (event.type === "approval_review") {
     const status = getApprovalReviewStatusLabel(event.status);
     const action = event.action ? ` · ${event.action}` : "";
@@ -156,7 +181,7 @@ function formatAgentEvent(event: AgentEvent) {
   }
 
   if (event.type === "turn_completed") {
-    return compactText(event.finalMessage ?? "本轮已完成");
+    return compactText(event.finalMessage ?? `本轮 ${event.status}`);
   }
 
   if (event.type === "diagnostic") {
@@ -164,6 +189,41 @@ function formatAgentEvent(event: AgentEvent) {
   }
 
   return event.message;
+}
+
+function isItemEventOfType(event: AgentEvent, itemType: string) {
+  return (
+    (event.type === "item_started" || event.type === "item_delta" || event.type === "item_completed") &&
+    event.itemType === itemType
+  );
+}
+
+function formatItemLifecycleEvent(itemType: string, status: string, item: Record<string, unknown>) {
+  if (itemType === "commandExecution") {
+    return compactText(`${status} · ${readDisplayString(item.command) ?? "执行命令"}`);
+  }
+  if (itemType === "fileChange") {
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    return `${status} · ${changes.length} 个文件变更`;
+  }
+  if (itemType === "agentMessage" || itemType === "plan") {
+    return compactText(readDisplayString(item.text) ?? `${itemType} · ${status}`);
+  }
+  return `${itemType} · ${status}`;
+}
+
+function formatItemDeltaEvent(event: Extract<AgentEvent, { type: "item_delta" }>) {
+  if (typeof event.delta === "string") {
+    return compactText(event.delta) || `${event.itemType} 更新中`;
+  }
+  if (event.method === "item/fileChange/patchUpdated" && Array.isArray(event.delta)) {
+    return `正在更新 ${event.delta.length} 个文件`;
+  }
+  return `${event.itemType} 更新中`;
+}
+
+function readDisplayString(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }
 
 function compactText(text: string) {

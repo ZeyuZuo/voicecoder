@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { DemoSession, DevServerLifecycleEventEnvelope, RequirementUtterance } from "../types/app";
 import {
+  AGENT_EVENT_BATCH_INTERVAL_MS,
   createInitialDemoPrompt,
   createDemoSession,
   demoSessionReducer,
@@ -207,6 +208,242 @@ test("agent events update turn metadata and de-duplicate changed files", () => {
   assert.deepEqual(withDuplicateFile.runs[0].changedFiles, ["/tmp/demo/src/App.tsx"]);
 });
 
+test("item lifecycle events upsert one authoritative agent message", () => {
+  const running = startTestRun();
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "6",
+    events: [
+      {
+        type: "item_started",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "message-1",
+        itemType: "agentMessage",
+        lifecycle: "in_progress",
+        startedAt: "2",
+        item: { id: "message-1", type: "agentMessage", text: "", phase: "commentary" },
+        createdAt: "2"
+      },
+      {
+        type: "item_delta",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "message-1",
+        itemType: "agentMessage",
+        lifecycle: "in_progress",
+        method: "item/agentMessage/delta",
+        delta: "正在修改",
+        createdAt: "3"
+      },
+      {
+        type: "item_completed",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "message-1",
+        itemType: "agentMessage",
+        lifecycle: "completed",
+        completedAt: "5",
+        item: {
+          id: "message-1",
+          type: "agentMessage",
+          text: "文件修改完成。",
+          phase: "final_answer"
+        },
+        createdAt: "6"
+      }
+    ]
+  });
+
+  const item = updated.runs[0].itemsById["message-1"];
+  assert.deepEqual(updated.runs[0].itemOrder, ["message-1"]);
+  assert.equal(item.lifecycle, "completed");
+  assert.equal(item.startedAt, "2");
+  assert.equal(item.completedAt, "5");
+  assert.equal(item.text, "文件修改完成。");
+  assert.equal(item.phase, "final_answer");
+  assert.equal(updated.runs[0].messagesByItemId["message-1"], item);
+});
+
+test("completed item remains authoritative when started arrives out of order", () => {
+  const running = startTestRun();
+  const completedFirst = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "4",
+    events: [
+      {
+        type: "item_completed",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        itemType: "commandExecution",
+        lifecycle: "completed",
+        status: "completed",
+        completedAt: "4",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "npm run check",
+          status: "completed",
+          aggregatedOutput: "ok"
+        },
+        createdAt: "4"
+      },
+      {
+        type: "item_started",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        itemType: "commandExecution",
+        lifecycle: "in_progress",
+        status: "inProgress",
+        startedAt: "2",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "stale command",
+          status: "inProgress"
+        },
+        createdAt: "5"
+      },
+      {
+        type: "item_delta",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        itemType: "commandExecution",
+        lifecycle: "in_progress",
+        method: "item/commandExecution/outputDelta",
+        delta: " stale output",
+        createdAt: "6"
+      }
+    ]
+  });
+
+  const item = completedFirst.runs[0].itemsById["command-1"];
+  assert.equal(item.lifecycle, "completed");
+  assert.equal(item.status, "completed");
+  assert.equal(item.startedAt, "2");
+  assert.equal(item.data.command, "npm run check");
+  assert.equal(item.output, "ok");
+  assert.deepEqual(completedFirst.runs[0].itemOrder, ["command-1"]);
+});
+
+test("duplicate item lifecycle notifications do not duplicate item order", () => {
+  const running = startTestRun();
+  const startedEvent = {
+    type: "item_started" as const,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "file-1",
+    itemType: "fileChange",
+    lifecycle: "in_progress" as const,
+    status: "inProgress",
+    startedAt: "2",
+    item: { id: "file-1", type: "fileChange", status: "inProgress", changes: [] },
+    createdAt: "2"
+  };
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    events: [startedEvent, startedEvent],
+    now: "2"
+  });
+
+  assert.deepEqual(updated.runs[0].itemOrder, ["file-1"]);
+  assert.equal(Object.keys(updated.runs[0].itemsById).length, 1);
+});
+
+test("structured plans and warning severity are retained on the run", () => {
+  const running = startTestRun();
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "5",
+    events: [
+      {
+        type: "plan_updated",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: "按顺序执行",
+        plan: [
+          { step: "读取代码", status: "completed" },
+          { step: "实现功能", status: "inProgress" }
+        ],
+        createdAt: "2"
+      },
+      {
+        type: "warning",
+        message: "上下文接近限制",
+        threadId: "thread-1",
+        createdAt: "3"
+      },
+      {
+        type: "error",
+        message: "连接中断，正在重试",
+        retryable: true,
+        terminal: false,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        createdAt: "4"
+      },
+      {
+        type: "error",
+        message: "重试次数耗尽",
+        retryable: false,
+        terminal: true,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        createdAt: "5"
+      }
+    ]
+  });
+
+  assert.deepEqual(updated.runs[0].currentPlan?.steps, [
+    { step: "读取代码", status: "completed" },
+    { step: "实现功能", status: "inProgress" }
+  ]);
+  assert.equal(updated.runs[0].warnings.length, 1);
+  assert.equal(updated.runs[0].errors[0].retryable, true);
+  assert.equal(updated.runs[0].errors[0].terminal, false);
+  assert.equal(updated.runs[0].errors[1].terminal, true);
+  assert.equal(updated.runs[0].error, "重试次数耗尽");
+});
+
+test("turn completion outcomes map to succeeded cancelled and failed runs", () => {
+  const completed = demoSessionReducer(startTestRun(), {
+    type: "complete_agent_run",
+    runId: "run-1",
+    status: "completed",
+    now: "3"
+  });
+  const interrupted = demoSessionReducer(startTestRun(), {
+    type: "complete_agent_run",
+    runId: "run-1",
+    status: "interrupted",
+    now: "3"
+  });
+  const failed = demoSessionReducer(startTestRun(), {
+    type: "complete_agent_run",
+    runId: "run-1",
+    status: "failed",
+    error: "turn failed",
+    now: "3"
+  });
+
+  assert.equal(completed.runs[0].status, "succeeded");
+  assert.equal(interrupted.runs[0].status, "cancelled");
+  assert.equal(failed.runs[0].status, "failed");
+  assert.equal(failed.error, "turn failed");
+});
+
+test("agent event batching interval stays within the 50 to 100ms target", () => {
+  assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS >= 50);
+  assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS <= 100);
+});
+
 test("ready dev server event can attach the preview URL after initial build", () => {
   const previewReady = completeInitialBuild(createTestSession());
   const withPreview = demoSessionReducer(previewReady, {
@@ -380,6 +617,16 @@ function createTestSession(): DemoSession {
     initialRequirementDocument: "目标：生成一个交互式 demo。",
     initialCodingPrompt: "请实现第一版 demo。",
     now: "1"
+  });
+}
+
+function startTestRun() {
+  return demoSessionReducer(createTestSession(), {
+    type: "start_agent_run",
+    runId: "run-1",
+    kind: "initial_build",
+    prompt: "生成 demo",
+    now: "2"
   });
 }
 

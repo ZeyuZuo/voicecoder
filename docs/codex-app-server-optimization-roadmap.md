@@ -151,6 +151,8 @@ Demo 生成中 · 01:24
 
 目标：从扁平 `AgentEvent[]` 升级成以 `itemId` 为主键的运行视图状态。
 
+完成日期：2026-07-13
+
 建议模型：
 
 ```text
@@ -167,15 +169,15 @@ AgentRun
 └─ rawEventLogPath
 ```
 
-- [ ] 2.1 所有 item 事件保留 `threadId`、`turnId`、`itemId`、status 和时间戳。
-- [ ] 2.2 `item/started` 创建 Item，delta 更新 Item，`item/completed` 覆盖最终状态。
-- [ ] 2.3 `item/completed` 作为 Item 最终权威数据，避免 delta 与最终消息重复。
-- [ ] 2.4 `turn/plan/updated` 保存结构化 plan step，不再只拼成纯文本。
-- [ ] 2.5 区分 agent message 的 `commentary`、`final_answer` 和 unknown phase。
-- [ ] 2.6 区分 warning、retryable error、terminal error。
-- [ ] 2.7 `turn/completed` 根据 `completed`、`interrupted`、`failed` 正确结束 AgentRun。
-- [ ] 2.8 高频 delta 在进入 React 前按 50–100ms 合并，避免逐 token 渲染。
-- [ ] 2.9 为 Item upsert、乱序通知和重复通知补 reducer 测试。
+- [x] 2.1 所有 item 事件保留 `threadId`、`turnId`、`itemId`、status 和时间戳。
+- [x] 2.2 `item/started` 创建 Item，delta 更新 Item，`item/completed` 覆盖最终状态。
+- [x] 2.3 `item/completed` 作为 Item 最终权威数据，避免 delta 与最终消息重复。
+- [x] 2.4 `turn/plan/updated` 保存结构化 plan step，不再只拼成纯文本。
+- [x] 2.5 区分 agent message 的 `commentary`、`final_answer` 和 unknown phase。
+- [x] 2.6 区分 warning、retryable error、terminal error。
+- [x] 2.7 `turn/completed` 根据 `completed`、`interrupted`、`failed` 正确结束 AgentRun。
+- [x] 2.8 高频 delta 在进入 React 前按 50–100ms 合并，避免逐 token 渲染。
+- [x] 2.9 为 Item upsert、乱序通知和重复通知补 reducer 测试。
 
 退出标准：
 

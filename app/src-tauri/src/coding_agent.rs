@@ -1,5 +1,5 @@
 use crate::env_config::read_local_env;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -231,6 +231,48 @@ pub enum AgentEvent {
         text: String,
         created_at: String,
     },
+    ItemStarted {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        item_type: String,
+        lifecycle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        started_at: String,
+        item: Value,
+        created_at: String,
+    },
+    ItemDelta {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        item_type: String,
+        lifecycle: String,
+        method: String,
+        delta: Value,
+        created_at: String,
+    },
+    ItemCompleted {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        item_type: String,
+        lifecycle: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        completed_at: String,
+        item: Value,
+        created_at: String,
+    },
+    PlanUpdated {
+        thread_id: String,
+        turn_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+        plan: Vec<AgentPlanStep>,
+        created_at: String,
+    },
     ApprovalReview {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,13 +301,39 @@ pub enum AgentEvent {
     },
     TurnCompleted {
         #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         final_message: Option<String>,
+        created_at: String,
+    },
+    Warning {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         created_at: String,
     },
     Error {
         message: String,
+        retryable: bool,
+        terminal: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
         created_at: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPlanStep {
+    step: String,
+    status: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -321,6 +389,8 @@ pub struct AgentRunCompletedEvent {
     run_id: String,
     final_message: Option<String>,
     changed_files: Vec<String>,
+    status: String,
+    error: Option<String>,
     completed_at: String,
 }
 
@@ -714,15 +784,7 @@ fn finish_codex_exec_json_agent_run(
     summary: AgentRunEventSummary,
 ) -> Result<(), String> {
     let _ = session.cancel();
-    if let Some(message) = summary.error_message {
-        emit_agent_error(
-            &app,
-            Some(request.demo_session_id),
-            Some(request.run_id),
-            message,
-        );
-        return Ok(());
-    }
+    let status = summary.completion_status();
 
     emit_agent_run_completed(
         &app,
@@ -731,6 +793,8 @@ fn finish_codex_exec_json_agent_run(
             run_id: request.run_id,
             final_message: summary.final_message,
             changed_files: summary.changed_files,
+            status,
+            error: summary.error_message,
             completed_at: current_agent_event_timestamp(),
         },
     )
@@ -743,15 +807,7 @@ fn finish_agent_run(
     summary: AgentRunEventSummary,
 ) -> Result<(), String> {
     let _ = session.cancel();
-    if let Some(message) = summary.error_message {
-        emit_agent_error(
-            &app,
-            Some(request.demo_session_id),
-            Some(request.run_id),
-            message,
-        );
-        return Ok(());
-    }
+    let status = summary.completion_status();
 
     emit_agent_run_completed(
         &app,
@@ -760,6 +816,8 @@ fn finish_agent_run(
             run_id: request.run_id,
             final_message: summary.final_message,
             changed_files: summary.changed_files,
+            status,
+            error: summary.error_message,
             completed_at: current_agent_event_timestamp(),
         },
     )
@@ -910,6 +968,9 @@ impl CodexExecJsonSession {
                     .map_err(|error| format!("等待 Codex exec --json 退出失败：{error}"))?;
                 if status.success() {
                     return Ok(vec![AgentEvent::TurnCompleted {
+                        thread_id: None,
+                        turn_id: None,
+                        status: "completed".to_string(),
                         final_message: None,
                         created_at: current_agent_event_timestamp(),
                     }]);
@@ -1038,7 +1099,20 @@ struct AgentRunEventSummary {
     final_message: Option<String>,
     changed_files: Vec<String>,
     error_message: Option<String>,
+    turn_status: Option<String>,
     terminal: bool,
+}
+
+impl AgentRunEventSummary {
+    fn completion_status(&self) -> String {
+        self.turn_status.clone().unwrap_or_else(|| {
+            if self.error_message.is_some() {
+                "failed".to_string()
+            } else {
+                "completed".to_string()
+            }
+        })
+    }
 }
 
 fn emit_agent_events(
@@ -1066,17 +1140,54 @@ fn emit_agent_events(
 fn update_agent_run_summary(summary: &mut AgentRunEventSummary, event: &AgentEvent) {
     match event {
         AgentEvent::FileChange { path, .. } => append_unique(&mut summary.changed_files, path),
-        AgentEvent::TurnCompleted { final_message, .. } => {
+        AgentEvent::ItemStarted { item, .. } | AgentEvent::ItemCompleted { item, .. } => {
+            append_item_changed_files(&mut summary.changed_files, item);
+            if item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                && item.get("phase").and_then(Value::as_str) == Some("final_answer")
+            {
+                summary.final_message = extract_string(item, "/text");
+            }
+        }
+        AgentEvent::ItemDelta { method, delta, .. } if method == "item/fileChange/patchUpdated" => {
+            append_changes_changed_files(&mut summary.changed_files, delta);
+        }
+        AgentEvent::TurnCompleted {
+            status,
+            final_message,
+            ..
+        } => {
             if final_message.is_some() {
                 summary.final_message = final_message.clone();
             }
-            summary.terminal = true;
+            summary.turn_status = Some(status.clone());
+            summary.terminal = status != "inProgress";
         }
-        AgentEvent::Error { message, .. } => {
-            summary.error_message = Some(message.clone());
-            summary.terminal = true;
+        AgentEvent::Error {
+            message, terminal, ..
+        } => {
+            if *terminal {
+                summary.error_message = Some(message.clone());
+                summary.turn_status = Some("failed".to_string());
+                summary.terminal = true;
+            }
         }
         _ => {}
+    }
+}
+
+fn append_item_changed_files(changed_files: &mut Vec<String>, item: &Value) {
+    if item.get("type").and_then(Value::as_str) == Some("fileChange") {
+        append_changes_changed_files(changed_files, item.get("changes").unwrap_or(&Value::Null));
+    }
+}
+
+fn append_changes_changed_files(changed_files: &mut Vec<String>, changes: &Value) {
+    if let Some(changes) = changes.as_array() {
+        for change in changes {
+            if let Some(path) = extract_string(change, "/path") {
+                append_unique(changed_files, &path);
+            }
+        }
     }
 }
 
@@ -1325,42 +1436,45 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
             turn_id: extract_string(params, "/turn/id"),
             created_at: created_at.to_string(),
         }],
-        "item/agentMessage/delta" => extract_string(params, "/delta")
-            .filter(|text| !text.is_empty())
-            .map(|text| {
-                vec![AgentEvent::AgentMessage {
-                    text,
-                    created_at: created_at.to_string(),
-                }]
-            })
-            .unwrap_or_default(),
-        "item/plan/delta" => extract_string(params, "/delta")
-            .filter(|text| !text.is_empty())
-            .map(|text| {
-                vec![AgentEvent::PlanUpdate {
-                    text,
-                    created_at: created_at.to_string(),
-                }]
-            })
-            .unwrap_or_default(),
-        "turn/plan/updated" => format_turn_plan_update(params)
-            .map(|text| {
-                vec![AgentEvent::PlanUpdate {
-                    text,
-                    created_at: created_at.to_string(),
-                }]
-            })
-            .unwrap_or_default(),
+        "item/agentMessage/delta"
+        | "item/plan/delta"
+        | "item/commandExecution/outputDelta"
+        | "item/commandExecution/terminalInteraction"
+        | "item/fileChange/outputDelta"
+        | "item/fileChange/patchUpdated"
+        | "item/mcpToolCall/progress"
+        | "item/reasoning/summaryTextDelta"
+        | "item/reasoning/summaryPartAdded"
+        | "item/reasoning/textDelta" => normalize_codex_item_delta(method, params, created_at),
+        "turn/plan/updated" => normalize_codex_plan_updated(params, created_at),
         "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
             normalize_auto_approval_review(params, created_at)
         }
-        "item/started" | "item/completed" => normalize_codex_item(params.get("item"), created_at),
-        "item/fileChange/patchUpdated" => {
-            normalize_codex_file_changes(params.get("changes"), created_at)
-        }
+        "item/started" => normalize_codex_item_lifecycle(params, created_at, false),
+        "item/completed" => normalize_codex_item_lifecycle(params, created_at, true),
         "turn/completed" => normalize_codex_turn_completed(params, created_at),
+        "warning" => extract_string(params, "/message")
+            .map(|message| {
+                vec![AgentEvent::Warning {
+                    message,
+                    thread_id: extract_string(params, "/threadId"),
+                    turn_id: extract_string(params, "/turnId"),
+                    created_at: created_at.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
         "error" | "thread/realtime/error" => vec![AgentEvent::Error {
             message: format_codex_error(params.get("error").unwrap_or(params)),
+            retryable: params
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            terminal: !params
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            thread_id: extract_string(params, "/threadId"),
+            turn_id: extract_string(params, "/turnId"),
             created_at: created_at.to_string(),
         }],
         _ => Vec::new(),
@@ -1392,6 +1506,10 @@ fn normalize_codex_exec_json_event_at(event: &Value, created_at: &str) -> Vec<Ag
             created_at: created_at.to_string(),
         }],
         "turn.completed" => vec![AgentEvent::TurnCompleted {
+            thread_id: extract_string(event, "/thread_id")
+                .or_else(|| extract_string(event, "/threadId")),
+            turn_id: extract_string(event, "/turn_id").or_else(|| extract_string(event, "/turnId")),
+            status: "completed".to_string(),
             final_message: extract_exec_final_message(event),
             created_at: created_at.to_string(),
         }],
@@ -1405,6 +1523,11 @@ fn normalize_codex_exec_json_event_at(event: &Value, created_at: &str) -> Vec<Ag
                         .filter(|message| !message.is_empty())
                 })
                 .unwrap_or_else(|| "Codex exec --json turn failed.".to_string()),
+            retryable: false,
+            terminal: true,
+            thread_id: extract_string(event, "/thread_id")
+                .or_else(|| extract_string(event, "/threadId")),
+            turn_id: extract_string(event, "/turn_id").or_else(|| extract_string(event, "/turnId")),
             created_at: created_at.to_string(),
         }],
         "item.started" | "item.completed" => {
@@ -1424,49 +1547,142 @@ fn normalize_codex_exec_json_event_at(event: &Value, created_at: &str) -> Vec<Ag
                 .get("error")
                 .map(format_codex_error)
                 .unwrap_or_else(|| format_codex_error(event)),
+            retryable: false,
+            terminal: true,
+            thread_id: extract_string(event, "/thread_id")
+                .or_else(|| extract_string(event, "/threadId")),
+            turn_id: extract_string(event, "/turn_id").or_else(|| extract_string(event, "/turnId")),
             created_at: created_at.to_string(),
         }],
         _ => Vec::new(),
     }
 }
 
-fn normalize_codex_item(item: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
-    let Some(item) = item else {
+fn normalize_codex_item_lifecycle(
+    params: &Value,
+    created_at: &str,
+    completed: bool,
+) -> Vec<AgentEvent> {
+    let Some(item) = params.get("item") else {
         return Vec::new();
     };
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let Some(item_id) = extract_string(item, "/id") else {
+        return Vec::new();
+    };
+    let item_type = extract_string(item, "/type").unwrap_or_else(|| "unknown".to_string());
+    let status = extract_string(item, "/status");
 
-    match item.get("type").and_then(Value::as_str) {
-        Some("agentMessage") => extract_string(item, "/text")
-            .filter(|text| !text.is_empty())
-            .map(|text| {
-                vec![AgentEvent::AgentMessage {
-                    text,
-                    created_at: created_at.to_string(),
-                }]
-            })
-            .unwrap_or_default(),
-        Some("plan") => extract_string(item, "/text")
-            .filter(|text| !text.is_empty())
-            .map(|text| {
-                vec![AgentEvent::PlanUpdate {
-                    text,
-                    created_at: created_at.to_string(),
-                }]
-            })
-            .unwrap_or_default(),
-        Some("commandExecution") => {
-            let Some(command) = extract_string(item, "/command") else {
-                return Vec::new();
-            };
-            vec![AgentEvent::Command {
-                command,
-                status: extract_string(item, "/status").unwrap_or_else(|| "unknown".to_string()),
-                created_at: created_at.to_string(),
-            }]
-        }
-        Some("fileChange") => normalize_codex_file_changes(item.get("changes"), created_at),
-        _ => Vec::new(),
+    if completed {
+        vec![AgentEvent::ItemCompleted {
+            thread_id,
+            turn_id,
+            item_id,
+            item_type,
+            lifecycle: "completed".to_string(),
+            status,
+            completed_at: extract_protocol_timestamp(params, "/completedAtMs", created_at),
+            item: item.clone(),
+            created_at: created_at.to_string(),
+        }]
+    } else {
+        vec![AgentEvent::ItemStarted {
+            thread_id,
+            turn_id,
+            item_id,
+            item_type,
+            lifecycle: "in_progress".to_string(),
+            status,
+            started_at: extract_protocol_timestamp(params, "/startedAtMs", created_at),
+            item: item.clone(),
+            created_at: created_at.to_string(),
+        }]
     }
+}
+
+fn normalize_codex_item_delta(method: &str, params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let Some(item_id) = extract_string(params, "/itemId") else {
+        return Vec::new();
+    };
+    let item_type = match method {
+        "item/agentMessage/delta" => "agentMessage",
+        "item/plan/delta" => "plan",
+        "item/commandExecution/outputDelta" | "item/commandExecution/terminalInteraction" => {
+            "commandExecution"
+        }
+        "item/fileChange/outputDelta" | "item/fileChange/patchUpdated" => "fileChange",
+        "item/mcpToolCall/progress" => "mcpToolCall",
+        "item/reasoning/summaryTextDelta"
+        | "item/reasoning/summaryPartAdded"
+        | "item/reasoning/textDelta" => "reasoning",
+        _ => "unknown",
+    };
+    let delta = match method {
+        "item/fileChange/patchUpdated" => params
+            .get("changes")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new())),
+        _ => params
+            .get("delta")
+            .or_else(|| params.get("part"))
+            .cloned()
+            .unwrap_or_else(|| params.clone()),
+    };
+
+    vec![AgentEvent::ItemDelta {
+        thread_id,
+        turn_id,
+        item_id,
+        item_type: item_type.to_string(),
+        lifecycle: "in_progress".to_string(),
+        method: method.to_string(),
+        delta,
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn normalize_codex_plan_updated(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let plan = params
+        .get("plan")
+        .and_then(Value::as_array)
+        .map(|steps| {
+            steps
+                .iter()
+                .filter_map(|step| {
+                    Some(AgentPlanStep {
+                        step: extract_string(step, "/step")?,
+                        status: extract_string(step, "/status")
+                            .unwrap_or_else(|| "pending".to_string()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    vec![AgentEvent::PlanUpdated {
+        thread_id,
+        turn_id,
+        explanation: extract_string(params, "/explanation").filter(|value| !value.is_empty()),
+        plan,
+        created_at: created_at.to_string(),
+    }]
 }
 
 fn normalize_codex_exec_json_item(item: Option<&Value>, created_at: &str) -> Vec<AgentEvent> {
@@ -1558,7 +1774,11 @@ fn normalize_codex_exec_json_file_change(item: &Value, created_at: &str) -> Vec<
 }
 
 fn normalize_codex_turn_completed(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let status = extract_string(params, "/turn/status").unwrap_or_else(|| "completed".to_string());
     let mut events = vec![AgentEvent::TurnCompleted {
+        thread_id: extract_string(params, "/threadId"),
+        turn_id: extract_string(params, "/turn/id"),
+        status: status.clone(),
         final_message: extract_final_agent_message(params),
         created_at: created_at.to_string(),
     }];
@@ -1569,6 +1789,10 @@ fn normalize_codex_turn_completed(params: &Value, created_at: &str) -> Vec<Agent
     {
         events.push(AgentEvent::Error {
             message: format_codex_error(error),
+            retryable: false,
+            terminal: status == "failed",
+            thread_id: extract_string(params, "/threadId"),
+            turn_id: extract_string(params, "/turn/id"),
             created_at: created_at.to_string(),
         });
     }
@@ -1581,13 +1805,19 @@ fn extract_final_agent_message(params: &Value) -> Option<String> {
         .pointer("/turn/items")
         .and_then(Value::as_array)
         .and_then(|items| {
-            items.iter().rev().find_map(|item| {
-                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
-                    extract_string(item, "/text").filter(|text| !text.is_empty())
-                } else {
-                    None
-                }
-            })
+            items
+                .iter()
+                .rev()
+                .find(|item| {
+                    item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                        && item.get("phase").and_then(Value::as_str) == Some("final_answer")
+                })
+                .or_else(|| {
+                    items.iter().rev().find(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                    })
+                })
+                .and_then(|item| extract_string(item, "/text").filter(|text| !text.is_empty()))
         })
 }
 
@@ -1640,6 +1870,15 @@ fn extract_string(value: &Value, pointer: &str) -> Option<String> {
         .pointer(pointer)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn extract_protocol_timestamp(value: &Value, pointer: &str, fallback: &str) -> String {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_i64)
+        .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+        .map(|timestamp| timestamp.to_rfc3339())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn current_agent_event_timestamp() -> String {
@@ -2769,12 +3008,19 @@ mod tests {
     fn file_change_notification_fixture_normalizes_for_the_frontend() {
         let notification: Value = serde_json::from_str(FILE_CHANGE_STARTED_FIXTURE).unwrap();
         let events = normalize_codex_notification_at(&notification, "2026-07-13T00:00:00Z");
+        let item = notification.pointer("/params/item").unwrap().clone();
 
         assert_eq!(
             events,
-            vec![AgentEvent::FileChange {
-                path: "/tmp/voicecoder-demo/src/App.tsx".to_string(),
-                change_type: Some("update".to_string()),
+            vec![AgentEvent::ItemStarted {
+                thread_id: "thread-fixture".to_string(),
+                turn_id: "turn-fixture".to_string(),
+                item_id: "item-file-change-fixture".to_string(),
+                item_type: "fileChange".to_string(),
+                lifecycle: "in_progress".to_string(),
+                status: Some("inProgress".to_string()),
+                started_at: "2026-07-13T00:00:00+00:00".to_string(),
+                item,
                 created_at: "2026-07-13T00:00:00Z".to_string(),
             }]
         );
@@ -3172,15 +3418,27 @@ mod tests {
 
         assert_eq!(
             message_events,
-            vec![AgentEvent::AgentMessage {
-                text: "正在修改首页".to_string(),
+            vec![AgentEvent::ItemDelta {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                item_type: "agentMessage".to_string(),
+                lifecycle: "in_progress".to_string(),
+                method: "item/agentMessage/delta".to_string(),
+                delta: json!("正在修改首页"),
                 created_at: "2026-06-24T00:00:00Z".to_string(),
             }]
         );
         assert_eq!(
             plan_events,
-            vec![AgentEvent::PlanUpdate {
-                text: "实现主要布局".to_string(),
+            vec![AgentEvent::ItemDelta {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-2".to_string(),
+                item_type: "plan".to_string(),
+                lifecycle: "in_progress".to_string(),
+                method: "item/plan/delta".to_string(),
+                delta: json!("实现主要布局"),
                 created_at: "2026-06-24T00:00:01Z".to_string(),
             }]
         );
@@ -3206,8 +3464,20 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![AgentEvent::PlanUpdate {
-                text: "计划已更新\n[completed] 读取项目结构\n[inProgress] 实现 demo".to_string(),
+            vec![AgentEvent::PlanUpdated {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                explanation: Some("计划已更新".to_string()),
+                plan: vec![
+                    AgentPlanStep {
+                        step: "读取项目结构".to_string(),
+                        status: "completed".to_string(),
+                    },
+                    AgentPlanStep {
+                        step: "实现 demo".to_string(),
+                        status: "inProgress".to_string(),
+                    },
+                ],
                 created_at: "2026-06-24T00:00:00Z".to_string(),
             }]
         );
@@ -3219,6 +3489,7 @@ mod tests {
             &json!({
                 "method": "item/completed",
                 "params": {
+                    "completedAtMs": 1782259200000_i64,
                     "item": {
                         "id": "item-1",
                         "type": "commandExecution",
@@ -3236,9 +3507,22 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![AgentEvent::Command {
-                command: "npm run check".to_string(),
-                status: "completed".to_string(),
+            vec![AgentEvent::ItemCompleted {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                item_type: "commandExecution".to_string(),
+                lifecycle: "completed".to_string(),
+                status: Some("completed".to_string()),
+                completed_at: "2026-06-24T00:00:00+00:00".to_string(),
+                item: json!({
+                    "id": "item-1",
+                    "type": "commandExecution",
+                    "command": "npm run check",
+                    "commandActions": [],
+                    "cwd": "/tmp/demo",
+                    "status": "completed"
+                }),
                 created_at: "2026-06-24T00:00:00Z".to_string(),
             }]
         );
@@ -3250,6 +3534,9 @@ mod tests {
             &json!({
                 "method": "item/started",
                 "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "startedAtMs": 1782259200000_i64,
                     "item": {
                         "id": "item-1",
                         "type": "commandExecution",
@@ -3262,9 +3549,19 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![AgentEvent::Command {
-                command: "npm run dev".to_string(),
-                status: "unknown".to_string(),
+            vec![AgentEvent::ItemStarted {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                item_type: "commandExecution".to_string(),
+                lifecycle: "in_progress".to_string(),
+                status: None,
+                started_at: "2026-06-24T00:00:00+00:00".to_string(),
+                item: json!({
+                    "id": "item-1",
+                    "type": "commandExecution",
+                    "command": "npm run dev"
+                }),
                 created_at: "2026-06-24T00:00:00Z".to_string(),
             }]
         );
@@ -3298,18 +3595,27 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![
-                AgentEvent::FileChange {
-                    path: "/tmp/demo/src/App.tsx".to_string(),
-                    change_type: Some("update".to_string()),
-                    created_at: "2026-06-24T00:00:00Z".to_string(),
-                },
-                AgentEvent::FileChange {
-                    path: "/tmp/demo/src/styles.css".to_string(),
-                    change_type: Some("add".to_string()),
-                    created_at: "2026-06-24T00:00:00Z".to_string(),
-                },
-            ]
+            vec![AgentEvent::ItemDelta {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "item-1".to_string(),
+                item_type: "fileChange".to_string(),
+                lifecycle: "in_progress".to_string(),
+                method: "item/fileChange/patchUpdated".to_string(),
+                delta: json!([
+                    {
+                        "path": "/tmp/demo/src/App.tsx",
+                        "kind": { "type": "update" },
+                        "diff": "@@"
+                    },
+                    {
+                        "path": "/tmp/demo/src/styles.css",
+                        "kind": { "type": "add" },
+                        "diff": "@@"
+                    }
+                ]),
+                created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
         );
     }
 
@@ -3343,15 +3649,154 @@ mod tests {
             events,
             vec![
                 AgentEvent::TurnCompleted {
+                    thread_id: Some("thread-1".to_string()),
+                    turn_id: Some("turn-1".to_string()),
+                    status: "failed".to_string(),
                     final_message: Some("已完成第一版。".to_string()),
                     created_at: "2026-06-24T00:00:00Z".to_string(),
                 },
                 AgentEvent::Error {
                     message: "Network blocked".to_string(),
+                    retryable: false,
+                    terminal: true,
+                    thread_id: Some("thread-1".to_string()),
+                    turn_id: Some("turn-1".to_string()),
                     created_at: "2026-06-24T00:00:00Z".to_string(),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn preserves_agent_message_phase_and_item_lifecycle_timestamps() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1782259200000_i64,
+                    "item": {
+                        "id": "message-1",
+                        "type": "agentMessage",
+                        "text": "最终答复",
+                        "phase": "final_answer"
+                    }
+                }
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::ItemCompleted {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "message-1".to_string(),
+                item_type: "agentMessage".to_string(),
+                lifecycle: "completed".to_string(),
+                status: None,
+                completed_at: "2026-06-24T00:00:00+00:00".to_string(),
+                item: json!({
+                    "id": "message-1",
+                    "type": "agentMessage",
+                    "text": "最终答复",
+                    "phase": "final_answer"
+                }),
+                created_at: "2026-06-24T00:00:01Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn distinguishes_warnings_retryable_errors_and_terminal_errors() {
+        let warning = normalize_codex_notification_at(
+            &json!({
+                "method": "warning",
+                "params": {
+                    "message": "上下文接近限制",
+                    "threadId": "thread-1"
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let retryable = normalize_codex_notification_at(
+            &json!({
+                "method": "error",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "willRetry": true,
+                    "error": { "message": "连接中断" }
+                }
+            }),
+            "2026-06-24T00:00:01Z",
+        );
+        let terminal = normalize_codex_notification_at(
+            &json!({
+                "method": "error",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "willRetry": false,
+                    "error": { "message": "重试次数耗尽" }
+                }
+            }),
+            "2026-06-24T00:00:02Z",
+        );
+
+        assert!(matches!(warning.as_slice(), [AgentEvent::Warning { .. }]));
+        assert!(matches!(
+            retryable.as_slice(),
+            [AgentEvent::Error {
+                retryable: true,
+                terminal: false,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            terminal.as_slice(),
+            [AgentEvent::Error {
+                retryable: false,
+                terminal: true,
+                ..
+            }]
+        ));
+
+        let mut summary = AgentRunEventSummary::default();
+        update_agent_run_summary(&mut summary, &retryable[0]);
+        assert!(!summary.terminal);
+        assert!(summary.error_message.is_none());
+        update_agent_run_summary(&mut summary, &terminal[0]);
+        assert!(summary.terminal);
+        assert_eq!(summary.completion_status(), "failed");
+    }
+
+    #[test]
+    fn preserves_interrupted_turn_status() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "interrupted",
+                        "items": []
+                    }
+                }
+            }),
+            "2026-06-24T00:00:00Z",
+        );
+        let mut summary = AgentRunEventSummary::default();
+        update_agent_run_summary(&mut summary, &events[0]);
+
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::TurnCompleted { status, .. }] if status == "interrupted"
+        ));
+        assert!(summary.terminal);
+        assert_eq!(summary.completion_status(), "interrupted");
     }
 
     #[test]
@@ -3394,6 +3839,9 @@ mod tests {
         assert_eq!(
             completed_events,
             vec![AgentEvent::TurnCompleted {
+                thread_id: None,
+                turn_id: None,
+                status: "completed".to_string(),
                 final_message: Some("完成".to_string()),
                 created_at: "2026-06-24T00:00:02Z".to_string(),
             }]
@@ -3515,6 +3963,10 @@ mod tests {
             failed_events,
             vec![AgentEvent::Error {
                 message: "Sandbox denied command".to_string(),
+                retryable: false,
+                terminal: true,
+                thread_id: None,
+                turn_id: None,
                 created_at: "2026-06-24T00:00:00Z".to_string(),
             }]
         );
@@ -3522,6 +3974,10 @@ mod tests {
             error_events,
             vec![AgentEvent::Error {
                 message: "Authentication required".to_string(),
+                retryable: false,
+                terminal: true,
+                thread_id: None,
+                turn_id: None,
                 created_at: "2026-06-24T00:00:01Z".to_string(),
             }]
         );
@@ -3628,6 +4084,8 @@ mod tests {
             run_id: "run-1".to_string(),
             final_message: Some("完成".to_string()),
             changed_files: vec!["/tmp/demo/src/App.tsx".to_string()],
+            status: "completed".to_string(),
+            error: None,
             completed_at: "2026-06-24T00:00:00Z".to_string(),
         })
         .unwrap();
@@ -3639,6 +4097,8 @@ mod tests {
                 "runId": "run-1",
                 "finalMessage": "完成",
                 "changedFiles": ["/tmp/demo/src/App.tsx"],
+                "status": "completed",
+                "error": null,
                 "completedAt": "2026-06-24T00:00:00Z"
             })
         );
@@ -3666,6 +4126,9 @@ mod tests {
         update_agent_run_summary(
             &mut summary,
             &AgentEvent::TurnCompleted {
+                thread_id: Some("thread-1".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                status: "completed".to_string(),
                 final_message: Some("完成".to_string()),
                 created_at: "2026-06-24T00:00:02Z".to_string(),
             },
@@ -3679,6 +4142,10 @@ mod tests {
             &mut summary,
             &AgentEvent::Error {
                 message: "失败".to_string(),
+                retryable: false,
+                terminal: true,
+                thread_id: Some("thread-1".to_string()),
+                turn_id: Some("turn-1".to_string()),
                 created_at: "2026-06-24T00:00:03Z".to_string(),
             },
         );

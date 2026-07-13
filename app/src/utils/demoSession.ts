@@ -3,8 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type {
   AgentEvent,
+  AgentItem,
+  AgentMessagePhase,
   AgentRun,
   AgentRunKind,
+  AgentTurnStatus,
   CodingAgentRuntimeMetadata,
   CodingAgentProviderKind,
   DevServerLifecycleEventEnvelope,
@@ -53,9 +56,17 @@ export type DemoSessionAction =
       now: string;
     }
   | {
+      type: "append_agent_events";
+      runId: string;
+      events: AgentEvent[];
+      now: string;
+    }
+  | {
       type: "complete_agent_run";
       runId: string;
       now: string;
+      status?: Exclude<AgentTurnStatus, "inProgress">;
+      error?: string;
       finalMessage?: string;
       changedFiles?: string[];
       currentPreviewUrl?: string;
@@ -161,8 +172,12 @@ type AgentRunCompletedPayload = {
   runId: string;
   finalMessage?: string;
   changedFiles: string[];
+  status: Exclude<AgentTurnStatus, "inProgress">;
+  error?: string;
   completedAt: string;
 };
+
+export const AGENT_EVENT_BATCH_INTERVAL_MS = 75;
 
 type AgentErrorPayload = {
   demoSessionId?: string;
@@ -224,6 +239,11 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
       status: "running",
       codexThreadId: session.codexThreadId,
       events: [],
+      itemsById: {},
+      itemOrder: [],
+      messagesByItemId: {},
+      warnings: [],
+      errors: [],
       changedFiles: [],
       startedAt: action.now
     };
@@ -262,28 +282,24 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
     };
   }
 
-  if (action.type === "append_agent_event") {
+  if (action.type === "append_agent_event" || action.type === "append_agent_events") {
     const run = findRun(session, action.runId);
     if (!run || isTerminalRunStatus(run.status)) {
       return session;
     }
 
-    const changedFile = action.event.type === "file_change" ? action.event.path : undefined;
-    const nextCodexThreadId = action.event.type === "thread_started" ? action.event.threadId : session.codexThreadId;
-    const nextCodexTurnId = action.event.type === "turn_started" ? action.event.turnId : run.codexTurnId;
+    const events = action.type === "append_agent_event" ? [action.event] : action.events;
+    if (!events.length) {
+      return session;
+    }
+    const nextRun = events.reduce(applyAgentEvent, run);
 
     return {
       ...session,
-      codexThreadId: nextCodexThreadId,
+      codexThreadId: nextRun.codexThreadId ?? session.codexThreadId,
       runs: session.runs.map((candidate) =>
         candidate.id === action.runId
-          ? {
-              ...candidate,
-              codexThreadId: nextCodexThreadId ?? candidate.codexThreadId,
-              codexTurnId: nextCodexTurnId,
-              events: [...candidate.events, action.event],
-              changedFiles: changedFile ? appendUnique(candidate.changedFiles, changedFile) : candidate.changedFiles
-            }
+          ? nextRun
           : candidate
       ),
       updatedAt: action.now
@@ -296,22 +312,29 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
       return session;
     }
 
+    const outcome = action.status ?? "completed";
+    const runStatus: AgentRun["status"] =
+      outcome === "completed" ? "succeeded" : outcome === "interrupted" ? "cancelled" : "failed";
+    const sessionStatus: DemoSession["status"] =
+      runStatus === "succeeded" ? "preview_ready" : runStatus === "cancelled" ? "preview_ready" : "error";
+
     return {
       ...session,
       runs: session.runs.map((candidate) =>
         candidate.id === action.runId
           ? {
               ...candidate,
-              status: "succeeded",
+              status: runStatus,
               finalMessage: action.finalMessage ?? candidate.finalMessage,
               changedFiles: mergeUnique(candidate.changedFiles, action.changedFiles ?? []),
+              error: action.error ?? candidate.error,
               completedAt: action.now
             }
           : candidate
       ),
       currentPreviewUrl: action.currentPreviewUrl ?? session.currentPreviewUrl,
-      status: "preview_ready",
-      error: undefined,
+      status: sessionStatus,
+      error: runStatus === "failed" ? action.error ?? run.error ?? "Codex turn failed." : undefined,
       updatedAt: action.now
     };
   }
@@ -608,6 +631,34 @@ export function useDemoSession(
 
     const sessionId = session.id;
     const sessionProjectPath = session.projectPath;
+    let agentEventBatch: AgentEventPayload[] = [];
+    let agentEventBatchTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushAgentEventBatch = () => {
+      if (agentEventBatchTimer) {
+        clearTimeout(agentEventBatchTimer);
+        agentEventBatchTimer = undefined;
+      }
+      if (!agentEventBatch.length) {
+        return;
+      }
+
+      const batchesByRun = new Map<string, AgentEvent[]>();
+      for (const payload of agentEventBatch) {
+        const events = batchesByRun.get(payload.runId) ?? [];
+        events.push(payload.event);
+        batchesByRun.set(payload.runId, events);
+      }
+      agentEventBatch = [];
+
+      for (const [runId, events] of batchesByRun) {
+        dispatch({
+          type: "append_agent_events",
+          runId,
+          events,
+          now: events[events.length - 1].createdAt
+        });
+      }
+    };
     const unlistenPromises = [
       listen<AgentRunStartedPayload>("agent://run-started", (event) => {
         if (event.payload.demoSessionId !== sessionId) {
@@ -628,25 +679,27 @@ export function useDemoSession(
           return;
         }
 
-        dispatch({
-          type: "append_agent_event",
-          runId: event.payload.runId,
-          event: event.payload.event,
-          now: event.payload.event.createdAt
-        });
+        agentEventBatch.push(event.payload);
+        agentEventBatchTimer ??= setTimeout(flushAgentEventBatch, AGENT_EVENT_BATCH_INTERVAL_MS);
       }),
       listen<AgentRunCompletedPayload>("agent://run-completed", (event) => {
         if (event.payload.demoSessionId !== sessionId) {
           return;
         }
 
+        flushAgentEventBatch();
         dispatch({
           type: "complete_agent_run",
           runId: event.payload.runId,
+          status: event.payload.status,
+          error: event.payload.error,
           finalMessage: event.payload.finalMessage,
           changedFiles: event.payload.changedFiles,
           now: event.payload.completedAt
         });
+        if (event.payload.status !== "completed") {
+          return;
+        }
         dispatchProjectFilesChanged(sessionProjectPath, event.payload.changedFiles);
         startDevServerTimeout(devServerTimeoutRef, (message) => {
           dispatch({
@@ -700,6 +753,7 @@ export function useDemoSession(
           return;
         }
 
+        flushAgentEventBatch();
         dispatch({
           type: "fail_agent_run",
           runId: event.payload.runId,
@@ -710,6 +764,9 @@ export function useDemoSession(
     ];
 
     return () => {
+      if (agentEventBatchTimer) {
+        clearTimeout(agentEventBatchTimer);
+      }
       for (const unlistenPromise of unlistenPromises) {
         void unlistenPromise.then((unlisten) => unlisten());
       }
@@ -770,6 +827,234 @@ function canStopPreview(session: DemoSession | undefined) {
 
 function isTerminalRunStatus(status: AgentRun["status"]) {
   return status === "succeeded" || status === "failed" || status === "cancelled";
+}
+
+function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
+  let nextRun: AgentRun = {
+    ...run,
+    events: [...run.events, event]
+  };
+
+  if (event.type === "thread_started") {
+    return { ...nextRun, codexThreadId: event.threadId };
+  }
+  if (event.type === "turn_started") {
+    return { ...nextRun, codexTurnId: event.turnId ?? nextRun.codexTurnId };
+  }
+  if (event.type === "file_change") {
+    return { ...nextRun, changedFiles: appendUnique(nextRun.changedFiles, event.path) };
+  }
+  if (event.type === "plan_updated") {
+    return {
+      ...nextRun,
+      codexThreadId: event.threadId,
+      codexTurnId: event.turnId,
+      currentPlan: {
+        threadId: event.threadId,
+        turnId: event.turnId,
+        explanation: event.explanation,
+        steps: event.plan,
+        updatedAt: event.createdAt
+      }
+    };
+  }
+  if (event.type === "warning") {
+    return {
+      ...nextRun,
+      codexThreadId: event.threadId ?? nextRun.codexThreadId,
+      codexTurnId: event.turnId ?? nextRun.codexTurnId,
+      warnings: [...(nextRun.warnings ?? []), event]
+    };
+  }
+  if (event.type === "error") {
+    return {
+      ...nextRun,
+      codexThreadId: event.threadId ?? nextRun.codexThreadId,
+      codexTurnId: event.turnId ?? nextRun.codexTurnId,
+      errors: [...(nextRun.errors ?? []), event],
+      error: event.terminal ? event.message : nextRun.error
+    };
+  }
+  if (event.type === "turn_completed") {
+    return {
+      ...nextRun,
+      codexThreadId: event.threadId ?? nextRun.codexThreadId,
+      codexTurnId: event.turnId ?? nextRun.codexTurnId,
+      finalMessage: event.finalMessage ?? nextRun.finalMessage
+    };
+  }
+  if (event.type !== "item_started" && event.type !== "item_delta" && event.type !== "item_completed") {
+    return nextRun;
+  }
+
+  const item = applyAgentItemEvent((nextRun.itemsById ?? {})[event.itemId], event);
+  const itemsById = {
+    ...(nextRun.itemsById ?? {}),
+    [item.id]: item
+  };
+  const messagesByItemId =
+    item.type === "agentMessage"
+      ? {
+          ...(nextRun.messagesByItemId ?? {}),
+          [item.id]: item
+        }
+      : nextRun.messagesByItemId ?? {};
+  const changedFiles = extractChangedFilePaths(item.data).reduce(
+    (paths, path) => appendUnique(paths, path),
+    nextRun.changedFiles
+  );
+
+  return {
+    ...nextRun,
+    codexThreadId: event.threadId,
+    codexTurnId: event.turnId,
+    itemsById,
+    itemOrder: appendUnique(nextRun.itemOrder ?? [], item.id),
+    messagesByItemId,
+    changedFiles
+  };
+}
+
+function applyAgentItemEvent(
+  existing: AgentItem | undefined,
+  event: Extract<AgentEvent, { type: "item_started" | "item_delta" | "item_completed" }>
+): AgentItem {
+  if (event.type === "item_started") {
+    const data = existing?.lifecycle === "completed"
+      ? existing.data
+      : { ...(existing?.data ?? {}), ...event.item };
+    return hydrateAgentItem({
+      id: event.itemId,
+      type: existing?.lifecycle === "completed" ? existing.type : event.itemType,
+      threadId: event.threadId,
+      turnId: event.turnId,
+      lifecycle: existing?.lifecycle ?? event.lifecycle,
+      status: existing?.lifecycle === "completed" ? existing.status : event.status,
+      startedAt: event.startedAt,
+      updatedAt: event.createdAt,
+      completedAt: existing?.completedAt,
+      data,
+      text: existing?.text,
+      phase: existing?.phase,
+      output: existing?.output,
+      reasoningSummary: existing?.reasoningSummary
+    });
+  }
+
+  if (event.type === "item_completed") {
+    const aggregatedOutput = readString(event.item.aggregatedOutput);
+    return hydrateAgentItem({
+      id: event.itemId,
+      type: event.itemType,
+      threadId: event.threadId,
+      turnId: event.turnId,
+      lifecycle: event.lifecycle,
+      status: event.status,
+      startedAt: existing?.startedAt ?? event.completedAt,
+      updatedAt: event.createdAt,
+      completedAt: event.completedAt,
+      data: event.item,
+      text: readString(event.item.text) ?? existing?.text,
+      phase: event.itemType === "agentMessage"
+        ? readAgentMessagePhase(event.item.phase) ?? "unknown"
+        : existing?.phase,
+      output: aggregatedOutput ?? existing?.output,
+      reasoningSummary: existing?.reasoningSummary
+    });
+  }
+
+  if (existing?.lifecycle === "completed") {
+    return existing;
+  }
+
+  const item: AgentItem = existing ?? {
+    id: event.itemId,
+    type: event.itemType,
+    threadId: event.threadId,
+    turnId: event.turnId,
+    lifecycle: event.lifecycle,
+    startedAt: event.createdAt,
+    updatedAt: event.createdAt,
+    data: {}
+  };
+  const deltaText = readString(event.delta);
+  const next: AgentItem = {
+    ...item,
+    threadId: event.threadId,
+    turnId: event.turnId,
+    type: item.type === "unknown" ? event.itemType : item.type,
+    updatedAt: event.createdAt,
+    data: {
+      ...item.data,
+      lastDelta: event.delta
+    }
+  };
+
+  if (event.method === "item/agentMessage/delta" || event.method === "item/plan/delta") {
+    next.text = `${item.text ?? ""}${deltaText ?? ""}`;
+  } else if (
+    event.method === "item/commandExecution/outputDelta" ||
+    event.method === "item/fileChange/outputDelta"
+  ) {
+    next.output = `${item.output ?? ""}${deltaText ?? ""}`;
+  } else if (event.method === "item/fileChange/patchUpdated") {
+    next.data = {
+      ...next.data,
+      changes: Array.isArray(event.delta) ? event.delta : readRecord(event.delta)?.changes ?? []
+    };
+  } else if (event.method === "item/reasoning/summaryTextDelta") {
+    next.reasoningSummary = `${item.reasoningSummary ?? ""}${deltaText ?? ""}`;
+  }
+
+  return hydrateAgentItem(next);
+}
+
+function hydrateAgentItem(item: AgentItem): AgentItem {
+  if (item.type !== "agentMessage") {
+    return item;
+  }
+
+  const dataText = readString(item.data.text);
+  const text = item.lifecycle === "completed"
+    ? dataText ?? item.text
+    : (item.text?.length ?? 0) > (dataText?.length ?? 0)
+      ? item.text
+      : dataText ?? item.text;
+
+  return {
+    ...item,
+    text,
+    phase: readAgentMessagePhase(item.data.phase) ?? item.phase ?? "unknown"
+  };
+}
+
+function extractChangedFilePaths(data: Record<string, unknown>) {
+  if (!Array.isArray(data.changes)) {
+    return [];
+  }
+
+  return data.changes.flatMap((change) => {
+    const record = readRecord(change);
+    const path = record ? readString(record.path) : undefined;
+    return path ? [path] : [];
+  });
+}
+
+function readAgentMessagePhase(value: unknown): AgentMessagePhase | undefined {
+  if (value === "commentary" || value === "final_answer") {
+    return value;
+  }
+  return value === null || value === undefined ? undefined : "unknown";
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function readString(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }
 
 function findRun(session: DemoSession, runId: string) {
