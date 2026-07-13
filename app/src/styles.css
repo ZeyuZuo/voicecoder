@@ -924,6 +924,14 @@ button {
   font-size: 10.5px;
 }
 
+.agent-token-usage {
+  margin-left: auto;
+  color: #7a8490;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .agent-diff-additions {
   color: #287a47;
 }
@@ -1101,6 +1109,182 @@ button {
   color: #3978a8;
   font-size: 9.5px;
   font-weight: 700;
+}
+
+.agent-reasoning-card {
+  border-color: #dfe2ea;
+  background: #fafafd;
+}
+
+.agent-reasoning-card > header svg {
+  color: #6f668d;
+}
+
+.agent-restricted-debug-note {
+  color: #85808f;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.agent-tool-card > header > span,
+.agent-collaboration-card > header > span,
+.agent-image-card > header > span,
+.agent-hook-card > header > span,
+.agent-alert-card > header > span {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #77828e;
+  font-size: 10.5px;
+}
+
+.agent-tool-card.is-mcp > header svg {
+  color: #58784f;
+}
+
+.agent-tool-card.is-dynamic > header svg {
+  color: #756287;
+}
+
+.agent-tool-card.is-failed,
+.agent-hook-card.is-failed {
+  border-color: #edcbc5;
+  background: #fff8f6;
+}
+
+.agent-tool-progress,
+.agent-tool-error,
+.agent-hook-card > p,
+.agent-model-card > p {
+  margin: 0;
+  color: #596570;
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-tool-error {
+  color: #a54138;
+}
+
+.agent-tool-card > small,
+.agent-hook-card > small,
+.agent-model-card > small {
+  color: #7a8590;
+  font-size: 10.5px;
+}
+
+.agent-detail-panel {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-detail-content {
+  overflow: auto;
+  max-height: 300px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #dfe5e9;
+  border-radius: 7px;
+  background: #f2f4f5;
+  color: #3f4851;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-detail-truncated {
+  color: #8a7a63;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.agent-collaboration-card {
+  border-color: #d9e3e9;
+  background: #f8fafb;
+}
+
+.agent-collaboration-card > header svg {
+  color: #44758c;
+}
+
+.agent-state-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-state-list li {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) auto minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  color: #64717c;
+  font-size: 10.5px;
+}
+
+.agent-state-list li code,
+.agent-inline-path {
+  overflow: hidden;
+  color: #47545f;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-state-list li small {
+  overflow: hidden;
+  color: #7a8590;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-web-search-card > header svg {
+  color: #3977a9;
+}
+
+.agent-image-card > header svg {
+  color: #8a6d3b;
+}
+
+.agent-status-card {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  border-color: #e4e7e9;
+  background: #fbfbfa;
+}
+
+.agent-status-card > header svg {
+  color: #6d7882;
+}
+
+.agent-hook-card {
+  border-style: dashed;
+  background: #fafbfb;
+}
+
+.agent-hook-card > header svg {
+  color: #687982;
+}
+
+.agent-model-card.is-warning {
+  border-color: #ead7a6;
+  background: #fffaf0;
+}
+
+.agent-model-card.is-warning > header svg {
+  color: #a9781c;
+}
+
+.agent-model-card.is-completed > header svg,
+.agent-model-card.is-verification > header svg {
+  color: #438256;
 }
 
 .agent-work-card {
@@ -1329,6 +1513,20 @@ button {
 .agent-alert-card.is-warning > header svg,
 .agent-progress-event.is-warning > svg {
   color: #a9781c;
+}
+
+.agent-alert-card.is-warning.is-guardian {
+  border-color: #e2c58a;
+  background: #fff8e8;
+}
+
+.agent-alert-card.is-warning.is-guardian > header svg {
+  color: #916319;
+}
+
+.agent-alert-details {
+  color: #6e747b !important;
+  font-size: 11px !important;
 }
 
 .agent-alert-card.is-error.is-terminal,

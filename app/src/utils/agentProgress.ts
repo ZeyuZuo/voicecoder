@@ -178,7 +178,10 @@ export function getAgentLatestProgressAt(run: AgentRun) {
     run.currentPlan?.updatedAt,
     ...run.events.map((event) => event.createdAt),
     ...Object.values(run.itemsById ?? {}).map((item) => item.updatedAt),
-    ...(run.warnings ?? []).map((warning) => warning.createdAt),
+    ...Object.values(run.hooksById ?? {}).map((hook) => hook.updatedAt),
+    run.modelSafetyBuffering?.createdAt,
+    run.modelVerification?.createdAt,
+    ...(run.warnings ?? []).map((warning) => warning.updatedAt ?? warning.createdAt),
     ...(run.errors ?? []).map((error) => error.createdAt)
   ].filter((value): value is string => Boolean(value));
 

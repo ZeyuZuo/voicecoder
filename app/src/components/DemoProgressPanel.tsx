@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Bot,
+  BrainCircuit,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -10,10 +11,22 @@ import {
   Clock,
   FileCode2,
   GitCompare,
+  ImageIcon,
+  Info,
+  Layers3,
   ListChecks,
   LoaderCircle,
+  Plug,
+  RefreshCw,
+  Search,
+  ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Terminal,
+  Timer,
+  Users,
+  Workflow,
+  Wrench,
   XCircle
 } from "lucide-react";
 import { isTauri } from "@tauri-apps/api/core";
@@ -22,10 +35,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEvent,
   AgentFileChange,
+  AgentHookRun,
   AgentItem,
   AgentPlan,
   AgentRun,
   AgentRunError,
+  AgentStructuredPreview,
   AgentWarning,
   DemoSession
 } from "../types/app";
@@ -42,6 +57,8 @@ type DemoProgressPanelProps = {
   session: DemoSession;
   compact?: boolean;
 };
+
+const AGENT_HOOK_DETAILS_LIMIT = 12_000;
 
 type AgentTimelineEntry =
   | {
@@ -69,6 +86,18 @@ type AgentTimelineEntry =
       warning: AgentWarning;
     }
   | {
+      kind: "hook";
+      id: string;
+      occurredAt: string;
+      hook: AgentHookRun;
+    }
+  | {
+      kind: "hook_group";
+      id: string;
+      occurredAt: string;
+      hooks: AgentHookRun[];
+    }
+  | {
       kind: "error";
       id: string;
       occurredAt: string;
@@ -94,8 +123,14 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
     () => latestRun ? buildAgentTimelineEntries(latestRun) : [],
     [latestRun]
   );
-  const latestProgressAt = latestRun ? getAgentLatestProgressAt(latestRun) : undefined;
-  const progressVersion = latestRun ? getAgentProgressVersion(latestRun, latestProgressAt) : "idle";
+  const latestProgressAt = useMemo(
+    () => latestRun ? getAgentLatestProgressAt(latestRun) : undefined,
+    [latestRun]
+  );
+  const progressVersion = useMemo(
+    () => latestRun ? getAgentProgressVersion(latestRun, latestProgressAt) : "idle",
+    [latestRun, latestProgressAt]
+  );
   const timeline = useAgentTimelineAutoScroll(latestRun?.id, progressVersion);
 
   if (!latestRun) {
@@ -160,6 +195,15 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
         <Clock size={13} />
         <span>{formatLatestProgress(progressAgeMs)}</span>
         {waitingForCodex ? <strong>仍在等待 Codex</strong> : null}
+        {latestRun.tokenUsage ? (
+          <span className="agent-token-usage">
+            Token 本轮 {formatCompactNumber(latestRun.tokenUsage.last.totalTokens)}
+            <span> · 累计 {formatCompactNumber(latestRun.tokenUsage.total.totalTokens)}</span>
+            {latestRun.tokenUsage.modelContextWindow
+              ? <span> · 窗口 {formatCompactNumber(latestRun.tokenUsage.modelContextWindow)}</span>
+              : null}
+          </span>
+        ) : null}
       </div>
 
       <div className="agent-progress-timeline-shell">
@@ -226,6 +270,12 @@ function AgentTimelineEntryView({
   if (entry.kind === "warning") {
     return <AgentWarningCard warning={entry.warning} />;
   }
+  if (entry.kind === "hook") {
+    return <AgentHookCard hook={entry.hook} />;
+  }
+  if (entry.kind === "hook_group") {
+    return <AgentHookGroupCard hooks={entry.hooks} />;
+  }
   if (entry.kind === "error") {
     return <AgentErrorCard error={entry.error} />;
   }
@@ -235,7 +285,25 @@ function AgentTimelineEntryView({
   if (entry.item.type === "commandExecution") {
     return <CommandExecutionCard item={entry.item} nowMs={nowMs} occurredAt={entry.occurredAt} />;
   }
-  return <AgentMessageCard item={entry.item} occurredAt={entry.occurredAt} />;
+  if (entry.item.type === "agentMessage" || entry.item.type === "plan") {
+    return <AgentMessageCard item={entry.item} occurredAt={entry.occurredAt} />;
+  }
+  if (entry.item.presentation?.kind === "reasoning") {
+    return <AgentReasoningCard item={entry.item} occurredAt={entry.occurredAt} />;
+  }
+  if (entry.item.presentation?.kind === "toolCall") {
+    return <AgentToolCallCard item={entry.item} occurredAt={entry.occurredAt} />;
+  }
+  if (entry.item.presentation?.kind === "collaboration") {
+    return <AgentCollaborationCard item={entry.item} occurredAt={entry.occurredAt} />;
+  }
+  if (entry.item.presentation?.kind === "webSearch") {
+    return <AgentWebSearchCard item={entry.item} occurredAt={entry.occurredAt} />;
+  }
+  if (entry.item.presentation?.kind === "image") {
+    return <AgentImageCard item={entry.item} occurredAt={entry.occurredAt} />;
+  }
+  return <AgentStatusItemCard item={entry.item} occurredAt={entry.occurredAt} />;
 }
 
 function AgentPlanCard({ plan, occurredAt }: { plan: AgentPlan; occurredAt: string }) {
@@ -289,6 +357,306 @@ function AgentMessageCard({ item, occurredAt }: { item: AgentItem; occurredAt: s
       </header>
       <p>{item.text || (streaming ? "Codex 正在组织说明…" : "Codex 已完成这条消息。")}</p>
     </article>
+  );
+}
+
+function AgentReasoningCard({ item, occurredAt }: { item: AgentItem; occurredAt: string }) {
+  const presentation = item.presentation;
+  if (!presentation || presentation.kind !== "reasoning") {
+    return null;
+  }
+  const active = item.lifecycle === "in_progress";
+  return (
+    <article className={`agent-timeline-card agent-reasoning-card ${active ? "is-active" : "is-completed"}`}>
+      <header>
+        <BrainCircuit size={15} />
+        <strong>{active ? "正在分析" : "分析完成"}</strong>
+        {active ? <span className="agent-streaming-label">正在更新</span> : null}
+        <AgentEventTime occurredAt={occurredAt} />
+      </header>
+      {presentation.summary ? (
+        <AgentExpandableDetails label="查看分析摘要" content={presentation.summary} />
+      ) : (
+        <p className="agent-work-placeholder">Codex 正在整理分析摘要…</p>
+      )}
+      {presentation.rawTextAvailable ? (
+        <small className="agent-restricted-debug-note">原始分析仅保留在受限协议日志，页面不加载正文</small>
+      ) : null}
+    </article>
+  );
+}
+
+function AgentToolCallCard({ item, occurredAt }: { item: AgentItem; occurredAt: string }) {
+  const presentation = item.presentation;
+  if (!presentation || presentation.kind !== "toolCall") {
+    return null;
+  }
+  const failed = presentation.status === "failed" || presentation.success === false || Boolean(presentation.error);
+  const target = presentation.toolKind === "mcp"
+    ? [presentation.server, presentation.tool].filter(Boolean).join(" / ")
+    : [presentation.namespace, presentation.tool].filter(Boolean).join(" / ");
+  const details = formatToolCallDetails(presentation.arguments, presentation.result);
+
+  return (
+    <article className={`agent-timeline-card agent-tool-card is-${presentation.toolKind} ${failed ? "is-failed" : ""}`}>
+      <header>
+        {presentation.toolKind === "mcp" ? <Plug size={15} /> : <Wrench size={15} />}
+        <strong>{presentation.toolKind === "mcp" ? "MCP 工具" : "动态工具"} · {target || "unknown"}</strong>
+        <span>{getActivityStatusLabel(presentation.status, item.lifecycle)}</span>
+        <AgentEventTime occurredAt={occurredAt} />
+      </header>
+      {presentation.progress ? <p className="agent-tool-progress">{presentation.progress}</p> : null}
+      {presentation.error ? <p className="agent-tool-error">{presentation.error}</p> : null}
+      {presentation.durationMs !== undefined ? <small>耗时 {formatDuration(presentation.durationMs)}</small> : null}
+      {details ? (
+        <AgentExpandableDetails
+          label="查看参数与结果"
+          content={details}
+          truncated={Boolean(presentation.arguments?.truncated || presentation.result?.truncated)}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function AgentCollaborationCard({ item, occurredAt }: { item: AgentItem; occurredAt: string }) {
+  const presentation = item.presentation;
+  if (!presentation || presentation.kind !== "collaboration") {
+    return null;
+  }
+  const title = presentation.activityKind === "subAgent"
+    ? getSubAgentActivityLabel(presentation.status)
+    : getCollabToolLabel(presentation.tool);
+  const targetCount = presentation.receiverThreadIds.length || presentation.agentStates.length;
+
+  return (
+    <article className={`agent-timeline-card agent-collaboration-card is-${normalizeCssToken(presentation.status)}`}>
+      <header>
+        <Users size={15} />
+        <strong>{title}</strong>
+        {targetCount ? <span>{targetCount} 个子 Agent</span> : null}
+        <AgentEventTime occurredAt={occurredAt} />
+      </header>
+      {presentation.agentPath ? <code className="agent-inline-path">{presentation.agentPath}</code> : null}
+      {presentation.agentStates.length ? (
+        <ul className="agent-state-list">
+          {presentation.agentStates.map((state) => (
+            <li key={state.threadId}>
+              <code>{compactAgentId(state.threadId)}</code>
+              <span>{getActivityStatusLabel(state.status)}</span>
+              {state.message ? <small>{state.message}</small> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {presentation.prompt ? (
+        <AgentExpandableDetails
+          label="查看协作提示"
+          content={presentation.prompt.text}
+          truncated={presentation.prompt.truncated}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function AgentWebSearchCard({ item, occurredAt }: { item: AgentItem; occurredAt: string }) {
+  const presentation = item.presentation;
+  if (!presentation || presentation.kind !== "webSearch") {
+    return null;
+  }
+  const detail = presentation.query ?? presentation.url ?? presentation.pattern;
+  return (
+    <article className="agent-timeline-card agent-web-search-card">
+      <header>
+        <Search size={15} />
+        <strong>{getWebSearchActionLabel(presentation.action)}</strong>
+        <AgentEventTime occurredAt={occurredAt} />
+      </header>
+      {detail ? <code className="agent-inline-path">{detail}</code> : null}
+    </article>
+  );
+}
+
+function AgentImageCard({ item, occurredAt }: { item: AgentItem; occurredAt: string }) {
+  const presentation = item.presentation;
+  if (!presentation || presentation.kind !== "image") {
+    return null;
+  }
+  const path = presentation.savedPath ?? presentation.path;
+  return (
+    <article className={`agent-timeline-card agent-image-card is-${normalizeCssToken(presentation.status)}`}>
+      <header>
+        {presentation.activityKind === "generation" ? <Sparkles size={15} /> : <ImageIcon size={15} />}
+        <strong>{presentation.activityKind === "generation" ? "图像生成" : "查看图像"}</strong>
+        <span>{getActivityStatusLabel(presentation.status, item.lifecycle)}</span>
+        <AgentEventTime occurredAt={occurredAt} />
+      </header>
+      {path ? <code className="agent-inline-path">{path}</code> : null}
+      {presentation.revisedPrompt ? (
+        <AgentExpandableDetails
+          label="查看修订提示"
+          content={presentation.revisedPrompt.text}
+          truncated={presentation.revisedPrompt.truncated}
+        />
+      ) : null}
+      {!path && presentation.resultAvailable ? <p className="agent-work-placeholder">图像结果已生成</p> : null}
+    </article>
+  );
+}
+
+function AgentStatusItemCard({ item, occurredAt }: { item: AgentItem; occurredAt: string }) {
+  const presentation = item.presentation;
+  const activityKind = presentation?.kind === "status" ? presentation.activityKind : "generic";
+  const status = presentation?.kind === "status" ? presentation.status : item.status ?? "unknown";
+  const label = getStatusItemLabel(item.type, item.lifecycle, presentation?.kind === "status" ? presentation.durationMs : undefined);
+  const Icon = activityKind === "contextCompaction"
+    ? Layers3
+    : activityKind === "sleep"
+      ? Timer
+      : activityKind === "reviewMode"
+        ? ShieldCheck
+        : activityKind === "hookPrompt"
+          ? Workflow
+          : Info;
+
+  return (
+    <article className={`agent-timeline-card agent-status-card is-${normalizeCssToken(status)}`}>
+      <header>
+        <Icon size={15} />
+        <strong>{label}</strong>
+        <AgentEventTime occurredAt={occurredAt} />
+      </header>
+      {presentation?.kind === "status" && presentation.details ? (
+        <AgentExpandableDetails
+          label="查看协议详情"
+          content={presentation.details.text}
+          truncated={presentation.details.truncated}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function AgentHookCard({ hook }: { hook: AgentHookRun }) {
+  const failed = hook.status === "failed" || hook.status === "blocked" || hook.status === "stopped";
+  const hookDetails = buildBoundedHookDetails([hook]);
+
+  return (
+    <article className={`agent-timeline-card agent-hook-card is-${normalizeCssToken(hook.status)} ${failed ? "is-failed" : ""}`}>
+      <header>
+        <Workflow size={15} />
+        <strong>Hook · {getHookEventLabel(hook.eventName)}</strong>
+        <span>{getActivityStatusLabel(hook.status, hook.lifecycle)}</span>
+        <AgentEventTime occurredAt={hook.updatedAt} />
+      </header>
+      {hook.statusMessage ? <p>{hook.statusMessage}</p> : null}
+      {hook.durationMs !== undefined ? <small>耗时 {formatDuration(hook.durationMs)}</small> : null}
+      {hookDetails.text ? (
+        <AgentExpandableDetails
+          label="查看 Hook 详情"
+          content={hookDetails.text}
+          truncated={Boolean(hook.restrictedDebugAvailable || hookDetails.truncated)}
+        />
+      ) : hook.restrictedDebugAvailable ? (
+        <small className="agent-detail-truncated">页面仅保留安全摘要，完整原始内容见受限协议日志</small>
+      ) : null}
+    </article>
+  );
+}
+
+function AgentHookGroupCard({ hooks }: { hooks: AgentHookRun[] }) {
+  const active = hooks.some((hook) => hook.lifecycle === "in_progress" || hook.status === "running");
+  const latestHook = hooks.reduce((latest, hook) =>
+    Date.parse(hook.updatedAt) > Date.parse(latest.updatedAt) ? hook : latest
+  );
+  const eventCounts = new Map<string, number>();
+  for (const hook of hooks) {
+    const label = getHookEventLabel(hook.eventName);
+    eventCounts.set(label, (eventCounts.get(label) ?? 0) + 1);
+  }
+  const summary = [...eventCounts.entries()]
+    .slice(0, 3)
+    .map(([label, count]) => `${label}${count > 1 ? ` × ${count}` : ""}`)
+    .join(" · ");
+  const hookDetails = buildBoundedHookDetails(hooks);
+  const truncated = hookDetails.truncated || hooks.some((hook) => hook.restrictedDebugAvailable);
+
+  return (
+    <article className={`agent-timeline-card agent-hook-card agent-hook-group ${active ? "is-active" : "is-completed"}`}>
+      <header>
+        <Workflow size={15} />
+        <strong>Hooks · {hooks.length} 次</strong>
+        <span>{active ? "运行中" : "已完成"}</span>
+        <AgentEventTime occurredAt={latestHook.updatedAt} />
+      </header>
+      {summary ? <p>{summary}</p> : null}
+      {hookDetails.text ? (
+        <AgentExpandableDetails
+          label="查看 Hook 详情"
+          content={hookDetails.text}
+          truncated={truncated}
+        />
+      ) : truncated ? (
+        <small className="agent-detail-truncated">页面仅保留安全摘要，完整原始内容见受限协议日志</small>
+      ) : null}
+    </article>
+  );
+}
+
+function buildBoundedHookDetails(hooks: AgentHookRun[]) {
+  let text = "";
+  let truncated = false;
+  for (const hook of hooks) {
+    const lines = [
+      `${getHookEventLabel(hook.eventName)} · ${getActivityStatusLabel(hook.status, hook.lifecycle)}`,
+      hook.statusMessage,
+      hook.sourcePath ? `来源：${hook.sourcePath}` : undefined,
+      ...hook.entries.map((entry) => `[${entry.kind}] ${entry.text}`)
+    ].filter((value): value is string => Boolean(value));
+    const block = lines.join("\n");
+    const separator = text ? "\n\n" : "";
+    const remaining = AGENT_HOOK_DETAILS_LIMIT - text.length - separator.length;
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    if (block.length > remaining) {
+      text = `${text}${separator}${block.slice(0, Math.max(0, remaining - 1))}…`;
+      truncated = true;
+      break;
+    }
+    text = `${text}${separator}${block}`;
+  }
+  return { text, truncated };
+}
+
+function AgentExpandableDetails({
+  label,
+  content,
+  truncated = false
+}: {
+  label: string;
+  content: string;
+  truncated?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="agent-detail-panel">
+      <button
+        className="agent-expand-button"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        {expanded ? "收起详情" : label}
+      </button>
+      {truncated ? (
+        <small className="agent-detail-truncated">页面仅保留安全摘要，完整原始内容见受限协议日志</small>
+      ) : null}
+      {expanded ? <pre className="agent-detail-content">{content}</pre> : null}
+    </div>
   );
 }
 
@@ -446,14 +814,26 @@ function CommandExecutionCard({
 }
 
 function AgentWarningCard({ warning }: { warning: AgentWarning }) {
+  const source = warning.source ?? "runtime";
+  const title = source === "guardian"
+    ? "安全审查提醒"
+    : source === "config"
+      ? "配置提醒"
+      : "非阻塞提醒";
+  const location = warning.path
+    ? `${warning.path}${warning.range ? `:${warning.range.start.line}:${warning.range.start.column}` : ""}`
+    : undefined;
   return (
-    <article className="agent-timeline-card agent-alert-card is-warning" role="status">
+    <article className={`agent-timeline-card agent-alert-card is-warning is-${source}`} role="status">
       <header>
-        <AlertTriangle size={15} />
-        <strong>非阻塞提醒</strong>
-        <AgentEventTime occurredAt={warning.createdAt} />
+        {source === "guardian" ? <ShieldAlert size={15} /> : <AlertTriangle size={15} />}
+        <strong>{title}</strong>
+        {(warning.count ?? 1) > 1 ? <span>重复 {warning.count} 次</span> : null}
+        <AgentEventTime occurredAt={warning.updatedAt ?? warning.createdAt} />
       </header>
       <p>{warning.message}</p>
+      {warning.details ? <p className="agent-alert-details">{warning.details}</p> : null}
+      {location ? <code className="agent-inline-path">{location}</code> : null}
     </article>
   );
 }
@@ -482,6 +862,59 @@ function AgentEventCard({ event }: { event: AgentEvent }) {
           <AgentEventTime occurredAt={event.createdAt} />
         </header>
         <p>{event.text}</p>
+      </article>
+    );
+  }
+
+  if (event.type === "context_compacted") {
+    return (
+      <article className="agent-timeline-card agent-status-card is-completed">
+        <header>
+          <Layers3 size={15} />
+          <strong>长对话上下文已整理</strong>
+          <AgentEventTime occurredAt={event.createdAt} />
+        </header>
+      </article>
+    );
+  }
+
+  if (event.type === "model_rerouted") {
+    return (
+      <article className="agent-timeline-card agent-model-card is-warning">
+        <header>
+          <RefreshCw size={15} />
+          <strong>模型已切换</strong>
+          <AgentEventTime occurredAt={event.createdAt} />
+        </header>
+        <p><code>{event.fromModel}</code> → <code>{event.toModel}</code></p>
+        <small>{getModelRerouteReasonLabel(event.reason)}</small>
+      </article>
+    );
+  }
+
+  if (event.type === "model_safety_buffering_updated") {
+    return (
+      <article className={`agent-timeline-card agent-model-card ${event.showBufferingUi ? "is-warning" : "is-completed"}`}>
+        <header>
+          <ShieldAlert size={15} />
+          <strong>{event.showBufferingUi ? "安全缓冲处理中" : "安全缓冲已结束"}</strong>
+          <AgentEventTime occurredAt={event.createdAt} />
+        </header>
+        {event.reasons.length ? <p>{event.reasons.join(" · ")}</p> : null}
+        {event.fasterModel ? <small>可切换到 {event.fasterModel}</small> : null}
+      </article>
+    );
+  }
+
+  if (event.type === "model_verification_updated") {
+    return (
+      <article className="agent-timeline-card agent-model-card is-verification">
+        <header>
+          <ShieldCheck size={15} />
+          <strong>{event.verifications.length ? "模型验证已启用" : "模型验证已清除"}</strong>
+          <AgentEventTime occurredAt={event.createdAt} />
+        </header>
+        {event.verifications.length ? <p>{event.verifications.map(getModelVerificationLabel).join(" · ")}</p> : null}
       </article>
     );
   }
@@ -611,23 +1044,20 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
   const representedItemIds = new Set<string>();
 
   for (const item of orderedItems) {
+    representedItemIds.add(item.id);
     if (item.type === "fileChange") {
       fileItems.push(item);
-      representedItemIds.add(item.id);
       continue;
     }
-    if (item.type === "commandExecution" || item.type === "agentMessage" || item.type === "plan") {
-      representedItemIds.add(item.id);
-      if (item.type === "plan" && run.currentPlan) {
-        continue;
-      }
-      push({
-        kind: "item",
-        id: `item-${item.id}`,
-        occurredAt: item.startedAt || item.updatedAt,
-        item
-      });
+    if (item.type === "plan" && run.currentPlan) {
+      continue;
     }
+    push({
+      kind: "item",
+      id: `item-${item.id}`,
+      occurredAt: item.startedAt || item.updatedAt,
+      item
+    });
   }
 
   if (fileItems.length || Object.keys(run.filesByPath ?? {}).length || run.aggregateDiff) {
@@ -650,6 +1080,65 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
       id: `plan-${run.currentPlan.turnId}`,
       occurredAt: run.currentPlan.updatedAt,
       plan: run.currentPlan
+    });
+  }
+
+  const routineHooks: AgentHookRun[] = [];
+  for (const hookId of run.hookOrder ?? []) {
+    const hook = run.hooksById?.[hookId];
+    if (!hook) {
+      continue;
+    }
+    if (hook.status === "failed" || hook.status === "blocked" || hook.status === "stopped") {
+      push({
+        kind: "hook",
+        id: `hook-${hook.id}`,
+        occurredAt: hook.startedAt,
+        hook
+      });
+    } else {
+      routineHooks.push(hook);
+    }
+  }
+
+  if (routineHooks.length === 1) {
+    const [hook] = routineHooks;
+    push({
+      kind: "hook",
+      id: `hook-${hook.id}`,
+      occurredAt: hook.startedAt,
+      hook
+    });
+  } else if (routineHooks.length > 1) {
+    push({
+      kind: "hook_group",
+      id: "hooks-routine",
+      occurredAt: routineHooks[0].startedAt,
+      hooks: routineHooks
+    });
+  }
+
+  if (run.modelSafetyBuffering) {
+    push({
+      kind: "event",
+      id: "model-safety-buffering",
+      occurredAt: run.modelSafetyBuffering.createdAt,
+      event: {
+        type: "model_safety_buffering_updated",
+        ...run.modelSafetyBuffering
+      }
+    });
+  }
+
+  if (run.modelVerification) {
+    push({
+      kind: "event",
+      id: "model-verification",
+      occurredAt: run.modelVerification.createdAt,
+      event: {
+        type: "model_verification_updated",
+        ...run.modelVerification
+      }
     });
   }
 
@@ -678,6 +1167,7 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
       event.type === "plan_updated" ||
       event.type === "turn_diff_updated" ||
       event.type === "item_delta" ||
+      (event.type === "context_compacted" && orderedItems.some((item) => item.type === "contextCompaction")) ||
       (isAgentItemLifecycleEvent(event) && representedItemIds.has(event.itemId))
     ) {
       continue;
@@ -740,7 +1230,15 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
 function getAgentProgressVersion(run: AgentRun, latestProgressAt: string | undefined) {
   let contentSize = run.aggregateDiff.length + run.events.length + run.itemOrder.length;
   for (const item of Object.values(run.itemsById ?? {})) {
-    contentSize += (item.text?.length ?? 0) + (item.output?.length ?? 0) + (item.fileChanges?.length ?? 0);
+    contentSize += (item.text?.length ?? 0)
+      + (item.output?.length ?? 0)
+      + (item.fileChanges?.length ?? 0)
+      + (item.reasoningSummary?.length ?? 0)
+      + (item.progressMessage?.length ?? 0)
+      + (item.presentation ? JSON.stringify(item.presentation).length : 0);
+  }
+  for (const hook of Object.values(run.hooksById ?? {})) {
+    contentSize += hook.entries.reduce((size, entry) => size + entry.text.length, 0);
   }
   return [
     run.id,
@@ -748,6 +1246,9 @@ function getAgentProgressVersion(run: AgentRun, latestProgressAt: string | undef
     latestProgressAt,
     contentSize,
     run.currentPlan?.steps.length ?? 0,
+    run.hookOrder?.length ?? 0,
+    run.modelSafetyBuffering?.createdAt ?? "",
+    run.modelVerification?.createdAt ?? "",
     run.warnings?.length ?? 0,
     run.errors?.length ?? 0
   ].join(":");
@@ -814,6 +1315,133 @@ function getFileChangeKindLabel(kind: AgentFileChange["kind"]) {
     delete: "删除",
     unknown: "变更"
   }[kind];
+}
+
+function formatToolCallDetails(
+  argumentsPreview: AgentStructuredPreview | undefined,
+  resultPreview: AgentStructuredPreview | undefined
+) {
+  return [
+    argumentsPreview ? `参数\n${argumentsPreview.text}` : undefined,
+    resultPreview ? `结果\n${resultPreview.text}` : undefined
+  ].filter((value): value is string => Boolean(value)).join("\n\n");
+}
+
+function getActivityStatusLabel(status: string, lifecycle?: AgentItem["lifecycle"]) {
+  const labels: Record<string, string> = {
+    inProgress: "进行中",
+    running: "进行中",
+    pendingInit: "正在启动",
+    completed: "已完成",
+    failed: "失败",
+    errored: "出错",
+    interrupted: "已中断",
+    blocked: "已阻止",
+    stopped: "已停止",
+    shutdown: "已关闭",
+    notFound: "未找到",
+    started: "已启动",
+    interacted: "正在交互"
+  };
+  return labels[status] ?? (lifecycle === "in_progress" ? "进行中" : status);
+}
+
+function getCollabToolLabel(tool: string | undefined) {
+  return {
+    spawnAgent: "正在创建子 Agent",
+    sendInput: "正在向子 Agent 发送消息",
+    resumeAgent: "正在恢复子 Agent",
+    wait: "正在等待子 Agent",
+    closeAgent: "正在关闭子 Agent"
+  }[tool ?? ""] ?? "子 Agent 协作";
+}
+
+function getSubAgentActivityLabel(kind: string) {
+  return {
+    started: "子 Agent 已启动",
+    interacted: "子 Agent 正在交互",
+    interrupted: "子 Agent 已中断"
+  }[kind] ?? "子 Agent 活动";
+}
+
+function compactAgentId(value: string) {
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-5)}` : value;
+}
+
+function getWebSearchActionLabel(action: string) {
+  return {
+    search: "正在搜索网页",
+    openPage: "正在打开网页",
+    open_page: "正在打开网页",
+    findInPage: "正在页内查找",
+    find_in_page: "正在页内查找",
+    other: "网页操作"
+  }[action] ?? "网页操作";
+}
+
+function getStatusItemLabel(type: string, lifecycle: AgentItem["lifecycle"], durationMs?: number) {
+  if (type === "contextCompaction") {
+    return lifecycle === "completed" ? "长对话上下文整理完成" : "正在整理长对话上下文";
+  }
+  if (type === "sleep") {
+    return durationMs !== undefined ? `等待 ${formatDuration(durationMs)}` : "正在等待";
+  }
+  if (type === "enteredReviewMode") {
+    return "已进入审查模式";
+  }
+  if (type === "exitedReviewMode") {
+    return "已退出审查模式";
+  }
+  if (type === "userMessage") {
+    return "用户输入已提交";
+  }
+  if (type === "hookPrompt") {
+    return "Hook 已补充上下文";
+  }
+  return `${getAgentItemTypeLabel(type)} · ${lifecycle === "completed" ? "已完成" : "进行中"}`;
+}
+
+function getAgentItemTypeLabel(type: string) {
+  return {
+    reasoning: "分析",
+    mcpToolCall: "MCP 工具",
+    dynamicToolCall: "动态工具",
+    collabAgentToolCall: "子 Agent 协作",
+    subAgentActivity: "子 Agent 活动",
+    webSearch: "网页搜索",
+    imageView: "查看图像",
+    imageGeneration: "图像生成"
+  }[type] ?? `协议活动 ${type}`;
+}
+
+function getHookEventLabel(eventName: string) {
+  return {
+    preToolUse: "工具调用前",
+    permissionRequest: "权限请求",
+    postToolUse: "工具调用后",
+    preCompact: "上下文整理前",
+    postCompact: "上下文整理后",
+    sessionStart: "会话开始",
+    userPromptSubmit: "用户输入提交",
+    subagentStart: "子 Agent 启动",
+    subagentStop: "子 Agent 停止",
+    stop: "停止"
+  }[eventName] ?? eventName;
+}
+
+function getModelRerouteReasonLabel(reason: string) {
+  return reason === "highRiskCyberActivity" ? "因高风险网络安全活动切换模型" : `切换原因：${reason}`;
+}
+
+function getModelVerificationLabel(verification: string) {
+  return verification === "trustedAccessForCyber" ? "可信网络安全访问" : verification;
+}
+
+function formatCompactNumber(value: number) {
+  return new Intl.NumberFormat("zh-CN", {
+    notation: value >= 10_000 ? "compact" : "standard",
+    maximumFractionDigits: 1
+  }).format(value);
 }
 
 function getCommandStatusLabel(status: string) {
@@ -936,7 +1564,28 @@ function formatAgentEvent(event: AgentEvent) {
   if (event.type === "diagnostic") {
     return compactText(event.method ? `${event.message} · ${event.method}` : event.message);
   }
-  return event.message;
+  if (event.type === "warning" || event.type === "error" || event.type === "guardian_warning") {
+    return event.message;
+  }
+  if (event.type === "config_warning") {
+    return compactText([event.summary, event.details].filter(Boolean).join(" · "));
+  }
+  if (event.type === "hook_run_updated") {
+    return `Hook ${event.hookId} · ${event.lifecycle}`;
+  }
+  if (event.type === "context_compacted") {
+    return "长对话上下文已整理";
+  }
+  if (event.type === "token_usage_updated") {
+    return `Token 使用已更新 · ${event.tokenUsage.last.totalTokens}`;
+  }
+  if (event.type === "model_rerouted") {
+    return `模型已从 ${event.fromModel} 切换到 ${event.toModel}`;
+  }
+  if (event.type === "model_safety_buffering_updated") {
+    return event.showBufferingUi ? "安全缓冲处理中" : "安全缓冲已结束";
+  }
+  return event.verifications.length ? "模型验证已启用" : "模型验证已清除";
 }
 
 function isItemEventOfType(event: AgentEvent, itemType: string) {

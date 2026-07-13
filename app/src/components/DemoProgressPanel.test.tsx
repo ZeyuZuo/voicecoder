@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DemoProgressPanel } from "./DemoProgressPanel";
 import { createDemoSession, demoSessionReducer } from "../utils/demoSession";
+import type { AgentEvent, DemoSession } from "../types/app";
 
 function assertMatches(actual: string, pattern: RegExp) {
   assert.ok(pattern.test(actual), `Expected output to match ${pattern}`);
@@ -10,6 +11,60 @@ function assertMatches(actual: string, pattern: RegExp) {
 
 function assertDoesNotMatch(actual: string, pattern: RegExp) {
   assert.ok(!pattern.test(actual), `Expected output not to match ${pattern}`);
+}
+
+function getUniqueArticleContaining(html: string, text: string) {
+  const matches = (html.match(/<article\b[\s\S]*?<\/article>/g) ?? [])
+    .filter((article) => article.includes(text));
+  assert.equal(matches.length, 1, `Expected one article containing ${JSON.stringify(text)}`);
+  return matches[0];
+}
+
+function createRunningTestSession(runId: string): DemoSession {
+  const session = createDemoSession({
+    projectPath: "/tmp/demo",
+    requirementId: "requirement-1",
+    initialRequirementDocument: "构建 demo",
+    initialCodingPrompt: "实现 demo",
+    now: "2026-07-13T01:00:00Z"
+  });
+  return demoSessionReducer(session, {
+    type: "start_agent_run",
+    runId,
+    kind: "initial_build",
+    prompt: "实现 demo",
+    now: "2026-07-13T01:00:00Z"
+  });
+}
+
+function appendTestEvents(session: DemoSession, runId: string, events: AgentEvent[]) {
+  return demoSessionReducer(session, {
+    type: "append_agent_events",
+    runId,
+    events,
+    now: events[events.length - 1]?.createdAt ?? "2026-07-13T01:00:59Z"
+  });
+}
+
+function completedItemEvent(
+  index: number,
+  itemType: string,
+  item: Record<string, unknown>,
+  status = "completed"
+): Extract<AgentEvent, { type: "item_completed" }> {
+  const createdAt = `2026-07-13T01:00:${String(index).padStart(2, "0")}Z`;
+  return {
+    type: "item_completed",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: typeof item.id === "string" ? item.id : `${itemType}-${index}`,
+    itemType,
+    lifecycle: "completed",
+    status,
+    completedAt: createdAt,
+    item,
+    createdAt
+  };
 }
 
 test("renders live file stats and completed command metadata from Agent items", () => {
@@ -428,4 +483,401 @@ test("shows a waiting hint when an active run has no progress beyond the thresho
 
   assertMatches(html, /最后进展于 \d+ 秒前/);
   assertMatches(html, /仍在等待 Codex/);
+});
+
+test("renders every ThreadItem family once as a bounded domain card", () => {
+  const runId = "run-remaining-items";
+  const rawReasoning = "M5_RAW_REASONING_MUST_STAY_PRIVATE";
+  const secret = "M5_SECRET_MUST_NOT_RENDER";
+  const base64 = "data:image/png;base64,M5_BASE64_MUST_NOT_RENDER";
+  const running = createRunningTestSession(runId);
+  const itemEvents: AgentEvent[] = [
+    completedItemEvent(1, "userMessage", {
+      id: "user-message-1",
+      type: "userMessage",
+      content: [{ type: "text", text: "用户协议原文" }]
+    }),
+    completedItemEvent(2, "hookPrompt", {
+      id: "hook-prompt-1",
+      type: "hookPrompt",
+      fragments: [{ text: "补充测试上下文", apiKey: secret }]
+    }),
+    completedItemEvent(3, "agentMessage", {
+      id: "agent-message-1",
+      type: "agentMessage",
+      text: "正在覆盖剩余协议事件。",
+      phase: "commentary"
+    }),
+    completedItemEvent(4, "plan", {
+      id: "plan-1",
+      type: "plan",
+      text: "逐项验证剩余 ThreadItem。"
+    }),
+    completedItemEvent(5, "reasoning", {
+      id: "reasoning-1",
+      type: "reasoning",
+      summary: ["先核对协议类型", "再验证领域卡片"],
+      content: [rawReasoning]
+    }),
+    completedItemEvent(6, "commandExecution", {
+      id: "command-1",
+      type: "commandExecution",
+      command: "npm run test:unit",
+      cwd: "/tmp/demo",
+      status: "completed",
+      exitCode: 0,
+      durationMs: 750,
+      aggregatedOutput: "all tests passed"
+    }),
+    completedItemEvent(7, "fileChange", {
+      id: "file-1",
+      type: "fileChange",
+      status: "completed",
+      changes: [{
+        path: "/tmp/demo/src/App.tsx",
+        kind: { type: "update" },
+        diff: "@@ -1 +1 @@\n-old\n+new\n"
+      }]
+    }),
+    {
+      type: "item_started",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "mcp-1",
+      itemType: "mcpToolCall",
+      lifecycle: "in_progress",
+      status: "inProgress",
+      startedAt: "2026-07-13T01:00:08Z",
+      item: {
+        id: "mcp-1",
+        type: "mcpToolCall",
+        server: "browser",
+        tool: "open",
+        status: "inProgress",
+        arguments: { url: "https://example.test", password: secret }
+      },
+      createdAt: "2026-07-13T01:00:08Z"
+    },
+    {
+      type: "item_delta",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "mcp-1",
+      itemType: "mcpToolCall",
+      lifecycle: "in_progress",
+      method: "item/mcpToolCall/progress",
+      delta: { message: "正在读取连接器结果" },
+      createdAt: "2026-07-13T01:00:09Z"
+    },
+    completedItemEvent(10, "mcpToolCall", {
+      id: "mcp-1",
+      type: "mcpToolCall",
+      server: "browser",
+      tool: "open",
+      status: "completed",
+      durationMs: 420,
+      arguments: { url: "https://example.test", password: secret },
+      result: { ok: true }
+    }),
+    completedItemEvent(11, "dynamicToolCall", {
+      id: "dynamic-1",
+      type: "dynamicToolCall",
+      namespace: "workspace",
+      tool: "inspect",
+      status: "failed",
+      success: false,
+      arguments: { apiKey: secret },
+      contentItems: [{ type: "inputText", text: "inspection failed" }]
+    }, "failed"),
+    completedItemEvent(12, "collabAgentToolCall", {
+      id: "collab-1",
+      type: "collabAgentToolCall",
+      tool: "spawnAgent",
+      status: "completed",
+      receiverThreadIds: ["thread-child-123456789"],
+      prompt: "检查 UI 映射",
+      agentsStates: {
+        "thread-child-123456789": { status: "completed", message: "审计完成" }
+      }
+    }),
+    completedItemEvent(13, "subAgentActivity", {
+      id: "subagent-1",
+      type: "subAgentActivity",
+      kind: "started",
+      agentThreadId: "thread-child-123456789",
+      agentPath: "/root/ui-audit"
+    }),
+    completedItemEvent(14, "webSearch", {
+      id: "web-1",
+      type: "webSearch",
+      query: "Codex app-server ThreadItem",
+      action: { type: "search", query: "Codex app-server ThreadItem" }
+    }),
+    completedItemEvent(15, "imageView", {
+      id: "image-view-1",
+      type: "imageView",
+      status: "completed",
+      path: "/tmp/demo/reference.png"
+    }),
+    completedItemEvent(16, "sleep", {
+      id: "sleep-1",
+      type: "sleep",
+      status: "completed",
+      durationMs: 1_500
+    }),
+    completedItemEvent(17, "imageGeneration", {
+      id: "image-generation-1",
+      type: "imageGeneration",
+      status: "completed",
+      revisedPrompt: "生成简洁的产品图",
+      savedPath: "/tmp/demo/generated.png",
+      result: base64
+    }),
+    completedItemEvent(18, "enteredReviewMode", {
+      id: "review-enter-1",
+      type: "enteredReviewMode",
+      status: "completed",
+      review: "检查协议覆盖"
+    }),
+    completedItemEvent(19, "exitedReviewMode", {
+      id: "review-exit-1",
+      type: "exitedReviewMode",
+      status: "completed",
+      review: "协议覆盖通过"
+    }),
+    completedItemEvent(20, "contextCompaction", {
+      id: "compact-1",
+      type: "contextCompaction",
+      status: "completed"
+    }),
+    completedItemEvent(21, "futureActivity", {
+      id: "future-1",
+      type: "futureActivity",
+      status: "completed",
+      credential: secret,
+      payload: base64
+    }),
+    {
+      type: "context_compacted",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      createdAt: "2026-07-13T01:00:22Z"
+    }
+  ];
+  const updated = appendTestEvents(running, runId, itemEvents);
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
+
+  assert.equal((html.match(/<article\b/g) ?? []).length, 19);
+  assert.equal((html.match(/长对话上下文整理完成/g) ?? []).length, 1);
+  assertMatches(html, /用户输入已提交/);
+  assertMatches(html, /Hook 已补充上下文/);
+  assertMatches(html, /Codex 过程说明/);
+  assertMatches(html, /分析完成/);
+  assertMatches(html, /查看分析摘要/);
+  assertMatches(html, /原始分析仅保留在受限协议日志/);
+  assertMatches(html, /aria-expanded="false"/);
+  assertDoesNotMatch(html, /先核对协议类型/);
+  assertMatches(html, /文件修改完成/);
+  assertMatches(html, /命令执行完成/);
+  assertMatches(getUniqueArticleContaining(html, "MCP 工具 · browser / open"), />已完成</);
+  assertMatches(html, /正在读取连接器结果/);
+  assertMatches(html, /页面仅保留安全摘要，完整原始内容见受限协议日志/);
+  assertMatches(getUniqueArticleContaining(html, "动态工具 · workspace / inspect"), />失败</);
+  assertMatches(html, /正在创建子 Agent/);
+  assertMatches(html, /子 Agent 已启动/);
+  assertMatches(html, /正在搜索网页/);
+  assertMatches(getUniqueArticleContaining(html, "查看图像"), />已完成</);
+  assertMatches(html, /等待 1\.5s/);
+  assertMatches(getUniqueArticleContaining(html, "图像生成"), />已完成</);
+  assertMatches(html, /已进入审查模式/);
+  assertMatches(html, /已退出审查模式/);
+  assertMatches(html, /协议活动 futureActivity · 已完成/);
+  assertMatches(html, /查看协议详情/);
+  assertDoesNotMatch(html, new RegExp(rawReasoning));
+  assertDoesNotMatch(html, new RegExp(secret));
+  assertDoesNotMatch(html, /M5_BASE64_MUST_NOT_RENDER/);
+  assertDoesNotMatch(html, /data:image\/png;base64/);
+});
+
+test("renders token, hook, model and differentiated warning updates", () => {
+  const runId = "run-system-updates";
+  const running = createRunningTestSession(runId);
+  const updated = appendTestEvents(running, runId, [
+    {
+      type: "token_usage_updated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      tokenUsage: {
+        total: {
+          totalTokens: 1_234,
+          inputTokens: 900,
+          cachedInputTokens: 120,
+          outputTokens: 334,
+          reasoningOutputTokens: 80
+        },
+        last: {
+          totalTokens: 321,
+          inputTokens: 220,
+          cachedInputTokens: 20,
+          outputTokens: 101,
+          reasoningOutputTokens: 30
+        },
+        modelContextWindow: 8_192
+      },
+      createdAt: "2026-07-13T01:01:01Z"
+    },
+    {
+      type: "hook_run_updated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      hookId: "hook-1",
+      lifecycle: "completed",
+      run: {
+        eventName: "postToolUse",
+        status: "failed",
+        statusMessage: "lint hook failed",
+        durationMs: 230,
+        sourcePath: "/tmp/demo/.codex/hooks/lint.sh",
+        _uiProjectionTruncated: true,
+        entries: [{ kind: "error", text: "lint failed" }]
+      },
+      createdAt: "2026-07-13T01:01:02Z"
+    },
+    {
+      type: "model_rerouted",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      fromModel: "gpt-primary",
+      toModel: "gpt-safety",
+      reason: "highRiskCyberActivity",
+      createdAt: "2026-07-13T01:01:03Z"
+    },
+    {
+      type: "model_safety_buffering_updated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      model: "gpt-safety",
+      useCases: ["cyber"],
+      reasons: ["正在执行安全检查"],
+      showBufferingUi: true,
+      fasterModel: "gpt-fast",
+      createdAt: "2026-07-13T01:01:04Z"
+    },
+    {
+      type: "model_verification_updated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      verifications: ["trustedAccessForCyber"],
+      createdAt: "2026-07-13T01:01:05Z"
+    },
+    {
+      type: "warning",
+      message: "网络较慢，但任务仍在运行",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      createdAt: "2026-07-13T01:01:06Z"
+    },
+    {
+      type: "config_warning",
+      summary: "配置键已弃用",
+      details: "请改用 approval_policy",
+      path: "/tmp/demo/.codex/config.toml",
+      range: {
+        start: { line: 3, column: 1 },
+        end: { line: 3, column: 12 }
+      },
+      createdAt: "2026-07-13T01:01:07Z"
+    },
+    {
+      type: "config_warning",
+      summary: "配置键已弃用",
+      details: "请改用 approval_policy",
+      path: "/tmp/demo/.codex/config.toml",
+      range: {
+        start: { line: 3, column: 1 },
+        end: { line: 3, column: 12 }
+      },
+      createdAt: "2026-07-13T01:01:08Z"
+    },
+    {
+      type: "guardian_warning",
+      message: "命令需要额外安全审查",
+      threadId: "thread-1",
+      createdAt: "2026-07-13T01:01:09Z"
+    }
+  ]);
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
+
+  assertMatches(html, /Token 本轮 321/);
+  assertMatches(html, /累计 1,234/);
+  assertMatches(html, /窗口 8,192/);
+  assertMatches(getUniqueArticleContaining(html, "Hook · 工具调用后"), />失败</);
+  assertMatches(html, /lint hook failed/);
+  assertMatches(getUniqueArticleContaining(html, "Hook · 工具调用后"), /页面仅保留安全摘要/);
+  assertMatches(html, /模型已切换/);
+  assertMatches(html, /gpt-primary/);
+  assertMatches(html, /gpt-safety/);
+  assertMatches(html, /因高风险网络安全活动切换模型/);
+  assertMatches(html, /安全缓冲处理中/);
+  assertMatches(html, /正在执行安全检查/);
+  assertMatches(html, /可切换到 gpt-fast/);
+  assertMatches(html, /模型验证已启用/);
+  assertMatches(html, /可信网络安全访问/);
+  assertMatches(html, /非阻塞提醒/);
+  assertMatches(html, /配置提醒/);
+  assertMatches(html, /重复 2 次/);
+  assertMatches(html, /config\.toml:3:1/);
+  assertMatches(html, /安全审查提醒/);
+});
+
+test("aggregates routine hooks while keeping failed hooks prominent", () => {
+  const runId = "run-hook-aggregation";
+  const running = createRunningTestSession(runId);
+  const routineHooks: AgentEvent[] = Array.from({ length: 80 }, (_, index) => {
+    const createdAt = new Date(Date.parse("2026-07-13T02:00:00Z") + index).toISOString();
+    return {
+      type: "hook_run_updated",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      hookId: `hook-routine-${index}`,
+      lifecycle: "completed",
+      run: {
+        displayOrder: index,
+        eventName: "preToolUse",
+        handlerType: "command",
+        executionMode: "sync",
+        status: "completed",
+        startedAt: Date.parse(createdAt),
+        completedAt: Date.parse(createdAt),
+        entries: []
+      },
+      createdAt
+    };
+  });
+  const failedHook: AgentEvent = {
+    type: "hook_run_updated",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    hookId: "hook-failed",
+    lifecycle: "completed",
+    run: {
+      displayOrder: 81,
+      eventName: "postToolUse",
+      handlerType: "command",
+      executionMode: "sync",
+      status: "failed",
+      statusMessage: "format hook failed",
+      entries: [{ kind: "error", text: "format failed" }]
+    },
+    createdAt: "2026-07-13T02:00:01Z"
+  };
+  const updated = appendTestEvents(running, runId, [...routineHooks, failedHook]);
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
+
+  assert.equal((html.match(/<article\b/g) ?? []).length, 2);
+  assertMatches(getUniqueArticleContaining(html, "Hooks · 80 次"), /工具调用前 × 80/);
+  assertMatches(getUniqueArticleContaining(html, "Hook · 工具调用后"), /format hook failed/);
 });

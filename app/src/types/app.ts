@@ -360,6 +360,67 @@ export type AgentCommandState = {
   outputTruncated: boolean;
 };
 
+export type AgentStructuredPreview = {
+  text: string;
+  truncated: boolean;
+};
+
+export type AgentItemPresentation =
+  | {
+      kind: "reasoning";
+      summary: string;
+      rawTextAvailable: boolean;
+    }
+  | {
+      kind: "toolCall";
+      toolKind: "mcp" | "dynamic";
+      server?: string;
+      namespace?: string;
+      tool: string;
+      status: string;
+      durationMs?: number;
+      progress?: string;
+      success?: boolean;
+      arguments?: AgentStructuredPreview;
+      result?: AgentStructuredPreview;
+      error?: string;
+    }
+  | {
+      kind: "collaboration";
+      activityKind: "toolCall" | "subAgent";
+      tool?: string;
+      status: string;
+      receiverThreadIds: string[];
+      agentThreadId?: string;
+      agentPath?: string;
+      prompt?: AgentStructuredPreview;
+      agentStates: Array<{ threadId: string; status: string; message?: string }>;
+    }
+  | {
+      kind: "webSearch";
+      action: string;
+      query?: string;
+      url?: string;
+      pattern?: string;
+    }
+  | {
+      kind: "image";
+      activityKind: "view" | "generation";
+      status: string;
+      path?: string;
+      savedPath?: string;
+      revisedPrompt?: AgentStructuredPreview;
+      resultAvailable: boolean;
+    }
+  | {
+      kind: "status";
+      activityKind: "contextCompaction" | "sleep" | "reviewMode" | "userMessage" | "hookPrompt" | "generic";
+      status: string;
+      label?: string;
+      durationMs?: number;
+      details?: AgentStructuredPreview;
+    };
+
 export type AgentDiffStats = {
   additions: number;
   deletions: number;
@@ -382,8 +443,13 @@ export type AgentItem = {
   output?: string;
   outputTruncated?: boolean;
   reasoningSummary?: string;
+  reasoningSummaryParts?: string[];
+  restrictedDebugAvailable?: boolean;
+  progressMessage?: string;
+  terminalInteractionCount?: number;
   fileChanges?: AgentFileChange[];
   command?: AgentCommandState;
+  presentation?: AgentItemPresentation;
 };
 
 export type AgentPlanStepStatus = "pending" | "inProgress" | "completed";
@@ -401,8 +467,82 @@ export type AgentPlan = {
   updatedAt: string;
 };
 
+export type AgentHookEntry = {
+  kind: string;
+  text: string;
+};
+
+export type AgentHookRun = {
+  id: string;
+  threadId: string;
+  turnId?: string;
+  lifecycle: AgentItemLifecycle;
+  displayOrder?: number;
+  eventName: string;
+  handlerType?: string;
+  executionMode?: string;
+  scope?: string;
+  source?: string;
+  sourcePath?: string;
+  status: string;
+  statusMessage?: string;
+  durationMs?: number;
+  entries: AgentHookEntry[];
+  restrictedDebugAvailable?: boolean;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type AgentTokenUsageBreakdown = {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+};
+
+export type AgentTokenUsage = {
+  threadId: string;
+  turnId: string;
+  total: AgentTokenUsageBreakdown;
+  last: AgentTokenUsageBreakdown;
+  modelContextWindow: number | null;
+  updatedAt: string;
+};
+
+export type AgentModelSafetyBuffering = {
+  threadId: string;
+  turnId: string;
+  model: string;
+  useCases: string[];
+  reasons: string[];
+  showBufferingUi: boolean;
+  fasterModel?: string;
+  createdAt: string;
+};
+
+export type AgentModelVerification = {
+  threadId: string;
+  turnId: string;
+  verifications: string[];
+  createdAt: string;
+};
+
+export type AgentTextRange = {
+  start: { line: number; column: number };
+  end: { line: number; column: number };
+};
+
 export type AgentWarning = {
   message: string;
+  source?: "runtime" | "config" | "guardian";
+  severity?: "warning" | "important";
+  details?: string;
+  path?: string;
+  range?: AgentTextRange;
+  count?: number;
+  updatedAt?: string;
   threadId?: string;
   turnId?: string;
   createdAt: string;
@@ -532,6 +672,73 @@ export type AgentEvent =
       createdAt: string;
     }
   | {
+      type: "config_warning";
+      summary: string;
+      details?: string;
+      path?: string;
+      range?: AgentTextRange;
+      createdAt: string;
+    }
+  | {
+      type: "guardian_warning";
+      message: string;
+      threadId: string;
+      createdAt: string;
+    }
+  | {
+      type: "hook_run_updated";
+      threadId: string;
+      turnId?: string;
+      hookId: string;
+      lifecycle: AgentItemLifecycle;
+      run: Record<string, unknown>;
+      createdAt: string;
+    }
+  | {
+      type: "context_compacted";
+      threadId: string;
+      turnId: string;
+      createdAt: string;
+    }
+  | {
+      type: "token_usage_updated";
+      threadId: string;
+      turnId: string;
+      tokenUsage: {
+        total: AgentTokenUsageBreakdown;
+        last: AgentTokenUsageBreakdown;
+        modelContextWindow: number | null;
+      };
+      createdAt: string;
+    }
+  | {
+      type: "model_rerouted";
+      threadId: string;
+      turnId: string;
+      fromModel: string;
+      toModel: string;
+      reason: string;
+      createdAt: string;
+    }
+  | {
+      type: "model_safety_buffering_updated";
+      threadId: string;
+      turnId: string;
+      model: string;
+      useCases: string[];
+      reasons: string[];
+      showBufferingUi: boolean;
+      fasterModel?: string;
+      createdAt: string;
+    }
+  | {
+      type: "model_verification_updated";
+      threadId: string;
+      turnId: string;
+      verifications: string[];
+      createdAt: string;
+    }
+  | {
       type: "error";
       message: string;
       retryable: boolean;
@@ -558,6 +765,11 @@ export type AgentRun = {
   aggregateDiffStats: AgentDiffStats;
   aggregateDiffUpdatedAt?: string;
   currentPlan?: AgentPlan;
+  hooksById: Record<string, AgentHookRun>;
+  hookOrder: string[];
+  tokenUsage?: AgentTokenUsage;
+  modelSafetyBuffering?: AgentModelSafetyBuffering;
+  modelVerification?: AgentModelVerification;
   warnings: AgentWarning[];
   errors: AgentRunError[];
   changedFiles: string[];

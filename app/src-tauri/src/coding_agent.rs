@@ -1,7 +1,7 @@
 use crate::env_config::read_local_env;
 use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::{self, File, OpenOptions},
@@ -29,6 +29,22 @@ const APP_SERVER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const APP_SERVER_TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const APP_SERVER_STDERR_TAIL_LINES: usize = 20;
 const APP_SERVER_LAST_MESSAGE_LIMIT: usize = 2_000;
+const AGENT_UI_TEXT_PREVIEW_CHARS: usize = 1_200;
+const AGENT_UI_LONG_TEXT_CHARS: usize = 32_000;
+const AGENT_UI_COMMAND_OUTPUT_TAIL_CHARS: usize = 12_000;
+const AGENT_UI_STRUCTURED_TOTAL_CHARS: usize = 4_000;
+const AGENT_UI_STRUCTURED_MAX_NODES: usize = 160;
+const AGENT_UI_STRUCTURED_MAX_DEPTH: usize = 5;
+const AGENT_UI_STRUCTURED_MAX_FIELDS: usize = 32;
+const AGENT_UI_STRUCTURED_MAX_ITEMS: usize = 24;
+const AGENT_UI_REASONING_PARTS: usize = 64;
+const AGENT_UI_PLAN_STEPS: usize = 100;
+const AGENT_UI_MODEL_STATUS_ITEMS: usize = 32;
+const AGENT_UI_MODEL_IDENTIFIER_CHARS: usize = 256;
+const AGENT_UI_STATUS_MESSAGE_CHARS: usize = 4_000;
+const AGENT_UI_HOOK_ENTRIES: usize = 50;
+const AGENT_UI_HOOK_ENTRY_CHARS: usize = 2_000;
+const AGENT_UI_HOOK_TOTAL_CHARS: usize = 12_000;
 const AGENT_RUN_STARTED_EVENT: &str = "agent://run-started";
 const AGENT_EVENT_EVENT: &str = "agent://event";
 const AGENT_RUN_COMPLETED_EVENT: &str = "agent://run-completed";
@@ -279,6 +295,51 @@ pub enum AgentEvent {
         diff: String,
         created_at: String,
     },
+    HookRunUpdated {
+        thread_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        hook_id: String,
+        lifecycle: String,
+        run: Value,
+        created_at: String,
+    },
+    ContextCompacted {
+        thread_id: String,
+        turn_id: String,
+        created_at: String,
+    },
+    TokenUsageUpdated {
+        thread_id: String,
+        turn_id: String,
+        token_usage: Value,
+        created_at: String,
+    },
+    ModelRerouted {
+        thread_id: String,
+        turn_id: String,
+        from_model: String,
+        to_model: String,
+        reason: String,
+        created_at: String,
+    },
+    ModelSafetyBufferingUpdated {
+        thread_id: String,
+        turn_id: String,
+        model: String,
+        use_cases: Vec<String>,
+        reasons: Vec<String>,
+        show_buffering_ui: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        faster_model: Option<String>,
+        created_at: String,
+    },
+    ModelVerificationUpdated {
+        thread_id: String,
+        turn_id: String,
+        verifications: Vec<String>,
+        created_at: String,
+    },
     ApprovalReview {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +382,21 @@ pub enum AgentEvent {
         thread_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
+        created_at: String,
+    },
+    ConfigWarning {
+        summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        range: Option<Value>,
+        created_at: String,
+    },
+    GuardianWarning {
+        thread_id: String,
+        message: String,
         created_at: String,
     },
     Error {
@@ -1442,6 +1518,8 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
             turn_id: extract_string(params, "/turn/id"),
             created_at: created_at.to_string(),
         }],
+        "hook/started" => normalize_codex_hook_run(params, created_at, false),
+        "hook/completed" => normalize_codex_hook_run(params, created_at, true),
         "item/agentMessage/delta"
         | "item/plan/delta"
         | "item/commandExecution/outputDelta"
@@ -1474,19 +1552,31 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
         }
         "item/started" => normalize_codex_item_lifecycle(params, created_at, false),
         "item/completed" => normalize_codex_item_lifecycle(params, created_at, true),
+        "thread/compacted" => normalize_codex_context_compacted(params, created_at),
+        "thread/tokenUsage/updated" => normalize_codex_token_usage(params, created_at),
+        "model/rerouted" => normalize_codex_model_rerouted(params, created_at),
+        "model/safetyBuffering/updated" => {
+            normalize_codex_model_safety_buffering(params, created_at)
+        }
+        "model/verification" => normalize_codex_model_verification(params, created_at),
         "turn/completed" => normalize_codex_turn_completed(params, created_at),
         "warning" => extract_string(params, "/message")
             .map(|message| {
                 vec![AgentEvent::Warning {
-                    message,
+                    message: project_ui_sensitive_text(&message, AGENT_UI_STATUS_MESSAGE_CHARS),
                     thread_id: extract_string(params, "/threadId"),
                     turn_id: extract_string(params, "/turnId"),
                     created_at: created_at.to_string(),
                 }]
             })
             .unwrap_or_default(),
+        "configWarning" => normalize_codex_config_warning(params, created_at),
+        "guardianWarning" => normalize_codex_guardian_warning(params, created_at),
         "error" | "thread/realtime/error" => vec![AgentEvent::Error {
-            message: format_codex_error(params.get("error").unwrap_or(params)),
+            message: project_ui_sensitive_text(
+                &format_codex_error(params.get("error").unwrap_or(params)),
+                AGENT_UI_STATUS_MESSAGE_CHARS,
+            ),
             retryable: params
                 .get("willRetry")
                 .and_then(Value::as_bool)
@@ -1599,6 +1689,7 @@ fn normalize_codex_item_lifecycle(
     };
     let item_type = extract_string(item, "/type").unwrap_or_else(|| "unknown".to_string());
     let status = extract_string(item, "/status");
+    let projected_item = project_codex_item_for_ui(item, &item_type);
 
     if completed {
         vec![AgentEvent::ItemCompleted {
@@ -1609,7 +1700,7 @@ fn normalize_codex_item_lifecycle(
             lifecycle: "completed".to_string(),
             status,
             completed_at: extract_protocol_timestamp(params, "/completedAtMs", created_at),
-            item: item.clone(),
+            item: projected_item,
             created_at: created_at.to_string(),
         }]
     } else {
@@ -1621,10 +1712,961 @@ fn normalize_codex_item_lifecycle(
             lifecycle: "in_progress".to_string(),
             status,
             started_at: extract_protocol_timestamp(params, "/startedAtMs", created_at),
-            item: item.clone(),
+            item: projected_item,
             created_at: created_at.to_string(),
         }]
     }
+}
+
+fn project_codex_item_for_ui(item: &Value, item_type: &str) -> Value {
+    let mut projected = ui_item_base(item, item_type);
+
+    match item_type {
+        "userMessage" | "contextCompaction" => {}
+        "hookPrompt" => {
+            if let Some(fragments) = item.get("fragments") {
+                projected.insert("fragments".to_string(), project_ui_safe_value(fragments));
+            }
+        }
+        "agentMessage" => {
+            copy_ui_text(&mut projected, item, "text", AGENT_UI_LONG_TEXT_CHARS);
+            copy_ui_value(&mut projected, item, "phase");
+        }
+        "plan" => copy_ui_text(&mut projected, item, "text", AGENT_UI_LONG_TEXT_CHARS),
+        "reasoning" => {
+            if let Some(summary) = item.get("summary") {
+                let (projected_summary, summary_truncated) = project_reasoning_summary(summary);
+                projected.insert("summary".to_string(), projected_summary);
+                if summary_truncated {
+                    projected.insert("_uiProjectionTruncated".to_string(), Value::Bool(true));
+                }
+            }
+            let content_count = item
+                .get("content")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            let raw_text_available = content_count > 0
+                || item
+                    .get("rawTextAvailable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            projected.insert(
+                "rawTextAvailable".to_string(),
+                Value::Bool(raw_text_available),
+            );
+            projected.insert("contentCount".to_string(), json!(content_count));
+        }
+        "commandExecution" => {
+            copy_ui_text(&mut projected, item, "command", AGENT_UI_LONG_TEXT_CHARS);
+            copy_ui_text(&mut projected, item, "cwd", AGENT_UI_TEXT_PREVIEW_CHARS);
+            copy_ui_text(
+                &mut projected,
+                item,
+                "processId",
+                AGENT_UI_TEXT_PREVIEW_CHARS,
+            );
+            copy_ui_value(&mut projected, item, "source");
+            copy_ui_value(&mut projected, item, "status");
+            if let Some(actions) = item.get("commandActions") {
+                projected.insert("commandActions".to_string(), project_ui_safe_value(actions));
+            }
+            if let Some(output) = item.get("aggregatedOutput").and_then(Value::as_str) {
+                let (tail, truncated) =
+                    truncate_ui_text_tail(output, AGENT_UI_COMMAND_OUTPUT_TAIL_CHARS);
+                let restricted = is_ui_credential_text(&tail);
+                projected.insert(
+                    "aggregatedOutput".to_string(),
+                    Value::String(project_ui_credential_text(
+                        &tail,
+                        AGENT_UI_COMMAND_OUTPUT_TAIL_CHARS,
+                    )),
+                );
+                projected.insert(
+                    "aggregatedOutputTruncated".to_string(),
+                    Value::Bool(truncated || restricted),
+                );
+            }
+            copy_ui_value(&mut projected, item, "exitCode");
+            copy_ui_value(&mut projected, item, "durationMs");
+        }
+        "fileChange" => {
+            copy_ui_value(&mut projected, item, "status");
+            if let Some(changes) = item.get("changes") {
+                projected.insert("changes".to_string(), project_file_changes_for_ui(changes));
+            }
+        }
+        "mcpToolCall" => project_mcp_tool_call_for_ui(item, &mut projected),
+        "dynamicToolCall" => project_dynamic_tool_call_for_ui(item, &mut projected),
+        "collabAgentToolCall" => {
+            for key in ["tool", "status", "reasoningEffort"] {
+                copy_ui_value(&mut projected, item, key);
+            }
+            for key in ["senderThreadId", "model"] {
+                copy_ui_text(&mut projected, item, key, AGENT_UI_TEXT_PREVIEW_CHARS);
+            }
+            if let Some(prompt) = item.get("prompt").and_then(Value::as_str) {
+                projected.insert(
+                    "prompt".to_string(),
+                    Value::String(project_ui_sensitive_text(
+                        prompt,
+                        AGENT_UI_TEXT_PREVIEW_CHARS,
+                    )),
+                );
+            }
+            if let Some(receiver_thread_ids) = item.get("receiverThreadIds") {
+                projected.insert(
+                    "receiverThreadIds".to_string(),
+                    project_ui_safe_value(receiver_thread_ids),
+                );
+            }
+            if let Some(agent_states) = item.get("agentsStates") {
+                projected.insert(
+                    "agentsStates".to_string(),
+                    project_ui_safe_value(agent_states),
+                );
+            }
+        }
+        "subAgentActivity" => {
+            copy_ui_value(&mut projected, item, "kind");
+            for key in ["agentThreadId", "agentPath"] {
+                copy_ui_text(&mut projected, item, key, AGENT_UI_TEXT_PREVIEW_CHARS);
+            }
+        }
+        "webSearch" => {
+            if let Some(query) = item.get("query").and_then(Value::as_str) {
+                projected.insert(
+                    "query".to_string(),
+                    Value::String(project_ui_sensitive_text(
+                        query,
+                        AGENT_UI_TEXT_PREVIEW_CHARS,
+                    )),
+                );
+            }
+            if let Some(action) = item.get("action") {
+                projected.insert("action".to_string(), project_web_search_action(action));
+            }
+        }
+        "imageView" => copy_ui_text(&mut projected, item, "path", AGENT_UI_TEXT_PREVIEW_CHARS),
+        "sleep" => copy_ui_value(&mut projected, item, "durationMs"),
+        "imageGeneration" => {
+            copy_ui_value(&mut projected, item, "status");
+            copy_ui_sensitive_text(
+                &mut projected,
+                item,
+                "revisedPrompt",
+                AGENT_UI_TEXT_PREVIEW_CHARS,
+            );
+            copy_ui_text(
+                &mut projected,
+                item,
+                "savedPath",
+                AGENT_UI_TEXT_PREVIEW_CHARS,
+            );
+            let result_length = item
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::len)
+                .unwrap_or(0);
+            projected.insert(
+                "resultAvailable".to_string(),
+                Value::Bool(result_length > 0),
+            );
+            projected.insert("resultLength".to_string(), json!(result_length));
+        }
+        "enteredReviewMode" | "exitedReviewMode" => {
+            copy_ui_sensitive_text(&mut projected, item, "review", AGENT_UI_TEXT_PREVIEW_CHARS)
+        }
+        _ => merge_unknown_item_projection(item, &mut projected),
+    }
+
+    Value::Object(projected)
+}
+
+fn ui_item_base(item: &Value, item_type: &str) -> Map<String, Value> {
+    let mut projected = Map::new();
+    if let Some(id) = item.get("id").and_then(Value::as_str) {
+        projected.insert("id".to_string(), Value::String(id.to_string()));
+    }
+    projected.insert("type".to_string(), Value::String(item_type.to_string()));
+    projected
+}
+
+fn copy_ui_value(projected: &mut Map<String, Value>, item: &Value, key: &str) {
+    if let Some(value) = item.get(key) {
+        projected.insert(key.to_string(), value.clone());
+    }
+}
+
+fn copy_ui_text(projected: &mut Map<String, Value>, item: &Value, key: &str, max_chars: usize) {
+    if let Some(value) = item.get(key).and_then(Value::as_str) {
+        projected.insert(
+            key.to_string(),
+            Value::String(truncate_ui_text(value, max_chars)),
+        );
+    }
+}
+
+fn copy_ui_sensitive_text(
+    projected: &mut Map<String, Value>,
+    item: &Value,
+    key: &str,
+    max_chars: usize,
+) {
+    if let Some(value) = item.get(key).and_then(Value::as_str) {
+        projected.insert(
+            key.to_string(),
+            Value::String(project_ui_sensitive_text(value, max_chars)),
+        );
+    }
+}
+
+fn project_reasoning_summary(summary: &Value) -> (Value, bool) {
+    let Some(parts) = summary.as_array() else {
+        return (Value::Array(Vec::new()), false);
+    };
+    let projected = Value::Array(
+        parts
+            .iter()
+            .take(AGENT_UI_REASONING_PARTS)
+            .filter_map(Value::as_str)
+            .map(|part| Value::String(project_ui_sensitive_text(part, AGENT_UI_TEXT_PREVIEW_CHARS)))
+            .collect(),
+    );
+    let truncated = parts.len() > AGENT_UI_REASONING_PARTS
+        || parts.iter().any(|part| {
+            part.as_str().is_some_and(|text| {
+                ui_text_exceeds(text, AGENT_UI_TEXT_PREVIEW_CHARS)
+                    || is_ui_binary_or_credential_text(text)
+            })
+        });
+    (projected, truncated)
+}
+
+fn project_file_changes_for_ui(changes: &Value) -> Value {
+    let Some(changes) = changes.as_array() else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        changes
+            .iter()
+            .filter_map(|change| {
+                let mut projected = Map::new();
+                copy_ui_text(&mut projected, change, "path", AGENT_UI_LONG_TEXT_CHARS);
+                if let Some(kind) = change.get("kind") {
+                    projected.insert("kind".to_string(), project_file_change_kind(kind));
+                }
+                copy_ui_value(&mut projected, change, "diff");
+                (!projected.is_empty()).then_some(Value::Object(projected))
+            })
+            .collect(),
+    )
+}
+
+fn project_file_change_kind(kind: &Value) -> Value {
+    let Some(kind) = kind.as_object() else {
+        return kind.clone();
+    };
+    let mut projected = Map::new();
+    for key in ["type", "move_path", "movePath"] {
+        if let Some(value) = kind.get(key) {
+            projected.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(projected)
+}
+
+fn project_mcp_tool_call_for_ui(item: &Value, projected: &mut Map<String, Value>) {
+    for key in ["status", "durationMs"] {
+        copy_ui_value(projected, item, key);
+    }
+    for key in ["server", "tool", "pluginId"] {
+        copy_ui_text(projected, item, key, AGENT_UI_TEXT_PREVIEW_CHARS);
+    }
+    for key in ["arguments", "result"] {
+        if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
+            projected.insert(key.to_string(), project_ui_safe_value(value));
+        }
+    }
+    if let Some(error) = item.get("error").and_then(Value::as_object) {
+        let mut projected_error = Map::new();
+        if let Some(message) = error.get("message").and_then(Value::as_str) {
+            let redacted_or_truncated = is_ui_binary_or_credential_text(message)
+                || ui_text_exceeds(message, AGENT_UI_TEXT_PREVIEW_CHARS);
+            projected_error.insert(
+                "message".to_string(),
+                Value::String(project_ui_sensitive_text(
+                    message,
+                    AGENT_UI_TEXT_PREVIEW_CHARS,
+                )),
+            );
+            if redacted_or_truncated {
+                projected_error.insert("_uiProjectionTruncated".to_string(), Value::Bool(true));
+            }
+        }
+        if !projected_error.is_empty() {
+            projected.insert("error".to_string(), Value::Object(projected_error));
+        }
+    }
+    if let Some(app_context) = item.get("appContext").and_then(Value::as_object) {
+        let mut projected_context = Map::new();
+        for key in ["appName", "actionName"] {
+            if let Some(value) = app_context.get(key).and_then(Value::as_str) {
+                projected_context.insert(
+                    key.to_string(),
+                    Value::String(truncate_ui_text(value, AGENT_UI_TEXT_PREVIEW_CHARS)),
+                );
+            }
+        }
+        if !projected_context.is_empty() {
+            projected.insert("appContext".to_string(), Value::Object(projected_context));
+        }
+    }
+}
+
+fn project_dynamic_tool_call_for_ui(item: &Value, projected: &mut Map<String, Value>) {
+    for key in ["status", "success", "durationMs"] {
+        copy_ui_value(projected, item, key);
+    }
+    for key in ["namespace", "tool"] {
+        copy_ui_text(projected, item, key, AGENT_UI_TEXT_PREVIEW_CHARS);
+    }
+    for key in ["arguments", "contentItems"] {
+        if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
+            projected.insert(key.to_string(), project_ui_safe_value(value));
+        }
+    }
+}
+
+fn project_web_search_action(action: &Value) -> Value {
+    let Some(action) = action.as_object() else {
+        return Value::Null;
+    };
+    let mut projected = Map::new();
+    for key in ["type", "query", "url", "pattern"] {
+        if let Some(value) = action.get(key).and_then(Value::as_str) {
+            projected.insert(
+                key.to_string(),
+                Value::String(project_ui_sensitive_text(
+                    value,
+                    AGENT_UI_TEXT_PREVIEW_CHARS,
+                )),
+            );
+        }
+    }
+    if let Some(queries) = action.get("queries").and_then(Value::as_array) {
+        projected.insert(
+            "queries".to_string(),
+            Value::Array(
+                queries
+                    .iter()
+                    .take(AGENT_UI_STRUCTURED_MAX_ITEMS)
+                    .filter_map(Value::as_str)
+                    .map(|query| {
+                        Value::String(project_ui_sensitive_text(
+                            query,
+                            AGENT_UI_TEXT_PREVIEW_CHARS,
+                        ))
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(projected)
+}
+
+fn merge_unknown_item_projection(item: &Value, projected: &mut Map<String, Value>) {
+    let Value::Object(safe) = project_ui_safe_value(item) else {
+        return;
+    };
+    for (key, value) in safe {
+        if !matches!(key.as_str(), "id" | "type") {
+            projected.insert(key, value);
+        }
+    }
+}
+
+fn project_codex_hook_run_for_ui(run: &Value) -> Value {
+    let mut projected = Map::new();
+    let mut projection_truncated = run.as_object().is_some_and(|fields| {
+        fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "id" | "eventName"
+                    | "handlerType"
+                    | "executionMode"
+                    | "scope"
+                    | "sourcePath"
+                    | "source"
+                    | "displayOrder"
+                    | "status"
+                    | "statusMessage"
+                    | "startedAt"
+                    | "completedAt"
+                    | "durationMs"
+                    | "entries"
+            )
+        })
+    });
+    for key in [
+        "id",
+        "eventName",
+        "handlerType",
+        "executionMode",
+        "scope",
+        "sourcePath",
+        "source",
+        "status",
+        "statusMessage",
+    ] {
+        if let Some(value) = run.get(key).and_then(Value::as_str) {
+            let max_chars = if key == "statusMessage" {
+                AGENT_UI_HOOK_ENTRY_CHARS
+            } else {
+                AGENT_UI_TEXT_PREVIEW_CHARS
+            };
+            let projected_value = if key == "statusMessage" {
+                if ui_text_exceeds(value, max_chars) || is_ui_binary_or_credential_text(value) {
+                    projection_truncated = true;
+                }
+                project_ui_sensitive_text(value, max_chars)
+            } else {
+                if ui_text_exceeds(value, max_chars) {
+                    projection_truncated = true;
+                }
+                truncate_ui_text(value, max_chars)
+            };
+            projected.insert(key.to_string(), Value::String(projected_value));
+        }
+    }
+    for key in ["displayOrder", "startedAt", "completedAt", "durationMs"] {
+        if let Some(value) = run.get(key) {
+            projected.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(entries) = run.get("entries").and_then(Value::as_array) {
+        if entries.len() > AGENT_UI_HOOK_ENTRIES {
+            projection_truncated = true;
+        }
+        let mut remaining_entry_chars = AGENT_UI_HOOK_TOTAL_CHARS;
+        let mut projected_entries = Vec::new();
+        for entry in entries.iter().take(AGENT_UI_HOOK_ENTRIES) {
+            if remaining_entry_chars == 0 {
+                projection_truncated = true;
+                break;
+            }
+            let mut projected_entry = Map::new();
+            if entry.as_object().is_some_and(|fields| {
+                fields
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "kind" | "text"))
+            }) {
+                projection_truncated = true;
+            }
+            if let Some(kind) = entry.get("kind").and_then(Value::as_str) {
+                projected_entry.insert(
+                    "kind".to_string(),
+                    Value::String(truncate_ui_text(kind, AGENT_UI_TEXT_PREVIEW_CHARS)),
+                );
+            }
+            if let Some(text) = entry.get("text").and_then(Value::as_str) {
+                let max_chars = remaining_entry_chars.min(AGENT_UI_HOOK_ENTRY_CHARS);
+                if ui_text_exceeds(text, max_chars) || is_ui_binary_or_credential_text(text) {
+                    projection_truncated = true;
+                }
+                let projected_text = project_ui_sensitive_text(text, max_chars);
+                remaining_entry_chars =
+                    remaining_entry_chars.saturating_sub(projected_text.chars().count());
+                projected_entry.insert("text".to_string(), Value::String(projected_text));
+            }
+            if !projected_entry.is_empty() {
+                projected_entries.push(Value::Object(projected_entry));
+            }
+        }
+        projected.insert("entries".to_string(), Value::Array(projected_entries));
+    }
+    if projection_truncated {
+        projected.insert("_uiProjectionTruncated".to_string(), Value::Bool(true));
+    }
+    Value::Object(projected)
+}
+
+struct UiProjectionBudget {
+    remaining_chars: usize,
+    remaining_nodes: usize,
+    truncated: bool,
+}
+
+fn project_ui_safe_value(value: &Value) -> Value {
+    let mut budget = UiProjectionBudget {
+        remaining_chars: AGENT_UI_STRUCTURED_TOTAL_CHARS,
+        remaining_nodes: AGENT_UI_STRUCTURED_MAX_NODES,
+        truncated: false,
+    };
+    let projected = project_ui_safe_value_at(value, 0, &mut budget);
+    if !budget.truncated {
+        return projected;
+    }
+    match projected {
+        Value::Object(mut fields) => {
+            fields.insert("_uiProjectionTruncated".to_string(), Value::Bool(true));
+            Value::Object(fields)
+        }
+        Value::Array(mut items) => {
+            items.push(json!({ "_uiProjectionTruncated": true }));
+            Value::Array(items)
+        }
+        value => json!({
+            "preview": value,
+            "_uiProjectionTruncated": true
+        }),
+    }
+}
+
+fn project_ui_safe_value_at(value: &Value, depth: usize, budget: &mut UiProjectionBudget) -> Value {
+    if budget.remaining_nodes == 0 || depth > AGENT_UI_STRUCTURED_MAX_DEPTH {
+        budget.truncated = true;
+        return Value::String("[truncated]".to_string());
+    }
+    budget.remaining_nodes -= 1;
+
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(text) => {
+            if is_ui_binary_or_credential_text(text) {
+                budget.truncated = true;
+                return Value::String("[redacted binary or credential data]".to_string());
+            }
+            let max_chars = budget.remaining_chars.min(AGENT_UI_TEXT_PREVIEW_CHARS);
+            if max_chars == 0 {
+                budget.truncated = true;
+                return Value::String("[truncated]".to_string());
+            }
+            if ui_text_exceeds(text, max_chars) {
+                budget.truncated = true;
+            }
+            let projected = truncate_ui_text(text, max_chars);
+            budget.remaining_chars = budget
+                .remaining_chars
+                .saturating_sub(projected.chars().count());
+            Value::String(projected)
+        }
+        Value::Array(items) => {
+            let limit = items.len().min(AGENT_UI_STRUCTURED_MAX_ITEMS);
+            let projected = items
+                .iter()
+                .take(limit)
+                .map(|item| project_ui_safe_value_at(item, depth + 1, budget))
+                .collect::<Vec<_>>();
+            if items.len() > limit {
+                budget.truncated = true;
+            }
+            Value::Array(projected)
+        }
+        Value::Object(fields) => {
+            let mut projected = Map::new();
+            let mut redacted_fields = 0usize;
+            let mut omitted_fields = 0usize;
+            for (index, (key, child)) in fields.iter().enumerate() {
+                if index >= AGENT_UI_STRUCTURED_MAX_FIELDS || budget.remaining_nodes == 0 {
+                    omitted_fields = fields.len().saturating_sub(index);
+                    budget.truncated = true;
+                    break;
+                }
+                if is_ui_sensitive_field(key) {
+                    redacted_fields += 1;
+                    budget.truncated = true;
+                    continue;
+                }
+                if ui_text_exceeds(key, 128) {
+                    budget.truncated = true;
+                }
+                projected.insert(
+                    truncate_ui_text(key, 128),
+                    project_ui_safe_value_at(child, depth + 1, budget),
+                );
+            }
+            if redacted_fields > 0 {
+                projected.insert("_redactedFieldCount".to_string(), json!(redacted_fields));
+            }
+            if omitted_fields > 0 {
+                projected.insert("_omittedFieldCount".to_string(), json!(omitted_fields));
+            }
+            Value::Object(projected)
+        }
+    }
+}
+
+fn is_ui_sensitive_field(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['_', '-'], "");
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("authorization")
+        || normalized.contains("cookie")
+        || normalized.contains("apikey")
+        || normalized.contains("credential")
+        || normalized.contains("privatekey")
+        || normalized.contains("signature")
+        || normalized == "stdin"
+        || normalized == "raw"
+        || normalized.starts_with("rawtext")
+        || normalized.starts_with("rawcontent")
+}
+
+fn is_ui_binary_or_credential_text(value: &str) -> bool {
+    let trimmed = value.trim();
+    if is_ui_credential_text(trimmed) {
+        return true;
+    }
+    let marker_window = trimmed
+        .chars()
+        .take(AGENT_UI_STATUS_MESSAGE_CHARS)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if marker_window.contains("data:") && marker_window.contains(";base64,") {
+        return true;
+    }
+    if trimmed.len() < 512 {
+        return false;
+    }
+    let mut base64_chars = 0usize;
+    let mut non_whitespace_chars = 0usize;
+    let mut whitespace_chars = 0usize;
+    for character in trimmed.chars().take(AGENT_UI_STATUS_MESSAGE_CHARS) {
+        if character.is_whitespace() {
+            whitespace_chars += 1;
+            continue;
+        }
+        non_whitespace_chars += 1;
+        if character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '=') {
+            base64_chars += 1;
+        }
+    }
+    let total_chars = non_whitespace_chars + whitespace_chars;
+    non_whitespace_chars >= 512
+        && base64_chars.saturating_mul(100) / non_whitespace_chars >= 98
+        && whitespace_chars.saturating_mul(100) / total_chars.max(1) <= 2
+}
+
+fn is_ui_credential_text(value: &str) -> bool {
+    let marker_window = value
+        .trim()
+        .chars()
+        .take(AGENT_UI_STATUS_MESSAGE_CHARS)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    marker_window.contains("bearer ")
+        || marker_window.contains("-----begin ") && marker_window.contains("private key-----")
+        || contains_ui_secret_key_marker(&marker_window)
+        || [
+            "apikey=",
+            "apikey:",
+            "api_key=",
+            "api_key:",
+            "api-key=",
+            "api-key:",
+            "token=",
+            "token:",
+            "password=",
+            "password:",
+            "authorization=",
+            "authorization:",
+            "signature=",
+            "x-amz-credential=",
+            "x-amz-signature=",
+            "x-goog-signature=",
+        ]
+        .iter()
+        .any(|marker| marker_window.contains(marker))
+}
+
+fn contains_ui_secret_key_marker(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.windows(3).enumerate().any(|(index, marker)| {
+        if marker != b"sk-" {
+            return false;
+        }
+        let has_boundary =
+            index == 0 || (!bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_');
+        let suffix_length = bytes[index + 3..]
+            .iter()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(**character, b'_' | b'-')
+            })
+            .count();
+        has_boundary && suffix_length >= 12
+    })
+}
+
+fn project_ui_sensitive_text(value: &str, max_chars: usize) -> String {
+    if is_ui_binary_or_credential_text(value) {
+        truncate_ui_text("[redacted credential or binary data]", max_chars)
+    } else {
+        truncate_ui_text(value, max_chars)
+    }
+}
+
+fn project_ui_credential_text(value: &str, max_chars: usize) -> String {
+    if is_ui_credential_text(value) {
+        truncate_ui_text("[redacted credential data]", max_chars)
+    } else {
+        truncate_ui_text(value, max_chars)
+    }
+}
+
+fn ui_text_exceeds(value: &str, max_chars: usize) -> bool {
+    value.chars().nth(max_chars).is_some()
+}
+
+fn truncate_ui_text(value: &str, max_chars: usize) -> String {
+    let mut characters = value.chars();
+    let mut projected = characters.by_ref().take(max_chars).collect::<String>();
+    if characters.next().is_none() {
+        return projected;
+    }
+    if max_chars > 0 {
+        projected.pop();
+        projected.push('…');
+    }
+    projected
+}
+
+fn truncate_ui_text_tail(value: &str, max_chars: usize) -> (String, bool) {
+    if max_chars == 0 {
+        return (String::new(), !value.is_empty());
+    }
+    let Some((start, _)) = value.char_indices().rev().nth(max_chars.saturating_sub(1)) else {
+        return (value.to_string(), false);
+    };
+    (value[start..].to_string(), start > 0)
+}
+
+fn normalize_codex_hook_run(params: &Value, created_at: &str, completed: bool) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(run) = params.get("run") else {
+        return Vec::new();
+    };
+    let Some(hook_id) = extract_string(run, "/id") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::HookRunUpdated {
+        thread_id,
+        turn_id: extract_string(params, "/turnId"),
+        hook_id,
+        lifecycle: if completed {
+            "completed".to_string()
+        } else {
+            "in_progress".to_string()
+        },
+        run: project_codex_hook_run_for_ui(run),
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn normalize_codex_context_compacted(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::ContextCompacted {
+        thread_id,
+        turn_id,
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn normalize_codex_token_usage(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let Some(token_usage) = params.get("tokenUsage") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::TokenUsageUpdated {
+        thread_id,
+        turn_id,
+        token_usage: project_token_usage_for_ui(token_usage),
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn project_token_usage_for_ui(token_usage: &Value) -> Value {
+    let mut projected = Map::new();
+    for key in ["total", "last"] {
+        let Some(breakdown) = token_usage.get(key) else {
+            continue;
+        };
+        let mut projected_breakdown = Map::new();
+        for field in [
+            "totalTokens",
+            "inputTokens",
+            "cachedInputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+        ] {
+            if let Some(value) = breakdown.get(field).filter(|value| value.is_number()) {
+                projected_breakdown.insert(field.to_string(), value.clone());
+            }
+        }
+        projected.insert(key.to_string(), Value::Object(projected_breakdown));
+    }
+    if let Some(context_window) = token_usage.get("modelContextWindow") {
+        if context_window.is_number() || context_window.is_null() {
+            projected.insert("modelContextWindow".to_string(), context_window.clone());
+        }
+    }
+    Value::Object(projected)
+}
+
+fn normalize_codex_model_rerouted(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let Some(from_model) = extract_string(params, "/fromModel") else {
+        return Vec::new();
+    };
+    let Some(to_model) = extract_string(params, "/toModel") else {
+        return Vec::new();
+    };
+    let Some(reason) = extract_string(params, "/reason") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::ModelRerouted {
+        thread_id,
+        turn_id,
+        from_model: truncate_ui_text(&from_model, AGENT_UI_MODEL_IDENTIFIER_CHARS),
+        to_model: truncate_ui_text(&to_model, AGENT_UI_MODEL_IDENTIFIER_CHARS),
+        reason: project_ui_sensitive_text(&reason, AGENT_UI_TEXT_PREVIEW_CHARS),
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn normalize_codex_model_safety_buffering(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let Some(model) = extract_string(params, "/model") else {
+        return Vec::new();
+    };
+    let Some(use_cases) = extract_bounded_string_array(
+        params,
+        "/useCases",
+        AGENT_UI_MODEL_STATUS_ITEMS,
+        AGENT_UI_TEXT_PREVIEW_CHARS,
+    ) else {
+        return Vec::new();
+    };
+    let Some(reasons) = extract_bounded_string_array(
+        params,
+        "/reasons",
+        AGENT_UI_MODEL_STATUS_ITEMS,
+        AGENT_UI_TEXT_PREVIEW_CHARS,
+    ) else {
+        return Vec::new();
+    };
+    let Some(show_buffering_ui) = params.get("showBufferingUi").and_then(Value::as_bool) else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::ModelSafetyBufferingUpdated {
+        thread_id,
+        turn_id,
+        model: truncate_ui_text(&model, AGENT_UI_MODEL_IDENTIFIER_CHARS),
+        use_cases,
+        reasons,
+        show_buffering_ui,
+        faster_model: extract_string(params, "/fasterModel")
+            .map(|value| truncate_ui_text(&value, AGENT_UI_MODEL_IDENTIFIER_CHARS)),
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn normalize_codex_model_verification(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(turn_id) = extract_string(params, "/turnId") else {
+        return Vec::new();
+    };
+    let Some(verifications) = extract_bounded_string_array(
+        params,
+        "/verifications",
+        AGENT_UI_MODEL_STATUS_ITEMS,
+        AGENT_UI_TEXT_PREVIEW_CHARS,
+    ) else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::ModelVerificationUpdated {
+        thread_id,
+        turn_id,
+        verifications,
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn normalize_codex_config_warning(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(summary) = extract_string(params, "/summary") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::ConfigWarning {
+        summary: project_ui_sensitive_text(&summary, AGENT_UI_TEXT_PREVIEW_CHARS),
+        details: extract_string(params, "/details")
+            .map(|value| project_ui_sensitive_text(&value, AGENT_UI_STATUS_MESSAGE_CHARS)),
+        path: extract_string(params, "/path")
+            .map(|value| truncate_ui_text(&value, AGENT_UI_TEXT_PREVIEW_CHARS)),
+        range: params.get("range").and_then(project_config_text_range),
+        created_at: created_at.to_string(),
+    }]
+}
+
+fn project_config_text_range(range: &Value) -> Option<Value> {
+    let mut projected = Map::new();
+    for key in ["start", "end"] {
+        let position = range.get(key)?;
+        let mut projected_position = Map::new();
+        for field in ["line", "column"] {
+            if let Some(value) = position.get(field).filter(|value| value.is_number()) {
+                projected_position.insert(field.to_string(), value.clone());
+            }
+        }
+        projected.insert(key.to_string(), Value::Object(projected_position));
+    }
+    Some(Value::Object(projected))
+}
+
+fn normalize_codex_guardian_warning(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(thread_id) = extract_string(params, "/threadId") else {
+        return Vec::new();
+    };
+    let Some(message) = extract_string(params, "/message") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::GuardianWarning {
+        thread_id,
+        message: project_ui_sensitive_text(&message, AGENT_UI_STATUS_MESSAGE_CHARS),
+        created_at: created_at.to_string(),
+    }]
 }
 
 fn normalize_codex_item_delta(method: &str, params: &Value, created_at: &str) -> Vec<AgentEvent> {
@@ -1650,16 +2692,8 @@ fn normalize_codex_item_delta(method: &str, params: &Value, created_at: &str) ->
         | "item/reasoning/textDelta" => "reasoning",
         _ => "unknown",
     };
-    let delta = match method {
-        "item/fileChange/patchUpdated" => params
-            .get("changes")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-        _ => params
-            .get("delta")
-            .or_else(|| params.get("part"))
-            .cloned()
-            .unwrap_or_else(|| params.clone()),
+    let Some(delta) = normalize_codex_item_delta_payload(method, params) else {
+        return Vec::new();
     };
 
     vec![AgentEvent::ItemDelta {
@@ -1672,6 +2706,84 @@ fn normalize_codex_item_delta(method: &str, params: &Value, created_at: &str) ->
         delta,
         created_at: created_at.to_string(),
     }]
+}
+
+fn normalize_codex_item_delta_payload(method: &str, params: &Value) -> Option<Value> {
+    match method {
+        "item/fileChange/patchUpdated" => params
+            .get("changes")
+            .cloned()
+            .or_else(|| Some(Value::Array(Vec::new()))),
+        "item/reasoning/summaryTextDelta" => {
+            let summary_index = params.get("summaryIndex")?.as_u64()?;
+            if summary_index >= AGENT_UI_REASONING_PARTS as u64 {
+                return None;
+            }
+            Some(json!({
+                "text": truncate_ui_text(
+                    &extract_string(params, "/delta")?,
+                    AGENT_UI_TEXT_PREVIEW_CHARS,
+                ),
+                "summaryIndex": summary_index,
+                "visibility": "summary"
+            }))
+        }
+        "item/reasoning/summaryPartAdded" => {
+            let summary_index = params.get("summaryIndex")?.as_u64()?;
+            if summary_index >= AGENT_UI_REASONING_PARTS as u64 {
+                return None;
+            }
+            Some(json!({
+                "summaryIndex": summary_index,
+                "visibility": "summary"
+            }))
+        }
+        "item/reasoning/textDelta" => {
+            let text_length = extract_string(params, "/delta")?.chars().count();
+            Some(json!({
+                "contentIndex": params.get("contentIndex")?.as_u64()?,
+                "textLength": text_length,
+                "visibility": "restricted_debug"
+            }))
+        }
+        "item/mcpToolCall/progress" => Some(json!({
+            "message": project_ui_sensitive_text(
+                &extract_string(params, "/message")?,
+                AGENT_UI_TEXT_PREVIEW_CHARS,
+            )
+        })),
+        "item/commandExecution/terminalInteraction" => {
+            let interaction_length = extract_string(params, "/stdin")?.chars().count();
+            Some(json!({
+                "processId": truncate_ui_text(
+                    &extract_string(params, "/processId")?,
+                    AGENT_UI_TEXT_PREVIEW_CHARS,
+                ),
+                "interaction": {
+                    "type": "stdin",
+                    "characterCount": interaction_length
+                }
+            }))
+        }
+        "item/agentMessage/delta" | "item/plan/delta" => Some(Value::String(truncate_ui_text(
+            &extract_string(params, "/delta")?,
+            AGENT_UI_LONG_TEXT_CHARS,
+        ))),
+        "item/commandExecution/outputDelta" | "item/fileChange/outputDelta" => {
+            let (tail, _) = truncate_ui_text_tail(
+                &extract_string(params, "/delta")?,
+                AGENT_UI_COMMAND_OUTPUT_TAIL_CHARS,
+            );
+            Some(Value::String(tail))
+        }
+        _ => Some(
+            params
+                .get("delta")
+                .or_else(|| params.get("part"))
+                .cloned()
+                .unwrap_or_else(|| params.clone()),
+        ),
+    }
 }
 
 fn normalize_codex_plan_updated(params: &Value, created_at: &str) -> Vec<AgentEvent> {
@@ -1687,11 +2799,18 @@ fn normalize_codex_plan_updated(params: &Value, created_at: &str) -> Vec<AgentEv
         .map(|steps| {
             steps
                 .iter()
+                .take(AGENT_UI_PLAN_STEPS)
                 .filter_map(|step| {
                     Some(AgentPlanStep {
-                        step: extract_string(step, "/step")?,
-                        status: extract_string(step, "/status")
-                            .unwrap_or_else(|| "pending".to_string()),
+                        step: truncate_ui_text(
+                            &extract_string(step, "/step")?,
+                            AGENT_UI_TEXT_PREVIEW_CHARS,
+                        ),
+                        status: truncate_ui_text(
+                            &extract_string(step, "/status")
+                                .unwrap_or_else(|| "pending".to_string()),
+                            AGENT_UI_MODEL_IDENTIFIER_CHARS,
+                        ),
                     })
                 })
                 .collect()
@@ -1701,7 +2820,9 @@ fn normalize_codex_plan_updated(params: &Value, created_at: &str) -> Vec<AgentEv
     vec![AgentEvent::PlanUpdated {
         thread_id,
         turn_id,
-        explanation: extract_string(params, "/explanation").filter(|value| !value.is_empty()),
+        explanation: extract_string(params, "/explanation")
+            .filter(|value| !value.is_empty())
+            .map(|value| truncate_ui_text(&value, AGENT_UI_STATUS_MESSAGE_CHARS)),
         plan,
         created_at: created_at.to_string(),
     }]
@@ -1771,9 +2892,12 @@ fn normalize_auto_approval_review(params: &Value, created_at: &str) -> Vec<Agent
     };
 
     vec![AgentEvent::ApprovalReview {
-        status,
-        action: extract_string(params, "/action/type"),
-        rationale: extract_string(params, "/review/rationale").filter(|value| !value.is_empty()),
+        status: truncate_ui_text(&status, AGENT_UI_MODEL_IDENTIFIER_CHARS),
+        action: extract_string(params, "/action/type")
+            .map(|value| truncate_ui_text(&value, AGENT_UI_MODEL_IDENTIFIER_CHARS)),
+        rationale: extract_string(params, "/review/rationale")
+            .filter(|value| !value.is_empty())
+            .map(|value| project_ui_sensitive_text(&value, AGENT_UI_STATUS_MESSAGE_CHARS)),
         created_at: created_at.to_string(),
     }]
 }
@@ -1796,12 +2920,16 @@ fn normalize_codex_exec_json_file_change(item: &Value, created_at: &str) -> Vec<
 }
 
 fn normalize_codex_turn_completed(params: &Value, created_at: &str) -> Vec<AgentEvent> {
-    let status = extract_string(params, "/turn/status").unwrap_or_else(|| "completed".to_string());
+    let status = truncate_ui_text(
+        &extract_string(params, "/turn/status").unwrap_or_else(|| "completed".to_string()),
+        AGENT_UI_MODEL_IDENTIFIER_CHARS,
+    );
     let mut events = vec![AgentEvent::TurnCompleted {
         thread_id: extract_string(params, "/threadId"),
         turn_id: extract_string(params, "/turn/id"),
         status: status.clone(),
-        final_message: extract_final_agent_message(params),
+        final_message: extract_final_agent_message(params)
+            .map(|message| truncate_ui_text(&message, AGENT_UI_LONG_TEXT_CHARS)),
         created_at: created_at.to_string(),
     }];
 
@@ -1810,7 +2938,10 @@ fn normalize_codex_turn_completed(params: &Value, created_at: &str) -> Vec<Agent
         .filter(|error| !error.is_null())
     {
         events.push(AgentEvent::Error {
-            message: format_codex_error(error),
+            message: project_ui_sensitive_text(
+                &format_codex_error(error),
+                AGENT_UI_STATUS_MESSAGE_CHARS,
+            ),
             retryable: false,
             terminal: status == "failed",
             thread_id: extract_string(params, "/threadId"),
@@ -1855,13 +2986,20 @@ fn format_turn_plan_update(params: &Value) -> Option<String> {
     if let Some(explanation) =
         extract_string(params, "/explanation").filter(|text| !text.is_empty())
     {
-        lines.push(explanation);
+        lines.push(truncate_ui_text(
+            &explanation,
+            AGENT_UI_STATUS_MESSAGE_CHARS,
+        ));
     }
 
     if let Some(plan) = params.get("plan").and_then(Value::as_array) {
-        lines.extend(plan.iter().filter_map(|step| {
-            let step_text = extract_string(step, "/step")?;
-            let status = extract_string(step, "/status").unwrap_or_else(|| "pending".to_string());
+        lines.extend(plan.iter().take(AGENT_UI_PLAN_STEPS).filter_map(|step| {
+            let step_text =
+                truncate_ui_text(&extract_string(step, "/step")?, AGENT_UI_TEXT_PREVIEW_CHARS);
+            let status = truncate_ui_text(
+                &extract_string(step, "/status").unwrap_or_else(|| "pending".to_string()),
+                AGENT_UI_MODEL_IDENTIFIER_CHARS,
+            );
             Some(format!("[{status}] {step_text}"))
         }));
     }
@@ -1869,7 +3007,10 @@ fn format_turn_plan_update(params: &Value) -> Option<String> {
     if lines.is_empty() {
         None
     } else {
-        Some(lines.join("\n"))
+        Some(truncate_ui_text(
+            &lines.join("\n"),
+            AGENT_UI_LONG_TEXT_CHARS,
+        ))
     }
 }
 
@@ -1877,6 +3018,7 @@ fn format_exec_plan_update(item: &Value) -> Option<String> {
     extract_string(item, "/text")
         .or_else(|| extract_string(item, "/message"))
         .filter(|text| !text.is_empty())
+        .map(|text| truncate_ui_text(&text, AGENT_UI_LONG_TEXT_CHARS))
         .or_else(|| format_turn_plan_update(item))
 }
 
@@ -1892,6 +3034,25 @@ fn extract_string(value: &Value, pointer: &str) -> Option<String> {
         .pointer(pointer)
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn extract_bounded_string_array(
+    value: &Value,
+    pointer: &str,
+    max_items: usize,
+    max_chars: usize,
+) -> Option<Vec<String>> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(max_items)
+                .filter_map(Value::as_str)
+                .map(|item| project_ui_sensitive_text(item, max_chars))
+                .collect()
+        })
 }
 
 fn extract_protocol_timestamp(value: &Value, pointer: &str, fallback: &str) -> String {
@@ -4227,6 +5388,1199 @@ mod tests {
             },
         );
         assert_eq!(summary.error_message, Some("失败".to_string()));
+    }
+
+    #[test]
+    fn normalizes_reasoning_parts_and_redacts_raw_reasoning_text() {
+        let summary_part = normalize_codex_notification_at(
+            &json!({
+                "method": "item/reasoning/summaryPartAdded",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 1
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let summary_delta = normalize_codex_notification_at(
+            &json!({
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 1,
+                    "delta": "检查测试"
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+        let second_summary_delta = normalize_codex_notification_at(
+            &json!({
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-1",
+                    "summaryIndex": 2,
+                    "delta": "准备修改"
+                }
+            }),
+            "2026-07-13T00:00:02Z",
+        );
+        let raw_delta = normalize_codex_notification_at(
+            &json!({
+                "method": "item/reasoning/textDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-1",
+                    "contentIndex": 3,
+                    "delta": "raw-secret"
+                }
+            }),
+            "2026-07-13T00:00:03Z",
+        );
+
+        assert!(matches!(
+            summary_part.as_slice(),
+            [AgentEvent::ItemDelta { delta, .. }]
+                if delta == &json!({ "summaryIndex": 1, "visibility": "summary" })
+        ));
+        assert!(matches!(
+            summary_delta.as_slice(),
+            [AgentEvent::ItemDelta { delta, .. }]
+                if delta == &json!({
+                    "text": "检查测试",
+                    "summaryIndex": 1,
+                    "visibility": "summary"
+                })
+        ));
+        assert!(matches!(
+            second_summary_delta.as_slice(),
+            [AgentEvent::ItemDelta { delta, .. }]
+                if delta == &json!({
+                    "text": "准备修改",
+                    "summaryIndex": 2,
+                    "visibility": "summary"
+                })
+        ));
+        assert!(matches!(
+            raw_delta.as_slice(),
+            [AgentEvent::ItemDelta { delta, .. }]
+                if delta == &json!({
+                    "contentIndex": 3,
+                    "textLength": 10,
+                    "visibility": "restricted_debug"
+                })
+        ));
+        assert!(!serde_json::to_string(&raw_delta)
+            .expect("raw reasoning event should serialize")
+            .contains("raw-secret"));
+    }
+
+    #[test]
+    fn normalizes_mcp_progress_and_redacts_terminal_stdin() {
+        let progress = normalize_codex_notification_at(
+            &json!({
+                "method": "item/mcpToolCall/progress",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "mcp-1",
+                    "message": "正在读取资源"
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let terminal = normalize_codex_notification_at(
+            &json!({
+                "method": "item/commandExecution/terminalInteraction",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "command-1",
+                    "processId": "pty-42",
+                    "stdin": "super-secret-input"
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+
+        assert!(matches!(
+            progress.as_slice(),
+            [AgentEvent::ItemDelta { delta, .. }]
+                if delta == &json!({ "message": "正在读取资源" })
+        ));
+        assert!(matches!(
+            terminal.as_slice(),
+            [AgentEvent::ItemDelta { delta, .. }]
+                if delta == &json!({
+                    "processId": "pty-42",
+                    "interaction": {
+                        "type": "stdin",
+                        "characterCount": 18
+                    }
+                })
+        ));
+        let serialized =
+            serde_json::to_string(&terminal).expect("terminal interaction event should serialize");
+        assert!(!serialized.contains("super-secret-input"));
+        assert!(!serialized.contains("\"stdin\":"));
+    }
+
+    #[test]
+    fn normalizes_hook_run_lifecycle_notifications() {
+        let started_run = json!({
+            "id": "hook-1",
+            "eventName": "preToolUse",
+            "handlerType": "command",
+            "executionMode": "sync",
+            "scope": "thread",
+            "sourcePath": "/tmp/demo/.codex/hooks.json",
+            "source": "project",
+            "displayOrder": 0,
+            "status": "running",
+            "statusMessage": "检查命令",
+            "startedAt": 1783900800000_i64,
+            "completedAt": null,
+            "durationMs": null,
+            "entries": []
+        });
+        let mut completed_run = started_run.clone();
+        completed_run["status"] = json!("completed");
+        completed_run["completedAt"] = json!(1783900800100_i64);
+        completed_run["durationMs"] = json!(100);
+        completed_run["entries"] = json!([{ "kind": "feedback", "text": "允许执行" }]);
+
+        let started = normalize_codex_notification_at(
+            &json!({
+                "method": "hook/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": null,
+                    "run": started_run.clone()
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let completed = normalize_codex_notification_at(
+            &json!({
+                "method": "hook/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "run": completed_run.clone()
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+
+        assert_eq!(
+            started,
+            vec![AgentEvent::HookRunUpdated {
+                thread_id: "thread-1".to_string(),
+                turn_id: None,
+                hook_id: "hook-1".to_string(),
+                lifecycle: "in_progress".to_string(),
+                run: started_run,
+                created_at: "2026-07-13T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            completed,
+            vec![AgentEvent::HookRunUpdated {
+                thread_id: "thread-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                hook_id: "hook-1".to_string(),
+                lifecycle: "completed".to_string(),
+                run: completed_run,
+                created_at: "2026-07-13T00:00:01Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn hook_run_projection_caps_entries_and_preserves_timing_metadata() {
+        let entries = (0..(AGENT_UI_HOOK_ENTRIES + 10))
+            .map(|index| {
+                json!({
+                    "kind": "feedback",
+                    "text": format!(
+                        "{index}: {}",
+                        "hook output ".repeat(AGENT_UI_HOOK_ENTRY_CHARS / 4)
+                    ),
+                    "secretToken": "HOOK_SECRET_MUST_NOT_CROSS_IPC"
+                })
+            })
+            .collect::<Vec<_>>();
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "hook/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "run": {
+                        "id": "hook-bounded",
+                        "eventName": "postToolUse",
+                        "handlerType": "command",
+                        "executionMode": "sync",
+                        "scope": "turn",
+                        "sourcePath": "/tmp/demo/.codex/hooks.json",
+                        "source": "project",
+                        "displayOrder": 7,
+                        "status": "completed",
+                        "statusMessage": "完成",
+                        "startedAt": 1000,
+                        "completedAt": 1200,
+                        "durationMs": 200,
+                        "entries": entries,
+                        "arbitraryPayload": "not projected"
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+
+        let [AgentEvent::HookRunUpdated { run, .. }] = events.as_slice() else {
+            panic!("hook lifecycle event");
+        };
+        let projected_entries = run
+            .get("entries")
+            .and_then(Value::as_array)
+            .expect("projected hook entries");
+        assert!(projected_entries.len() <= AGENT_UI_HOOK_ENTRIES);
+        assert!(projected_entries.iter().all(|entry| {
+            entry
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.chars().count() <= AGENT_UI_HOOK_ENTRY_CHARS)
+        }));
+        assert!(
+            projected_entries
+                .iter()
+                .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+                .map(|text| text.chars().count())
+                .sum::<usize>()
+                <= AGENT_UI_HOOK_TOTAL_CHARS
+        );
+        assert_eq!(run.get("displayOrder").and_then(Value::as_u64), Some(7));
+        assert_eq!(run.get("startedAt").and_then(Value::as_u64), Some(1000));
+        assert_eq!(run.get("completedAt").and_then(Value::as_u64), Some(1200));
+        assert_eq!(run.get("durationMs").and_then(Value::as_u64), Some(200));
+        assert!(run.get("arbitraryPayload").is_none());
+        assert_eq!(run.get("_uiProjectionTruncated"), Some(&Value::Bool(true)));
+        assert!(!serde_json::to_string(&events)
+            .expect("hook event should serialize")
+            .contains("HOOK_SECRET_MUST_NOT_CROSS_IPC"));
+    }
+
+    #[test]
+    fn reasoning_and_model_status_collections_are_bounded() {
+        let summary = (0..(AGENT_UI_REASONING_PARTS + 10))
+            .map(|index| format!("{index}:{}", "s".repeat(AGENT_UI_TEXT_PREVIEW_CHARS + 20)))
+            .collect::<Vec<_>>();
+        let reasoning = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "reasoning-bounded",
+                        "type": "reasoning",
+                        "summary": summary,
+                        "content": []
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let out_of_range_delta = normalize_codex_notification_at(
+            &json!({
+                "method": "item/reasoning/summaryTextDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "reasoning-bounded",
+                    "summaryIndex": AGENT_UI_REASONING_PARTS,
+                    "delta": "must be ignored"
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+        let many_status_values = (0..(AGENT_UI_MODEL_STATUS_ITEMS + 10))
+            .map(|index| {
+                format!(
+                    "{index}: {}",
+                    "model status ".repeat(AGENT_UI_TEXT_PREVIEW_CHARS / 4)
+                )
+            })
+            .collect::<Vec<_>>();
+        let model = normalize_codex_notification_at(
+            &json!({
+                "method": "model/safetyBuffering/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "model": "model-b",
+                    "useCases": many_status_values,
+                    "reasons": ["policy-check"],
+                    "showBufferingUi": true,
+                    "fasterModel": null
+                }
+            }),
+            "2026-07-13T00:00:02Z",
+        );
+
+        let [AgentEvent::ItemCompleted { item, .. }] = reasoning.as_slice() else {
+            panic!("reasoning lifecycle event");
+        };
+        let projected_summary = item
+            .get("summary")
+            .and_then(Value::as_array)
+            .expect("projected reasoning summary");
+        assert_eq!(projected_summary.len(), AGENT_UI_REASONING_PARTS);
+        assert!(projected_summary.iter().all(|part| {
+            part.as_str()
+                .is_some_and(|text| text.chars().count() <= AGENT_UI_TEXT_PREVIEW_CHARS)
+        }));
+        assert!(out_of_range_delta.is_empty());
+
+        let [AgentEvent::ModelSafetyBufferingUpdated { use_cases, .. }] = model.as_slice() else {
+            panic!("model buffering event");
+        };
+        assert_eq!(use_cases.len(), AGENT_UI_MODEL_STATUS_ITEMS);
+        assert!(use_cases
+            .iter()
+            .all(|value| value.chars().count() <= AGENT_UI_TEXT_PREVIEW_CHARS));
+    }
+
+    #[test]
+    fn normalizes_context_token_usage_and_schema_model_statuses() {
+        let token_usage = json!({
+            "total": {
+                "totalTokens": 120,
+                "inputTokens": 80,
+                "cachedInputTokens": 20,
+                "outputTokens": 40,
+                "reasoningOutputTokens": 10
+            },
+            "last": {
+                "totalTokens": 30,
+                "inputTokens": 20,
+                "cachedInputTokens": 5,
+                "outputTokens": 10,
+                "reasoningOutputTokens": 3
+            },
+            "modelContextWindow": null
+        });
+        let context = normalize_codex_notification_at(
+            &json!({
+                "method": "thread/compacted",
+                "params": { "threadId": "thread-1", "turnId": "turn-1" }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let usage = normalize_codex_notification_at(
+            &json!({
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": token_usage.clone()
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+        let rerouted = normalize_codex_notification_at(
+            &json!({
+                "method": "model/rerouted",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "fromModel": "model-a",
+                    "toModel": "model-b",
+                    "reason": "highRiskCyberActivity"
+                }
+            }),
+            "2026-07-13T00:00:02Z",
+        );
+        let buffering = normalize_codex_notification_at(
+            &json!({
+                "method": "model/safetyBuffering/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "model": "model-b",
+                    "useCases": ["cyber", "future-use-case"],
+                    "reasons": ["policy-check"],
+                    "showBufferingUi": true,
+                    "fasterModel": "model-fast"
+                }
+            }),
+            "2026-07-13T00:00:03Z",
+        );
+        let verification = normalize_codex_notification_at(
+            &json!({
+                "method": "model/verification",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "verifications": ["trustedAccessForCyber"]
+                }
+            }),
+            "2026-07-13T00:00:04Z",
+        );
+
+        assert!(matches!(
+            context.as_slice(),
+            [AgentEvent::ContextCompacted {
+                thread_id,
+                turn_id,
+                ..
+            }] if thread_id == "thread-1" && turn_id == "turn-1"
+        ));
+        assert_eq!(
+            usage,
+            vec![AgentEvent::TokenUsageUpdated {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                token_usage,
+                created_at: "2026-07-13T00:00:01Z".to_string(),
+            }]
+        );
+        assert!(matches!(
+            rerouted.as_slice(),
+            [AgentEvent::ModelRerouted { reason, .. }] if reason == "highRiskCyberActivity"
+        ));
+        assert!(matches!(
+            buffering.as_slice(),
+            [AgentEvent::ModelSafetyBufferingUpdated {
+                use_cases,
+                reasons,
+                show_buffering_ui: true,
+                faster_model: Some(faster_model),
+                ..
+            }] if use_cases == &["cyber", "future-use-case"]
+                && reasons == &["policy-check"]
+                && faster_model == "model-fast"
+        ));
+        assert!(matches!(
+            verification.as_slice(),
+            [AgentEvent::ModelVerificationUpdated { verifications, .. }]
+                if verifications == &["trustedAccessForCyber"]
+        ));
+    }
+
+    #[test]
+    fn model_string_enums_remain_forward_compatible() {
+        let rerouted = normalize_codex_notification_at(
+            &json!({
+                "method": "model/rerouted",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "fromModel": "model-a",
+                    "toModel": "model-b",
+                    "reason": "futureRoutingPolicy"
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let verification = normalize_codex_notification_at(
+            &json!({
+                "method": "model/verification",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "verifications": ["futureVerification"]
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+
+        assert!(matches!(
+            rerouted.as_slice(),
+            [AgentEvent::ModelRerouted { reason, .. }] if reason == "futureRoutingPolicy"
+        ));
+        assert!(matches!(
+            verification.as_slice(),
+            [AgentEvent::ModelVerificationUpdated { verifications, .. }]
+                if verifications == &["futureVerification"]
+        ));
+    }
+
+    #[test]
+    fn normalizes_config_and_guardian_warnings() {
+        let config = normalize_codex_notification_at(
+            &json!({
+                "method": "configWarning",
+                "params": {
+                    "summary": "配置项已弃用",
+                    "details": "请迁移到新配置项",
+                    "path": "/tmp/demo/.codex/config.toml",
+                    "range": {
+                        "start": { "line": 3, "column": 1 },
+                        "end": { "line": 3, "column": 12 }
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let guardian = normalize_codex_notification_at(
+            &json!({
+                "method": "guardianWarning",
+                "params": {
+                    "threadId": "thread-1",
+                    "message": "该操作需要额外审查"
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+
+        assert_eq!(
+            config,
+            vec![AgentEvent::ConfigWarning {
+                summary: "配置项已弃用".to_string(),
+                details: Some("请迁移到新配置项".to_string()),
+                path: Some("/tmp/demo/.codex/config.toml".to_string()),
+                range: Some(json!({
+                    "start": { "line": 3, "column": 1 },
+                    "end": { "line": 3, "column": 12 }
+                })),
+                created_at: "2026-07-13T00:00:00Z".to_string(),
+            }]
+        );
+        assert_eq!(
+            guardian,
+            vec![AgentEvent::GuardianWarning {
+                thread_id: "thread-1".to_string(),
+                message: "该操作需要额外审查".to_string(),
+                created_at: "2026-07-13T00:00:01Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn all_thread_item_types_keep_lifecycle_events_after_ui_projection() {
+        let items = vec![
+            json!({
+                "id": "user-1",
+                "type": "userMessage",
+                "clientId": null,
+                "content": []
+            }),
+            json!({ "id": "hook-prompt-1", "type": "hookPrompt", "fragments": [] }),
+            json!({
+                "id": "message-1",
+                "type": "agentMessage",
+                "text": "完成",
+                "phase": "final_answer",
+                "memoryCitation": null
+            }),
+            json!({ "id": "plan-1", "type": "plan", "text": "实现功能" }),
+            json!({
+                "id": "reasoning-1",
+                "type": "reasoning",
+                "summary": ["检查实现"],
+                "content": ["restricted"]
+            }),
+            json!({
+                "id": "command-1",
+                "type": "commandExecution",
+                "command": "npm test",
+                "cwd": "/tmp/demo",
+                "processId": null,
+                "source": "agent",
+                "status": "completed",
+                "commandActions": [],
+                "aggregatedOutput": "ok",
+                "exitCode": 0,
+                "durationMs": 15
+            }),
+            json!({
+                "id": "file-1",
+                "type": "fileChange",
+                "status": "completed",
+                "changes": [{
+                    "path": "/tmp/demo/src/App.tsx",
+                    "kind": { "type": "update", "move_path": null },
+                    "diff": "@@ -1 +1 @@\n-old\n+new\n"
+                }]
+            }),
+            json!({
+                "id": "mcp-1",
+                "type": "mcpToolCall",
+                "server": "docs",
+                "tool": "search",
+                "status": "completed",
+                "arguments": { "query": "Codex" },
+                "appContext": null,
+                "pluginId": null,
+                "result": { "content": [], "structuredContent": null, "_meta": null },
+                "error": null,
+                "durationMs": 42
+            }),
+            json!({
+                "id": "dynamic-1",
+                "type": "dynamicToolCall",
+                "namespace": null,
+                "tool": "render",
+                "arguments": {},
+                "status": "completed",
+                "contentItems": [{ "type": "inputText", "text": "done" }],
+                "success": true,
+                "durationMs": 10
+            }),
+            json!({
+                "id": "collab-1",
+                "type": "collabAgentToolCall",
+                "tool": "spawnAgent",
+                "status": "completed",
+                "senderThreadId": "thread-1",
+                "receiverThreadIds": ["thread-2"],
+                "prompt": "检查测试",
+                "model": null,
+                "reasoningEffort": null,
+                "agentsStates": {
+                    "thread-2": { "status": "completed", "message": "完成" }
+                }
+            }),
+            json!({
+                "id": "activity-1",
+                "type": "subAgentActivity",
+                "kind": "interacted",
+                "agentThreadId": "thread-2",
+                "agentPath": "reviewer"
+            }),
+            json!({
+                "id": "search-1",
+                "type": "webSearch",
+                "query": "Codex app server",
+                "action": { "type": "openPage", "url": "https://developers.openai.com" }
+            }),
+            json!({ "id": "view-1", "type": "imageView", "path": "/tmp/demo/a.png" }),
+            json!({
+                "id": "image-1",
+                "type": "imageGeneration",
+                "status": "completed",
+                "revisedPrompt": null,
+                "result": "opaque-result",
+                "savedPath": "/tmp/demo/generated.png"
+            }),
+            json!({ "id": "sleep-1", "type": "sleep", "durationMs": 100 }),
+            json!({ "id": "review-in-1", "type": "enteredReviewMode", "review": "review" }),
+            json!({ "id": "review-out-1", "type": "exitedReviewMode", "review": "review" }),
+            json!({ "id": "compact-1", "type": "contextCompaction" }),
+        ];
+        assert_eq!(items.len(), 18);
+
+        for item in items {
+            let item_id = extract_string(&item, "/id").expect("fixture item id");
+            let item_type = extract_string(&item, "/type").expect("fixture item type");
+            let started = normalize_codex_notification_at(
+                &json!({
+                    "method": "item/started",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "startedAtMs": 1783900800000_i64,
+                        "item": item.clone()
+                    }
+                }),
+                "2026-07-13T00:00:00Z",
+            );
+            let completed = normalize_codex_notification_at(
+                &json!({
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "completedAtMs": 1783900800100_i64,
+                        "item": item.clone()
+                    }
+                }),
+                "2026-07-13T00:00:01Z",
+            );
+
+            assert!(matches!(
+                started.as_slice(),
+                [AgentEvent::ItemStarted {
+                    item_id: actual_id,
+                    item_type: actual_type,
+                    item: actual_item,
+                    ..
+                }] if actual_id == &item_id
+                    && actual_type == &item_type
+                    && actual_item.pointer("/id").and_then(Value::as_str) == Some(item_id.as_str())
+                    && actual_item.pointer("/type").and_then(Value::as_str) == Some(item_type.as_str())
+            ));
+            assert!(matches!(
+                completed.as_slice(),
+                [AgentEvent::ItemCompleted {
+                    item_id: actual_id,
+                    item_type: actual_type,
+                    item: actual_item,
+                    ..
+                }] if actual_id == &item_id
+                    && actual_type == &item_type
+                    && actual_item.pointer("/id").and_then(Value::as_str) == Some(item_id.as_str())
+                    && actual_item.pointer("/type").and_then(Value::as_str) == Some(item_type.as_str())
+            ));
+        }
+    }
+
+    #[test]
+    fn lifecycle_ui_projection_omits_raw_binary_stdin_and_sensitive_tool_data() {
+        let reasoning = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "reasoning-1",
+                        "type": "reasoning",
+                        "summary": ["安全摘要"],
+                        "content": ["RAW_REASONING_MUST_NOT_CROSS_IPC"]
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let image = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "image-1",
+                        "type": "imageGeneration",
+                        "status": "completed",
+                        "revisedPrompt": null,
+                        "result": "data:image/png;base64,BASE64_IMAGE_MUST_NOT_CROSS_IPC",
+                        "savedPath": "/tmp/demo/image.png"
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let mcp = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "mcp-1",
+                        "type": "mcpToolCall",
+                        "server": "docs",
+                        "tool": "read",
+                        "status": "completed",
+                        "arguments": {
+                            "query": "safe query",
+                            "apiKey": "MCP_SECRET_MUST_NOT_CROSS_IPC",
+                            "url": "https://example.test/file?X-Amz-Signature=SIGNED_URL_MUST_NOT_CROSS_IPC"
+                        },
+                        "result": {
+                            "content": [{
+                                "type": "image",
+                                "data": "data:image/png;base64,MCP_BASE64_MUST_NOT_CROSS_IPC"
+                            }],
+                            "structuredContent": null,
+                            "_meta": { "cookie": "MCP_COOKIE_MUST_NOT_CROSS_IPC" }
+                        },
+                        "error": null,
+                        "durationMs": 5
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let dynamic = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "dynamic-1",
+                        "type": "dynamicToolCall",
+                        "namespace": null,
+                        "tool": "render",
+                        "arguments": { "password": "DYNAMIC_SECRET_MUST_NOT_CROSS_IPC" },
+                        "status": "completed",
+                        "contentItems": [{
+                            "type": "inputImage",
+                            "imageUrl": "data:image/png;base64,DYNAMIC_BASE64_MUST_NOT_CROSS_IPC"
+                        }],
+                        "success": true,
+                        "durationMs": 5
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let command = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": "read -s password",
+                        "cwd": "/tmp/demo",
+                        "status": "completed",
+                        "commandActions": [],
+                        "stdin": "TERMINAL_SECRET_MUST_NOT_CROSS_IPC",
+                        "aggregatedOutput": "x".repeat(AGENT_UI_COMMAND_OUTPUT_TAIL_CHARS + 100),
+                        "exitCode": 0,
+                        "durationMs": 5
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let command_with_secret_output = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "command-secret-output",
+                        "type": "commandExecution",
+                        "command": "printenv",
+                        "cwd": "/tmp/demo",
+                        "status": "completed",
+                        "commandActions": [],
+                        "aggregatedOutput": "token=COMMAND_OUTPUT_SECRET_MUST_NOT_CROSS_IPC",
+                        "exitCode": 0,
+                        "durationMs": 5
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let unknown = normalize_codex_notification_at(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "completedAtMs": 1783900800000_i64,
+                    "item": {
+                        "id": "future-1",
+                        "type": "futureTool",
+                        "safe": "visible",
+                        "rawText": "UNKNOWN_RAW_MUST_NOT_CROSS_IPC",
+                        "nested": { "authorization": "Bearer UNKNOWN_SECRET" }
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+
+        let [AgentEvent::ItemCompleted { item, .. }] = reasoning.as_slice() else {
+            panic!("reasoning lifecycle event");
+        };
+        assert!(item.get("content").is_none());
+        assert_eq!(item.get("rawTextAvailable"), Some(&Value::Bool(true)));
+        assert_eq!(item.get("contentCount").and_then(Value::as_u64), Some(1));
+
+        let [AgentEvent::ItemCompleted { item, .. }] = image.as_slice() else {
+            panic!("image lifecycle event");
+        };
+        assert!(item.get("result").is_none());
+        assert_eq!(item.get("resultAvailable"), Some(&Value::Bool(true)));
+        assert!(item.get("resultLength").and_then(Value::as_u64).is_some());
+
+        let [AgentEvent::ItemCompleted { item, .. }] = command.as_slice() else {
+            panic!("command lifecycle event");
+        };
+        assert!(item.get("stdin").is_none());
+        assert_eq!(
+            item.get("aggregatedOutput")
+                .and_then(Value::as_str)
+                .map(|output| output.chars().count()),
+            Some(AGENT_UI_COMMAND_OUTPUT_TAIL_CHARS)
+        );
+        assert_eq!(
+            item.get("aggregatedOutputTruncated"),
+            Some(&Value::Bool(true))
+        );
+
+        let [AgentEvent::ItemCompleted { item, .. }] = command_with_secret_output.as_slice() else {
+            panic!("command secret output lifecycle event");
+        };
+        assert_eq!(
+            item.get("aggregatedOutputTruncated"),
+            Some(&Value::Bool(true))
+        );
+
+        let [AgentEvent::ItemCompleted { item, .. }] = mcp.as_slice() else {
+            panic!("mcp lifecycle event");
+        };
+        assert_eq!(
+            item.pointer("/arguments/_uiProjectionTruncated"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            item.pointer("/result/_uiProjectionTruncated"),
+            Some(&Value::Bool(true))
+        );
+
+        let [AgentEvent::ItemCompleted { item, .. }] = dynamic.as_slice() else {
+            panic!("dynamic lifecycle event");
+        };
+        assert!(item
+            .get("contentItems")
+            .and_then(Value::as_array)
+            .and_then(|items| items.last())
+            .and_then(|marker| marker.get("_uiProjectionTruncated"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false));
+
+        let [AgentEvent::ItemCompleted { item, .. }] = unknown.as_slice() else {
+            panic!("unknown lifecycle event");
+        };
+        assert_eq!(item.get("_uiProjectionTruncated"), Some(&Value::Bool(true)));
+
+        let serialized = serde_json::to_string(&[
+            reasoning,
+            image,
+            mcp,
+            dynamic,
+            command,
+            command_with_secret_output,
+            unknown,
+        ])
+        .expect("projected lifecycle events should serialize");
+        for forbidden in [
+            "RAW_REASONING_MUST_NOT_CROSS_IPC",
+            "BASE64_IMAGE_MUST_NOT_CROSS_IPC",
+            "MCP_SECRET_MUST_NOT_CROSS_IPC",
+            "SIGNED_URL_MUST_NOT_CROSS_IPC",
+            "MCP_BASE64_MUST_NOT_CROSS_IPC",
+            "MCP_COOKIE_MUST_NOT_CROSS_IPC",
+            "DYNAMIC_SECRET_MUST_NOT_CROSS_IPC",
+            "DYNAMIC_BASE64_MUST_NOT_CROSS_IPC",
+            "TERMINAL_SECRET_MUST_NOT_CROSS_IPC",
+            "COMMAND_OUTPUT_SECRET_MUST_NOT_CROSS_IPC",
+            "UNKNOWN_RAW_MUST_NOT_CROSS_IPC",
+            "UNKNOWN_SECRET",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert!(serialized.contains("safe query"));
+        assert!(serialized.contains("visible"));
+    }
+
+    #[test]
+    fn status_text_projection_redacts_inline_credential_markers() {
+        let warning = normalize_codex_notification_at(
+            &json!({
+                "method": "warning",
+                "params": {
+                    "threadId": "thread-1",
+                    "message": "request failed: token=INLINE_TOKEN_MUST_NOT_CROSS_IPC"
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let error = normalize_codex_notification_at(
+            &json!({
+                "method": "error",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "willRetry": true,
+                    "error": { "message": "Bearer INLINE_BEARER_MUST_NOT_CROSS_IPC" }
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+        let progress = normalize_codex_notification_at(
+            &json!({
+                "method": "item/mcpToolCall/progress",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "mcp-1",
+                    "message": "using sk-INLINE_KEY_MUST_NOT_CROSS_IPC"
+                }
+            }),
+            "2026-07-13T00:00:02Z",
+        );
+        let hook = normalize_codex_notification_at(
+            &json!({
+                "method": "hook/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "run": {
+                        "id": "hook-secret",
+                        "eventName": "postToolUse",
+                        "handlerType": "command",
+                        "executionMode": "sync",
+                        "scope": "turn",
+                        "sourcePath": "/tmp/demo/.codex/hooks.json",
+                        "source": "project",
+                        "displayOrder": 0,
+                        "status": "failed",
+                        "statusMessage": "authorization: INLINE_AUTH_MUST_NOT_CROSS_IPC",
+                        "startedAt": 1000,
+                        "completedAt": 1200,
+                        "durationMs": 200,
+                        "entries": [{
+                            "kind": "error",
+                            "text": "-----BEGIN PRIVATE KEY-----\nINLINE_PRIVATE_KEY"
+                        }]
+                    }
+                }
+            }),
+            "2026-07-13T00:00:03Z",
+        );
+
+        let serialized = serde_json::to_string(&[warning, error, progress, hook])
+            .expect("status events should serialize");
+        for forbidden in [
+            "INLINE_TOKEN_MUST_NOT_CROSS_IPC",
+            "INLINE_BEARER_MUST_NOT_CROSS_IPC",
+            "INLINE_KEY_MUST_NOT_CROSS_IPC",
+            "INLINE_AUTH_MUST_NOT_CROSS_IPC",
+            "INLINE_PRIVATE_KEY",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert!(serialized.contains("redacted credential or binary data"));
+        assert_eq!(
+            project_ui_sensitive_text("task-123 completed", AGENT_UI_STATUS_MESSAGE_CHARS),
+            "task-123 completed"
+        );
+    }
+
+    #[test]
+    fn structured_ui_projection_marks_field_array_node_and_character_limits() {
+        let many_fields = Value::Object(
+            (0..(AGENT_UI_STRUCTURED_MAX_FIELDS + 20))
+                .map(|index| (format!("field-{index}"), json!(index)))
+                .collect(),
+        );
+        let projected_fields = project_ui_safe_value(&many_fields);
+        assert_eq!(
+            projected_fields.get("_uiProjectionTruncated"),
+            Some(&Value::Bool(true))
+        );
+        assert!(projected_fields.get("_omittedFieldCount").is_some());
+
+        let many_items = json!((0..(AGENT_UI_STRUCTURED_MAX_ITEMS + 20)).collect::<Vec<_>>());
+        let projected_items = project_ui_safe_value(&many_items);
+        let projected_items = projected_items
+            .as_array()
+            .expect("array projection should stay an array");
+        assert_eq!(projected_items.len(), AGENT_UI_STRUCTURED_MAX_ITEMS + 1);
+        assert_eq!(
+            projected_items
+                .last()
+                .and_then(|marker| marker.get("_uiProjectionTruncated")),
+            Some(&Value::Bool(true))
+        );
+
+        let deep_value = json!({ "a": { "b": { "c": { "d": { "e": { "f": "deep" } } } } } });
+        let projected_deep_value = project_ui_safe_value(&deep_value);
+        assert_eq!(
+            projected_deep_value.get("_uiProjectionTruncated"),
+            Some(&Value::Bool(true))
+        );
+
+        let long_scalar = Value::String("long text ".repeat(AGENT_UI_TEXT_PREVIEW_CHARS));
+        let projected_scalar = project_ui_safe_value(&long_scalar);
+        assert_eq!(
+            projected_scalar.get("_uiProjectionTruncated"),
+            Some(&Value::Bool(true))
+        );
+        assert!(projected_scalar.get("preview").is_some());
+    }
+
+    #[test]
+    fn turn_and_plan_status_payloads_are_bounded() {
+        let long_text = "z".repeat(AGENT_UI_LONG_TEXT_CHARS + 500);
+        let final_events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [{
+                            "id": "message-1",
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": long_text
+                        }]
+                    }
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+        let plan_steps = (0..(AGENT_UI_PLAN_STEPS + 10))
+            .map(|index| {
+                json!({
+                    "step": format!("{index}:{}", "step ".repeat(400)),
+                    "status": "inProgress"
+                })
+            })
+            .collect::<Vec<_>>();
+        let plan_events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "explanation": "explanation ".repeat(1000),
+                    "plan": plan_steps
+                }
+            }),
+            "2026-07-13T00:00:01Z",
+        );
+
+        let [AgentEvent::TurnCompleted {
+            final_message: Some(final_message),
+            ..
+        }] = final_events.as_slice()
+        else {
+            panic!("turn completion event");
+        };
+        assert!(final_message.chars().count() <= AGENT_UI_LONG_TEXT_CHARS);
+
+        let [AgentEvent::PlanUpdated {
+            explanation: Some(explanation),
+            plan,
+            ..
+        }] = plan_events.as_slice()
+        else {
+            panic!("plan update event");
+        };
+        assert!(explanation.chars().count() <= AGENT_UI_STATUS_MESSAGE_CHARS);
+        assert_eq!(plan.len(), AGENT_UI_PLAN_STEPS);
+        assert!(plan
+            .iter()
+            .all(|step| step.step.chars().count() <= AGENT_UI_TEXT_PREVIEW_CHARS));
     }
 
     #[test]

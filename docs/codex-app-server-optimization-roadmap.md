@@ -245,18 +245,40 @@ AgentRun
 
 目标：所有与当前 AgentRun 有关的主要返回都有可理解的呈现或明确的调试归宿。
 
-- [ ] 5.1 reasoning summary：显示可折叠“正在分析”卡片。
-- [ ] 5.2 raw reasoning text：默认不展示，只进入受限调试详情。
-- [ ] 5.3 `mcpToolCall`：显示 server、tool、status、duration、result/error。
-- [ ] 5.4 `dynamicToolCall`：显示工具名、参数摘要、状态和结果。
-- [ ] 5.5 `collabAgentToolCall` / `subAgentActivity`：显示子 Agent 生命周期。
-- [ ] 5.6 `webSearch`：显示搜索、打开页面、页内查找动作。
-- [ ] 5.7 `imageView` / `imageGeneration`：显示路径、状态和保存位置。
-- [ ] 5.8 `hook/started` / `hook/completed`：显示 hook 名称和结果，默认折叠。
-- [ ] 5.9 `contextCompaction`：显示“正在整理长对话上下文”。
-- [ ] 5.10 `thread/tokenUsage/updated`：在顶部显示低优先级 token 使用信息。
-- [ ] 5.11 `model/rerouted`、safety buffering、verification：显示对应状态提示。
-- [ ] 5.12 `warning`、`configWarning`、guardian warning：按严重程度展示。
+完成日期：2026-07-13
+
+- [x] 5.1 reasoning summary：显示可折叠“正在分析”卡片。
+- [x] 5.2 raw reasoning text：默认不展示，只进入受限调试详情。
+- [x] 5.3 `mcpToolCall`：显示 server、tool、status、duration、result/error。
+- [x] 5.4 `dynamicToolCall`：显示工具名、参数摘要、状态和结果。
+- [x] 5.5 `collabAgentToolCall` / `subAgentActivity`：显示子 Agent 生命周期。
+- [x] 5.6 `webSearch`：显示搜索、打开页面、页内查找动作。
+- [x] 5.7 `imageView` / `imageGeneration`：显示路径、状态和保存位置。
+- [x] 5.8 `hook/started` / `hook/completed`：显示 hook 名称和结果，默认折叠。
+- [x] 5.9 `contextCompaction`：显示“正在整理长对话上下文”。
+- [x] 5.10 `thread/tokenUsage/updated`：在顶部显示低优先级 token 使用信息。
+- [x] 5.11 `model/rerouted`、safety buffering、verification：显示对应状态提示。
+- [x] 5.12 `warning`、`configWarning`、guardian warning：按严重程度展示。
+
+落地约束：
+
+- Rust 在 Tauri IPC 前生成 18 类 `ThreadItem` 的 UI-safe 白名单投影；raw reasoning、terminal stdin、图像结果、凭证和大块结构化数据不进入页面事件队列。
+- 主时间线只保留可理解的领域卡片；MCP progress、token、model snapshot 等高频更新原位覆盖，常规成功 Hook 聚合，失败或 blocked Hook 单独突出。
+- reasoning summary、工具参数/结果和 Hook 输出默认折叠；被截断或脱敏时明确提示完整原文位于本地受限协议 JSONL。
+- `rawResponseItem/completed`、moderation metadata、deprecation notice 和未知 notification 只进入原始协议日志；debug 级未映射提示不挤占用户时间线。
+- `dynamicToolCall` 的 Item 生命周期已覆盖；app-server 主动发起的工具请求仍属于 Milestone 6 的请求响应能力。
+
+验证基线：
+
+- 前端类型检查、生产构建与 69 个单元/SSR 测试通过。
+- Rust `cargo check` 与 125 个非 ignored 测试通过。
+- 真实 Codex app-server 只读 smoke test 通过。
+- 桌面和窄屏浏览器验收通过；折叠详情、自动跟随恢复、Hook 聚合均可正常交互，页面无横向溢出或控制台错误。
+
+已知边界：
+
+- 为保留 Milestone 3 的逐文件统计和可展开 diff，`fileChange.diff` 与 `turn/diff/updated` 仍保留完整文本；极端大 diff 的分页或总量上限并入 8.10。
+- 原始 JSONL 仍保留完整协议内容以便诊断；Milestone 7 在持久化、导出和恢复链路继续完成日志脱敏与访问边界。
 
 退出标准：
 
@@ -270,7 +292,7 @@ AgentRun
 
 - [x] 6.1 处理 `item/autoApprovalReview/started`，显示低优先级“正在自动审查权限”。（Milestone 0 提前完成）
 - [x] 6.2 处理 `item/autoApprovalReview/completed`，显示批准或拒绝结果。（Milestone 0 提前完成）
-- [ ] 6.3 处理 guardian warning，说明自动审查拒绝的原因。
+- [x] 6.3 处理 guardian warning，说明自动审查拒绝的原因。（Milestone 5 提前完成）
 - [ ] 6.4 对 `item/commandExecution/requestApproval` 建立协议响应能力。
 - [ ] 6.5 对 `item/fileChange/requestApproval` 建立协议响应能力。
 - [ ] 6.6 对 `item/permissions/requestApproval` 建立协议响应能力。

@@ -137,6 +137,8 @@ test("finds the latest real progress across domain items and run snapshots", () 
     aggregateDiff: "diff",
     aggregateDiffStats: { additions: 1, deletions: 0, files: 1 },
     aggregateDiffUpdatedAt: "2026-07-13T00:00:04Z",
+    hooksById: {},
+    hookOrder: [],
     warnings: [],
     errors: [],
     changedFiles: [],
