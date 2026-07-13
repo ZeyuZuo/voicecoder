@@ -13,6 +13,9 @@ use tauri::{AppHandle, Emitter};
 const DEFAULT_CODEX_BIN: &str = "codex";
 const FIRST_APP_SERVER_REQUEST_ID: u64 = 0;
 const DEFAULT_CODEX_SANDBOX: CodingAgentSandboxMode = CodingAgentSandboxMode::WorkspaceWrite;
+const CODEX_APP_SERVER_TRANSPORT: &str = "stdio";
+const CODEX_APPROVAL_POLICY_ENV: &str = "VOICECODER_CODEX_APPROVAL_POLICY";
+const CODEX_APPROVALS_REVIEWER_ENV: &str = "VOICECODER_CODEX_APPROVALS_REVIEWER";
 const AGENT_RUN_STARTED_EVENT: &str = "agent://run-started";
 const AGENT_EVENT_EVENT: &str = "agent://event";
 const AGENT_RUN_COMPLETED_EVENT: &str = "agent://run-completed";
@@ -85,6 +88,81 @@ pub enum CodingAgentSandboxMode {
     DangerFullAccess,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum CodingAgentApprovalPolicy {
+    Untrusted,
+    OnRequest,
+    Never,
+}
+
+impl CodingAgentApprovalPolicy {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_lowercase().as_str() {
+            "untrusted" => Ok(Self::Untrusted),
+            "on-request" | "on_request" => Ok(Self::OnRequest),
+            "never" => Ok(Self::Never),
+            _ => Err(format!(
+                "{CODEX_APPROVAL_POLICY_ENV} 只支持 untrusted、on-request 或 never。"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Untrusted => "untrusted",
+            Self::OnRequest => "on-request",
+            Self::Never => "never",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CodingAgentApprovalsReviewer {
+    User,
+    AutoReview,
+    GuardianSubagent,
+}
+
+impl CodingAgentApprovalsReviewer {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_lowercase().as_str() {
+            "user" => Ok(Self::User),
+            "auto_review" | "auto-review" | "approve_for_me" | "approve-for-me" => {
+                Ok(Self::AutoReview)
+            }
+            "guardian_subagent" | "guardian-subagent" => Ok(Self::GuardianSubagent),
+            _ => Err(format!(
+                "{CODEX_APPROVALS_REVIEWER_ENV} 只支持 user、auto_review 或 guardian_subagent。"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::AutoReview => "auto_review",
+            Self::GuardianSubagent => "guardian_subagent",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CodingAgentPermissionSettings {
+    approval_policy: CodingAgentApprovalPolicy,
+    approvals_reviewer: CodingAgentApprovalsReviewer,
+}
+
+impl Default for CodingAgentPermissionSettings {
+    fn default() -> Self {
+        Self {
+            approval_policy: CodingAgentApprovalPolicy::OnRequest,
+            approvals_reviewer: CodingAgentApprovalsReviewer::AutoReview,
+        }
+    }
+}
+
 impl CodingAgentSandboxMode {
     fn app_server_thread_sandbox(self) -> &'static str {
         match self {
@@ -140,6 +218,14 @@ pub enum AgentEvent {
         text: String,
         created_at: String,
     },
+    ApprovalReview {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rationale: Option<String>,
+        created_at: String,
+    },
     Command {
         command: String,
         status: String,
@@ -184,7 +270,19 @@ pub struct AgentRunStartedEvent {
     provider: CodingAgentProviderKind,
     codex_thread_id: String,
     codex_turn_id: String,
+    runtime: CodingAgentRuntimeMetadata,
     started_at: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodingAgentRuntimeMetadata {
+    provider: CodingAgentProviderKind,
+    version: String,
+    transport: String,
+    sandbox: String,
+    approval_policy: Option<String>,
+    approvals_reviewer: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -267,18 +365,27 @@ impl CodingAgentProvider for CodexAppServerProvider {
     }
 
     fn validate_start(&self) -> Result<(), String> {
-        validate_codex_executable().map(|_| ())
+        validate_codex_executable()?;
+        resolve_coding_agent_permission_settings()?;
+        Ok(())
     }
 
     fn diagnostic(&self) -> CodingAgentProviderDiagnostic {
-        codex_diagnostic(
+        let mut diagnostic = codex_diagnostic(
             self.kind(),
             [
-                ("transport", "stdio"),
+                ("transport", CODEX_APP_SERVER_TRANSPORT),
                 ("command", "codex app-server --stdio"),
                 ("threadMode", "persistent"),
+                (
+                    "defaultSandbox",
+                    DEFAULT_CODEX_SANDBOX.app_server_thread_sandbox(),
+                ),
             ],
-        )
+        );
+
+        apply_permission_settings_to_diagnostic(&mut diagnostic);
+        diagnostic
     }
 
     fn start_session(
@@ -298,21 +405,30 @@ impl CodingAgentProvider for CodexExecJsonProvider {
     }
 
     fn validate_start(&self) -> Result<(), String> {
-        validate_codex_executable().map(|_| ())
+        validate_codex_executable()?;
+        resolve_coding_agent_permission_settings()?;
+        Ok(())
     }
 
     fn diagnostic(&self) -> CodingAgentProviderDiagnostic {
-        codex_diagnostic(
+        let mut diagnostic = codex_diagnostic(
             self.kind(),
             [
                 ("transport", "process-jsonl"),
                 (
                     "command",
-                    "codex exec --json --sandbox workspace-write --cd <project> <prompt>",
+                    "codex --ask-for-approval on-request exec --json --sandbox workspace-write --cd <project> <prompt>",
                 ),
                 ("threadMode", "single-run"),
+                (
+                    "defaultSandbox",
+                    DEFAULT_CODEX_SANDBOX.app_server_thread_sandbox(),
+                ),
             ],
-        )
+        );
+
+        apply_permission_settings_to_diagnostic(&mut diagnostic);
+        diagnostic
     }
 
     fn start_session(
@@ -385,6 +501,7 @@ fn run_initial_demo_agent(
 
     match provider {
         CodingAgentProviderKind::CodexAppServer => {
+            resolve_coding_agent_permission_settings()?;
             let result = run_app_server_demo_agent(app.clone(), request.clone(), provider);
             if result.is_ok() || !can_fallback_to_codex_exec_json(requested_provider) {
                 return result;
@@ -412,8 +529,6 @@ fn run_app_server_demo_agent(
     request: StartInitialDemoRunRequest,
     provider: CodingAgentProviderKind,
 ) -> Result<(), String> {
-    CodexAppServerProvider.validate_start()?;
-
     let context = CodingAgentStartContext {
         project_path: request.project_path.clone(),
         prompt: request.prompt.clone(),
@@ -430,6 +545,26 @@ fn run_app_server_demo_agent(
             provider,
             codex_thread_id: session.codex_thread_id.clone(),
             codex_turn_id: session.initial_turn_id.clone(),
+            runtime: CodingAgentRuntimeMetadata {
+                provider,
+                version: session.codex_version.clone(),
+                transport: CODEX_APP_SERVER_TRANSPORT.to_string(),
+                sandbox: session.sandbox.app_server_thread_sandbox().to_string(),
+                approval_policy: Some(
+                    session
+                        .permission_settings
+                        .approval_policy
+                        .as_str()
+                        .to_string(),
+                ),
+                approvals_reviewer: Some(
+                    session
+                        .permission_settings
+                        .approvals_reviewer
+                        .as_str()
+                        .to_string(),
+                ),
+            },
             started_at: current_agent_event_timestamp(),
         },
     )?;
@@ -465,8 +600,6 @@ fn run_codex_exec_json_demo_agent(
     request: StartInitialDemoRunRequest,
     fallback_reason: Option<String>,
 ) -> Result<(), String> {
-    CodexExecJsonProvider.validate_start()?;
-
     let context = CodingAgentStartContext {
         project_path: request.project_path.clone(),
         prompt: request.prompt.clone(),
@@ -483,6 +616,26 @@ fn run_codex_exec_json_demo_agent(
             provider: CodingAgentProviderKind::CodexExecJson,
             codex_thread_id: format!("exec-json:{}", request.run_id),
             codex_turn_id: format!("exec-json-turn:{}", request.run_id),
+            runtime: CodingAgentRuntimeMetadata {
+                provider: CodingAgentProviderKind::CodexExecJson,
+                version: session.codex_version.clone(),
+                transport: "process-jsonl".to_string(),
+                sandbox: session.sandbox.app_server_thread_sandbox().to_string(),
+                approval_policy: Some(
+                    session
+                        .permission_settings
+                        .approval_policy
+                        .as_str()
+                        .to_string(),
+                ),
+                approvals_reviewer: Some(
+                    session
+                        .permission_settings
+                        .approvals_reviewer
+                        .as_str()
+                        .to_string(),
+                ),
+            },
             started_at: current_agent_event_timestamp(),
         },
     )?;
@@ -640,9 +793,53 @@ fn codex_executable() -> String {
     read_local_env("VOICECODER_CODEX_BIN").unwrap_or_else(|| DEFAULT_CODEX_BIN.to_string())
 }
 
+fn resolve_coding_agent_permission_settings() -> Result<CodingAgentPermissionSettings, String> {
+    let defaults = CodingAgentPermissionSettings::default();
+    let approval_policy = read_local_env(CODEX_APPROVAL_POLICY_ENV)
+        .as_deref()
+        .map(CodingAgentApprovalPolicy::parse)
+        .transpose()?
+        .unwrap_or(defaults.approval_policy);
+    let approvals_reviewer = read_local_env(CODEX_APPROVALS_REVIEWER_ENV)
+        .as_deref()
+        .map(CodingAgentApprovalsReviewer::parse)
+        .transpose()?
+        .unwrap_or(defaults.approvals_reviewer);
+
+    Ok(CodingAgentPermissionSettings {
+        approval_policy,
+        approvals_reviewer,
+    })
+}
+
+fn apply_permission_settings_to_diagnostic(diagnostic: &mut CodingAgentProviderDiagnostic) {
+    match resolve_coding_agent_permission_settings() {
+        Ok(settings) => {
+            diagnostic.details.insert(
+                "approvalPolicy".to_string(),
+                settings.approval_policy.as_str().to_string(),
+            );
+            diagnostic.details.insert(
+                "approvalsReviewer".to_string(),
+                settings.approvals_reviewer.as_str().to_string(),
+            );
+        }
+        Err(error) => {
+            diagnostic.configured = false;
+            diagnostic.error = Some(match diagnostic.error.take() {
+                Some(existing_error) => format!("{existing_error} {error}"),
+                None => error,
+            });
+        }
+    }
+}
+
 struct CodexExecJsonSession {
     child: Child,
     stdout: BufReader<ChildStdout>,
+    sandbox: CodingAgentSandboxMode,
+    permission_settings: CodingAgentPermissionSettings,
+    codex_version: String,
 }
 
 impl CodingAgentSession for CodexExecJsonSession {
@@ -707,9 +904,12 @@ fn start_codex_exec_json_session(
     context: CodingAgentStartContext,
 ) -> Result<CodexExecJsonSession, String> {
     validate_coding_agent_start_context(&context)?;
+    let codex_version = validate_codex_executable()?;
+    let permission_settings = resolve_coding_agent_permission_settings()?;
+    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
 
     let executable = codex_executable();
-    let args = build_codex_exec_json_args(&context);
+    let args = build_codex_exec_json_args(&context, permission_settings);
     let mut child = Command::new(&executable)
         .args(&args)
         .stdout(Stdio::piped())
@@ -725,14 +925,25 @@ fn start_codex_exec_json_session(
     Ok(CodexExecJsonSession {
         child,
         stdout: BufReader::new(stdout),
+        sandbox,
+        permission_settings,
+        codex_version,
     })
 }
 
-fn build_codex_exec_json_args(context: &CodingAgentStartContext) -> Vec<String> {
+fn build_codex_exec_json_args(
+    context: &CodingAgentStartContext,
+    permission_settings: CodingAgentPermissionSettings,
+) -> Vec<String> {
     let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
     vec![
         "--ask-for-approval".to_string(),
-        "on-failure".to_string(),
+        permission_settings.approval_policy.as_str().to_string(),
+        "--config".to_string(),
+        format!(
+            "approvals_reviewer=\"{}\"",
+            permission_settings.approvals_reviewer.as_str()
+        ),
         "exec".to_string(),
         "--json".to_string(),
         "--sandbox".to_string(),
@@ -749,6 +960,8 @@ struct CodexAppServerSession {
     client: CodexAppServerClient,
     project_path: String,
     sandbox: CodingAgentSandboxMode,
+    permission_settings: CodingAgentPermissionSettings,
+    codex_version: String,
     codex_thread_id: String,
     initial_turn_id: String,
     initial_prompt: String,
@@ -876,6 +1089,8 @@ fn start_codex_app_server_session(
     context: CodingAgentStartContext,
 ) -> Result<CodexAppServerSession, String> {
     validate_coding_agent_start_context(&context)?;
+    let codex_version = validate_codex_executable()?;
+    let permission_settings = resolve_coding_agent_permission_settings()?;
 
     let executable = codex_executable();
     let mut child = Command::new(&executable)
@@ -898,10 +1113,11 @@ fn start_codex_app_server_session(
     if let Err(error) = initialize_codex_app_server(&mut child, &mut client) {
         return Err(cleanup_child_with_error(&mut child, error));
     }
-    let run_handles = match start_initial_codex_turn(&mut child, &mut client, &context) {
-        Ok(run_handles) => run_handles,
-        Err(error) => return Err(cleanup_child_with_error(&mut child, error)),
-    };
+    let run_handles =
+        match start_initial_codex_turn(&mut child, &mut client, &context, permission_settings) {
+            Ok(run_handles) => run_handles,
+            Err(error) => return Err(cleanup_child_with_error(&mut child, error)),
+        };
     let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
 
     Ok(CodexAppServerSession {
@@ -909,6 +1125,8 @@ fn start_codex_app_server_session(
         client,
         project_path: context.project_path,
         sandbox,
+        permission_settings,
+        codex_version,
         codex_thread_id: run_handles.thread_id,
         initial_turn_id: run_handles.turn_id,
         initial_prompt: context.prompt,
@@ -963,12 +1181,13 @@ fn start_initial_codex_turn(
     child: &mut Child,
     client: &mut CodexAppServerClient,
     context: &CodingAgentStartContext,
+    permission_settings: CodingAgentPermissionSettings,
 ) -> Result<CodexAppServerRunHandles, String> {
     let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
     let thread_response = client.send_request(
         child,
         "thread/start",
-        build_thread_start_params(&context.project_path, sandbox),
+        build_thread_start_params(&context.project_path, sandbox, permission_settings),
     )?;
     let thread_id = extract_json_pointer_string(
         &thread_response,
@@ -979,7 +1198,13 @@ fn start_initial_codex_turn(
     let turn_response = client.send_request(
         child,
         "turn/start",
-        build_turn_start_params(&thread_id, &context.project_path, sandbox, &context.prompt),
+        build_turn_start_params(
+            &thread_id,
+            &context.project_path,
+            sandbox,
+            permission_settings,
+            &context.prompt,
+        ),
     )?;
     let turn_id = extract_json_pointer_string(
         &turn_response,
@@ -990,11 +1215,16 @@ fn start_initial_codex_turn(
     Ok(CodexAppServerRunHandles { thread_id, turn_id })
 }
 
-fn build_thread_start_params(project_path: &str, sandbox: CodingAgentSandboxMode) -> Value {
+fn build_thread_start_params(
+    project_path: &str,
+    sandbox: CodingAgentSandboxMode,
+    permission_settings: CodingAgentPermissionSettings,
+) -> Value {
     json!({
         "cwd": project_path,
         "runtimeWorkspaceRoots": [project_path],
-        "approvalPolicy": "on-failure",
+        "approvalPolicy": permission_settings.approval_policy.as_str(),
+        "approvalsReviewer": permission_settings.approvals_reviewer.as_str(),
         "sandbox": sandbox.app_server_thread_sandbox(),
         "threadSource": "user"
     })
@@ -1004,6 +1234,7 @@ fn build_turn_start_params(
     thread_id: &str,
     project_path: &str,
     sandbox: CodingAgentSandboxMode,
+    permission_settings: CodingAgentPermissionSettings,
     prompt: &str,
 ) -> Value {
     json!({
@@ -1011,7 +1242,8 @@ fn build_turn_start_params(
         "cwd": project_path,
         "runtimeWorkspaceRoots": [project_path],
         "sandboxPolicy": sandbox.app_server_turn_sandbox_policy(project_path),
-        "approvalPolicy": "on-failure",
+        "approvalPolicy": permission_settings.approval_policy.as_str(),
+        "approvalsReviewer": permission_settings.approvals_reviewer.as_str(),
         "input": [
             {
                 "type": "text",
@@ -1071,6 +1303,9 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
                 }]
             })
             .unwrap_or_default(),
+        "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+            normalize_auto_approval_review(params, created_at)
+        }
         "item/started" | "item/completed" => normalize_codex_item(params.get("item"), created_at),
         "item/fileChange/patchUpdated" => {
             normalize_codex_file_changes(params.get("changes"), created_at)
@@ -1242,6 +1477,19 @@ fn normalize_codex_file_changes(changes: Option<&Value>, created_at: &str) -> Ve
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn normalize_auto_approval_review(params: &Value, created_at: &str) -> Vec<AgentEvent> {
+    let Some(status) = extract_string(params, "/review/status") else {
+        return Vec::new();
+    };
+
+    vec![AgentEvent::ApprovalReview {
+        status,
+        action: extract_string(params, "/action/type"),
+        rationale: extract_string(params, "/review/rationale").filter(|value| !value.is_empty()),
+        created_at: created_at.to_string(),
+    }]
 }
 
 fn normalize_codex_exec_json_file_change(item: &Value, created_at: &str) -> Vec<AgentEvent> {
@@ -1550,6 +1798,18 @@ fn json_rpc_error_message(error: &Value) -> String {
 mod tests {
     use super::*;
 
+    const THREAD_START_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/thread-start-request.json");
+    const TURN_START_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/turn-start-request.json");
+    const FILE_CHANGE_STARTED_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/file-change-started-notification.json");
+    const FILE_CHANGE_APPROVAL_REQUEST_FIXTURE: &str =
+        include_str!("../tests/fixtures/codex-app-server-v2/file-change-approval-request.json");
+    const AUTO_APPROVAL_COMPLETED_FIXTURE: &str = include_str!(
+        "../tests/fixtures/codex-app-server-v2/auto-approval-completed-notification.json"
+    );
+
     #[test]
     fn provider_override_parser_accepts_known_values() {
         assert_eq!(
@@ -1579,6 +1839,71 @@ mod tests {
     }
 
     #[test]
+    fn approval_policy_parser_accepts_current_schema_values() {
+        assert_eq!(
+            CodingAgentApprovalPolicy::parse("untrusted").unwrap(),
+            CodingAgentApprovalPolicy::Untrusted
+        );
+        assert_eq!(
+            CodingAgentApprovalPolicy::parse(" on_request ").unwrap(),
+            CodingAgentApprovalPolicy::OnRequest
+        );
+        assert_eq!(
+            CodingAgentApprovalPolicy::parse("never").unwrap(),
+            CodingAgentApprovalPolicy::Never
+        );
+        assert!(CodingAgentApprovalPolicy::parse("on-failure").is_err());
+    }
+
+    #[test]
+    fn approvals_reviewer_parser_accepts_auto_review_aliases() {
+        assert_eq!(
+            CodingAgentApprovalsReviewer::parse("auto_review").unwrap(),
+            CodingAgentApprovalsReviewer::AutoReview
+        );
+        assert_eq!(
+            CodingAgentApprovalsReviewer::parse("approve-for-me").unwrap(),
+            CodingAgentApprovalsReviewer::AutoReview
+        );
+        assert_eq!(
+            CodingAgentApprovalsReviewer::parse("user").unwrap(),
+            CodingAgentApprovalsReviewer::User
+        );
+        assert!(CodingAgentApprovalsReviewer::parse("always_allow").is_err());
+    }
+
+    #[test]
+    fn thread_and_turn_share_explicit_permission_settings() {
+        let permission_settings = CodingAgentPermissionSettings {
+            approval_policy: CodingAgentApprovalPolicy::Never,
+            approvals_reviewer: CodingAgentApprovalsReviewer::User,
+        };
+        let thread_params = build_thread_start_params(
+            "/tmp/voicecoder-demo",
+            CodingAgentSandboxMode::WorkspaceWrite,
+            permission_settings,
+        );
+        let turn_params = build_turn_start_params(
+            "thread-1",
+            "/tmp/voicecoder-demo",
+            CodingAgentSandboxMode::WorkspaceWrite,
+            permission_settings,
+            "Build the demo",
+        );
+
+        for params in [thread_params, turn_params] {
+            assert_eq!(
+                params.get("approvalPolicy").and_then(Value::as_str),
+                Some("never")
+            );
+            assert_eq!(
+                params.get("approvalsReviewer").and_then(Value::as_str),
+                Some("user")
+            );
+        }
+    }
+
+    #[test]
     fn provider_diagnostics_include_stable_metadata() {
         let app_server_diagnostic = CodexAppServerProvider.diagnostic();
         let exec_json_diagnostic = CodexExecJsonProvider.diagnostic();
@@ -1601,6 +1926,17 @@ mod tests {
                 .map(String::as_str),
             Some("codex app-server --stdio")
         );
+        assert!(app_server_diagnostic.details.contains_key("approvalPolicy"));
+        assert!(app_server_diagnostic
+            .details
+            .contains_key("approvalsReviewer"));
+        assert_eq!(
+            app_server_diagnostic
+                .details
+                .get("defaultSandbox")
+                .map(String::as_str),
+            Some("workspace-write")
+        );
         assert_eq!(
             exec_json_diagnostic.provider,
             CodingAgentProviderKind::CodexExecJson
@@ -1614,6 +1950,20 @@ mod tests {
         );
         assert!(app_server_diagnostic.executable.is_some());
         assert!(exec_json_diagnostic.executable.is_some());
+    }
+
+    #[test]
+    fn default_permission_settings_use_silent_auto_review() {
+        let settings = CodingAgentPermissionSettings::default();
+
+        assert_eq!(
+            settings.approval_policy,
+            CodingAgentApprovalPolicy::OnRequest
+        );
+        assert_eq!(
+            settings.approvals_reviewer,
+            CodingAgentApprovalsReviewer::AutoReview
+        );
     }
 
     #[test]
@@ -1692,10 +2042,97 @@ mod tests {
     }
 
     #[test]
+    fn thread_start_request_matches_codex_0_144_1_fixture() {
+        let actual = build_json_rpc_request(
+            1,
+            "thread/start",
+            build_thread_start_params(
+                "/tmp/voicecoder-demo",
+                CodingAgentSandboxMode::WorkspaceWrite,
+                CodingAgentPermissionSettings::default(),
+            ),
+        );
+        let expected: Value = serde_json::from_str(THREAD_START_REQUEST_FIXTURE).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn turn_start_request_matches_codex_0_144_1_fixture() {
+        let actual = build_json_rpc_request(
+            2,
+            "turn/start",
+            build_turn_start_params(
+                "thread-fixture",
+                "/tmp/voicecoder-demo",
+                CodingAgentSandboxMode::WorkspaceWrite,
+                CodingAgentPermissionSettings::default(),
+                "Build the demo",
+            ),
+        );
+        let expected: Value = serde_json::from_str(TURN_START_REQUEST_FIXTURE).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn file_change_notification_fixture_normalizes_for_the_frontend() {
+        let notification: Value = serde_json::from_str(FILE_CHANGE_STARTED_FIXTURE).unwrap();
+        let events = normalize_codex_notification_at(&notification, "2026-07-13T00:00:00Z");
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::FileChange {
+                path: "/tmp/voicecoder-demo/src/App.tsx".to_string(),
+                change_type: Some("update".to_string()),
+                created_at: "2026-07-13T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn file_change_approval_fixture_locks_server_request_shape() {
+        let request: Value = serde_json::from_str(FILE_CHANGE_APPROVAL_REQUEST_FIXTURE).unwrap();
+
+        assert_eq!(request.get("id").and_then(Value::as_u64), Some(9001));
+        assert_eq!(
+            request.get("method").and_then(Value::as_str),
+            Some("item/fileChange/requestApproval")
+        );
+        assert_eq!(
+            request.pointer("/params/itemId").and_then(Value::as_str),
+            Some("item-file-change-fixture")
+        );
+        assert_eq!(
+            request
+                .pointer("/params/startedAtMs")
+                .and_then(Value::as_u64),
+            Some(1_783_900_800_000)
+        );
+    }
+
+    #[test]
+    fn auto_approval_rejection_fixture_becomes_visible_agent_event() {
+        let notification: Value = serde_json::from_str(AUTO_APPROVAL_COMPLETED_FIXTURE).unwrap();
+        let events = normalize_codex_notification_at(&notification, "2026-07-13T00:00:00Z");
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::ApprovalReview {
+                status: "denied".to_string(),
+                action: Some("applyPatch".to_string()),
+                rationale: Some("The requested path is outside the allowed scope.".to_string()),
+                created_at: "2026-07-13T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn builds_thread_start_params_with_cwd_and_workspace_sandbox() {
         let params = build_thread_start_params(
             "/tmp/voicecoder-demo",
             CodingAgentSandboxMode::WorkspaceWrite,
+            CodingAgentPermissionSettings::default(),
         );
 
         assert_eq!(
@@ -1708,7 +2145,11 @@ mod tests {
         );
         assert_eq!(
             params.get("approvalPolicy").and_then(Value::as_str),
-            Some("on-failure")
+            Some("on-request")
+        );
+        assert_eq!(
+            params.get("approvalsReviewer").and_then(Value::as_str),
+            Some("auto_review")
         );
         assert_eq!(
             params
@@ -1728,6 +2169,7 @@ mod tests {
             "thread-1",
             "/tmp/voicecoder-demo",
             CodingAgentSandboxMode::WorkspaceWrite,
+            CodingAgentPermissionSettings::default(),
             "Build the demo",
         );
 
@@ -1749,7 +2191,11 @@ mod tests {
         );
         assert_eq!(
             params.get("approvalPolicy").and_then(Value::as_str),
-            Some("on-failure")
+            Some("on-request")
+        );
+        assert_eq!(
+            params.get("approvalsReviewer").and_then(Value::as_str),
+            Some("auto_review")
         );
         assert_eq!(
             params
@@ -1770,11 +2216,13 @@ mod tests {
         let thread_params = build_thread_start_params(
             "/tmp/voicecoder-demo",
             CodingAgentSandboxMode::DangerFullAccess,
+            CodingAgentPermissionSettings::default(),
         );
         let turn_params = build_turn_start_params(
             "thread-1",
             "/tmp/voicecoder-demo",
             CodingAgentSandboxMode::DangerFullAccess,
+            CodingAgentPermissionSettings::default(),
             "Build the demo",
         );
 
@@ -1792,17 +2240,22 @@ mod tests {
 
     #[test]
     fn builds_codex_exec_json_args_with_project_sandbox_and_prompt() {
-        let args = build_codex_exec_json_args(&CodingAgentStartContext {
-            project_path: "/tmp/voicecoder-demo".to_string(),
-            prompt: "Build the demo".to_string(),
-            sandbox: Some(CodingAgentSandboxMode::WorkspaceWrite),
-        });
+        let args = build_codex_exec_json_args(
+            &CodingAgentStartContext {
+                project_path: "/tmp/voicecoder-demo".to_string(),
+                prompt: "Build the demo".to_string(),
+                sandbox: Some(CodingAgentSandboxMode::WorkspaceWrite),
+            },
+            CodingAgentPermissionSettings::default(),
+        );
 
         assert_eq!(
             args,
             vec![
                 "--ask-for-approval",
-                "on-failure",
+                "on-request",
+                "--config",
+                "approvals_reviewer=\"auto_review\"",
                 "exec",
                 "--json",
                 "--sandbox",
@@ -2427,6 +2880,45 @@ mod tests {
                     "createdAt": "2026-06-24T00:00:00Z"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn serializes_agent_run_started_runtime_for_session_logs() {
+        let value = serde_json::to_value(AgentRunStartedEvent {
+            demo_session_id: "demo-1".to_string(),
+            run_id: "run-1".to_string(),
+            project_path: "/tmp/demo".to_string(),
+            provider: CodingAgentProviderKind::CodexAppServer,
+            codex_thread_id: "thread-1".to_string(),
+            codex_turn_id: "turn-1".to_string(),
+            runtime: CodingAgentRuntimeMetadata {
+                provider: CodingAgentProviderKind::CodexAppServer,
+                version: "codex-cli 0.144.1".to_string(),
+                transport: "stdio".to_string(),
+                sandbox: "workspace-write".to_string(),
+                approval_policy: Some("on-request".to_string()),
+                approvals_reviewer: Some("auto_review".to_string()),
+            },
+            started_at: "2026-07-13T00:00:00Z".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value.pointer("/runtime/version").and_then(Value::as_str),
+            Some("codex-cli 0.144.1")
+        );
+        assert_eq!(
+            value
+                .pointer("/runtime/approvalPolicy")
+                .and_then(Value::as_str),
+            Some("on-request")
+        );
+        assert_eq!(
+            value
+                .pointer("/runtime/approvalsReviewer")
+                .and_then(Value::as_str),
+            Some("auto_review")
         );
     }
 

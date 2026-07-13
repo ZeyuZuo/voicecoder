@@ -324,6 +324,15 @@ export type AgentRunKind = "initial_build" | "feedback_change";
 
 export type AgentRunStatus = "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled";
 
+export type CodingAgentRuntimeMetadata = {
+  provider: Exclude<CodingAgentProviderKind, "auto">;
+  version: string;
+  transport: string;
+  sandbox: string;
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+};
+
 export type AgentEvent =
   | {
       type: "thread_started";
@@ -343,6 +352,13 @@ export type AgentEvent =
   | {
       type: "plan_update";
       text: string;
+      createdAt: string;
+    }
+  | {
+      type: "approval_review";
+      status: string;
+      action?: string;
+      rationale?: string;
       createdAt: string;
     }
   | {
@@ -375,6 +391,7 @@ export type AgentRun = {
   status: AgentRunStatus;
   codexThreadId?: string;
   codexTurnId?: string;
+  runtime?: CodingAgentRuntimeMetadata;
   events: AgentEvent[];
   changedFiles: string[];
   finalMessage?: string;

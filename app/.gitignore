@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-tests/
 src-tauri/target/
+src-tauri/generated/codex-app-server/
 .DS_Store
 .env
 .env.*

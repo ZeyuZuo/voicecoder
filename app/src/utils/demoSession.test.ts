@@ -91,6 +91,42 @@ test("starts and completes the initial build run", () => {
   assert.equal(completed.currentPreviewUrl, "http://localhost:5173");
 });
 
+test("agent run start records Codex runtime and silent approval settings", () => {
+  const running = demoSessionReducer(createTestSession(), {
+    type: "start_agent_run",
+    runId: "run-1",
+    kind: "initial_build",
+    prompt: "生成 demo",
+    now: "2"
+  });
+  const started = demoSessionReducer(running, {
+    type: "mark_agent_run_started",
+    runId: "run-1",
+    codexThreadId: "thread-1",
+    codexTurnId: "turn-1",
+    runtime: {
+      provider: "codex_app_server",
+      version: "codex-cli 0.144.1",
+      transport: "stdio",
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review"
+    },
+    now: "3"
+  });
+
+  assert.equal(started.runs[0].codexThreadId, "thread-1");
+  assert.equal(started.runs[0].codexTurnId, "turn-1");
+  assert.deepEqual(started.runs[0].runtime, {
+    provider: "codex_app_server",
+    version: "codex-cli 0.144.1",
+    transport: "stdio",
+    sandbox: "workspace-write",
+    approvalPolicy: "on-request",
+    approvalsReviewer: "auto_review"
+  });
+});
+
 test("agent events update thread metadata and changed files", () => {
   const running = demoSessionReducer(createTestSession(), {
     type: "start_agent_run",

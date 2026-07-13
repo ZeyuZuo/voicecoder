@@ -1,0 +1,23 @@
+{
+  "method": "item/started",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "startedAtMs": 1783900800000,
+    "item": {
+      "type": "fileChange",
+      "id": "item-file-change-fixture",
+      "status": "inProgress",
+      "changes": [
+        {
+          "path": "/tmp/voicecoder-demo/src/App.tsx",
+          "kind": {
+            "type": "update",
+            "move_path": null
+          },
+          "diff": "@@ -1 +1 @@\n-old\n+new\n"
+        }
+      ]
+    }
+  }
+}

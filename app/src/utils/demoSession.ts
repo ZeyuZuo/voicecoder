@@ -5,6 +5,7 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunKind,
+  CodingAgentRuntimeMetadata,
   CodingAgentProviderKind,
   DevServerLifecycleEventEnvelope,
   DemoFeedbackTurn,
@@ -42,6 +43,7 @@ export type DemoSessionAction =
       runId: string;
       codexThreadId: string;
       codexTurnId: string;
+      runtime: CodingAgentRuntimeMetadata;
       now: string;
     }
   | {
@@ -144,6 +146,7 @@ type AgentRunStartedPayload = {
   provider: CodingAgentProviderKind;
   codexThreadId: string;
   codexTurnId: string;
+  runtime: CodingAgentRuntimeMetadata;
   startedAt: string;
 };
 
@@ -250,6 +253,7 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
               ...candidate,
               codexThreadId: action.codexThreadId,
               codexTurnId: action.codexTurnId,
+              runtime: action.runtime,
               status: "running"
             }
           : candidate
@@ -615,6 +619,7 @@ export function useDemoSession(
           runId: event.payload.runId,
           codexThreadId: event.payload.codexThreadId,
           codexTurnId: event.payload.codexTurnId,
+          runtime: event.payload.runtime,
           now: event.payload.startedAt
         });
       }),

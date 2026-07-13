@@ -1,0 +1,12 @@
+{
+  "method": "thread/start",
+  "id": 1,
+  "params": {
+    "cwd": "/tmp/voicecoder-demo",
+    "runtimeWorkspaceRoots": ["/tmp/voicecoder-demo"],
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "auto_review",
+    "sandbox": "workspace-write",
+    "threadSource": "user"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "method": "item/fileChange/requestApproval",
+  "id": 9001,
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "itemId": "item-file-change-fixture",
+    "startedAtMs": 1783900800000,
+    "reason": "Apply the proposed file changes",
+    "grantRoot": "/tmp/voicecoder-demo"
+  }
+}

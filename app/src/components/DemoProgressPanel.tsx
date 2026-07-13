@@ -1,4 +1,4 @@
-import { Bot, FileCode2, ListChecks, Terminal, XCircle } from "lucide-react";
+import { Bot, FileCode2, ListChecks, ShieldCheck, Terminal, XCircle } from "lucide-react";
 import type { AgentEvent, AgentRun, DemoSession } from "../types/app";
 
 type DemoProgressPanelProps = {
@@ -108,6 +108,10 @@ function AgentEventIcon({ event }: { event: AgentEvent }) {
     return <ListChecks size={15} />;
   }
 
+  if (event.type === "approval_review") {
+    return <ShieldCheck size={15} />;
+  }
+
   if (event.type === "error") {
     return <XCircle size={15} />;
   }
@@ -132,6 +136,13 @@ function formatAgentEvent(event: AgentEvent) {
     return compactText(event.text);
   }
 
+  if (event.type === "approval_review") {
+    const status = getApprovalReviewStatusLabel(event.status);
+    const action = event.action ? ` · ${event.action}` : "";
+    const rationale = event.rationale ? ` · ${event.rationale}` : "";
+    return `自动权限审查${status}${action}${rationale}`;
+  }
+
   if (event.type === "command") {
     return `${event.status} · ${event.command}`;
   }
@@ -149,6 +160,18 @@ function formatAgentEvent(event: AgentEvent) {
 
 function compactText(text: string) {
   return text.replace(/\s+/g, " ").trim();
+}
+
+function getApprovalReviewStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    inProgress: "中",
+    approved: "已批准",
+    denied: "已拒绝",
+    timedOut: "已超时",
+    aborted: "已取消"
+  };
+
+  return labels[status] ?? `：${status}`;
 }
 
 function getAgentRunKindLabel(kind: AgentRun["kind"]) {

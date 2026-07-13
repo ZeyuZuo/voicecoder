@@ -1,0 +1,23 @@
+{
+  "method": "item/autoApprovalReview/completed",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "reviewId": "review-fixture",
+    "targetItemId": "item-file-change-fixture",
+    "startedAtMs": 1783900800000,
+    "completedAtMs": 1783900800100,
+    "decisionSource": "agent",
+    "action": {
+      "type": "applyPatch",
+      "cwd": "/tmp/voicecoder-demo",
+      "files": ["/tmp/voicecoder-demo/src/App.tsx"]
+    },
+    "review": {
+      "status": "denied",
+      "rationale": "The requested path is outside the allowed scope.",
+      "riskLevel": null,
+      "userAuthorization": null
+    }
+  }
+}

@@ -182,6 +182,8 @@ codex exec --json --sandbox workspace-write --cd <project> "<prompt>"
 - 不作为长期多轮交互主路径。
 - 如果使用 `codex exec resume`，也只能作为过渡方案，不替代 DemoSession / app-server thread 设计。
 
+app-server 的完整事件展示、静默自动审批、JSON-RPC 主动请求处理、日志和协议兼容优化，按 `docs/codex-app-server-optimization-roadmap.md` 分阶段推进。
+
 ## Prompt 策略
 
 ### 第一轮 initial_build
