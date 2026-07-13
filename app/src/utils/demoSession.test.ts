@@ -509,6 +509,35 @@ test("turn completion outcomes map to succeeded cancelled and failed runs", () =
   assert.equal(failed.error, "turn failed");
 });
 
+test("retryable errors remain visible without terminating the active AgentRun", () => {
+  const updated = demoSessionReducer(startTestRun(), {
+    type: "append_agent_event",
+    runId: "run-1",
+    now: "2026-07-13T00:00:01Z",
+    event: {
+      type: "error",
+      message: "连接中断，正在重试",
+      retryable: true,
+      terminal: false,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      createdAt: "2026-07-13T00:00:01Z"
+    }
+  });
+
+  assert.equal(updated.runs[0].status, "running");
+  assert.equal(updated.runs[0].error, undefined);
+  assert.deepEqual(updated.runs[0].errors, [{
+    type: "error",
+    message: "连接中断，正在重试",
+    retryable: true,
+    terminal: false,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    createdAt: "2026-07-13T00:00:01Z"
+  }]);
+});
+
 test("agent event batching interval stays within the 50 to 100ms target", () => {
   assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS >= 50);
   assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS <= 100);

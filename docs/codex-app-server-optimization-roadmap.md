@@ -370,16 +370,27 @@ AgentRun
 
 ### 自动测试
 
-- [ ] 8.1 JSON-RPC response / notification / server request 路由测试。
-- [ ] 8.2 app-server schema fixture 解析测试。
-- [ ] 8.3 Item started / delta / completed upsert 测试。
-- [ ] 8.4 文件 add / update / delete / move 和 diff 行数测试。
-- [ ] 8.5 命令 output delta、exit code、duration 测试。
-- [ ] 8.6 retryable error 不终止 AgentRun 测试。
-- [ ] 8.7 failed / interrupted turn 状态测试。
-- [ ] 8.8 auto review started / completed 测试。
-- [ ] 8.9 未知事件和 stderr 日志测试。
-- [ ] 8.10 高频 delta 合并和内存上限测试。
+自动验收完成日期：2026-07-13
+
+- [x] 8.1 JSON-RPC response / notification / server request 路由测试。
+- [x] 8.2 app-server schema fixture 解析测试。
+- [x] 8.3 Item started / delta / completed upsert 测试。
+- [x] 8.4 文件 add / update / delete / move 和 diff 行数测试。
+- [x] 8.5 命令 output delta、exit code、duration 测试。
+- [x] 8.6 retryable error 不终止 AgentRun 测试。
+- [x] 8.7 failed / interrupted turn 状态测试。
+- [x] 8.8 auto review started / completed 测试。
+- [x] 8.9 未知事件和 stderr 日志测试。
+- [x] 8.10 高频 delta 合并和内存上限测试。
+
+自动验收证据：
+
+- 独立 `coding_agent/tests/acceptance.rs` 覆盖全部协议 fixture、auto review 生命周期、未知 notification 后续事件连续性，以及真实 stderr reader 的持续读取、脱敏 tail 和 JSONL 落盘。
+- schema guard 现在同时校验文件变更、自动审批 started/completed 和 server request resolved fixture，不只检查启动请求与审批请求。
+- 前端 reducer/投影测试覆盖 Item 乱序与重复 upsert、四类文件变化、diff 行数、命令输出上限和完成元数据、retryable/terminal error、failed/interrupted turn，以及 1200 次 delta 的单 Item 合并。
+- `npm run check` 通过：79 个前端单元/SSR 测试、TypeScript、schema compatibility、Vite production build、`cargo fmt --check`、`cargo check` 和 145 个非 ignored Rust 测试。
+- 真实账号 smoke 通过：只读 transport 调用完成且未出现人工审批；临时目录 Demo 调用生成 `package.json`、`index.html`、`src/main.js`，捕获 `fileChange` 与 `commandExecution` 实时事件后正常完成并自动清理。
+- Tauri 开发版可从 `http://localhost:1420/` 启动；本轮未把未执行的完整桌面 UI 场景标记为通过，以下手工清单继续保留。
 
 ### 手工验收场景
 

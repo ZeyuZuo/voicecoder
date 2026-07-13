@@ -22,10 +22,14 @@ pub(super) const MCP_ELICITATION_REQUEST_FIXTURE: &str =
 pub(super) const SERVER_REQUEST_RESOLVED_FIXTURE: &str = include_str!(
     "../../../tests/fixtures/codex-app-server-v2/server-request-resolved-notification.json"
 );
+pub(super) const AUTO_APPROVAL_STARTED_FIXTURE: &str = include_str!(
+    "../../../tests/fixtures/codex-app-server-v2/auto-approval-started-notification.json"
+);
 pub(super) const AUTO_APPROVAL_COMPLETED_FIXTURE: &str = include_str!(
     "../../../tests/fixtures/codex-app-server-v2/auto-approval-completed-notification.json"
 );
 
+mod acceptance;
 mod projection;
 mod protocol;
 mod transport;

@@ -14,7 +14,7 @@ import {
 } from "./agentProgress";
 import type { AgentRun } from "../types/app";
 
-test("parses file changes, kinds, move paths, and per-file diff stats", () => {
+test("parses add, update, delete, and move changes with per-file diff stats", () => {
   const changes = parseAgentFileChanges({
     changes: [
       {
@@ -26,6 +26,11 @@ test("parses file changes, kinds, move paths, and per-file diff stats", () => {
         path: "/tmp/demo/src/old.ts",
         kind: { type: "delete" },
         diff: "@@ -1,2 +0,0 @@\n-one\n-two\n"
+      },
+      {
+        path: "/tmp/demo/src/update.ts",
+        kind: { type: "update" },
+        diff: "@@ -1 +1 @@\n-before\n+after\n"
       },
       {
         path: "/tmp/demo/src/name.ts",
@@ -43,6 +48,7 @@ test("parses file changes, kinds, move paths, and per-file diff stats", () => {
   })), [
     { kind: "add", movePath: undefined, additions: 2, deletions: 0 },
     { kind: "delete", movePath: undefined, additions: 0, deletions: 2 },
+    { kind: "update", movePath: undefined, additions: 1, deletions: 1 },
     { kind: "update", movePath: "/tmp/demo/src/renamed.ts", additions: 1, deletions: 1 }
   ]);
 });

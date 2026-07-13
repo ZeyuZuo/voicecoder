@@ -1,0 +1,21 @@
+{
+  "method": "item/autoApprovalReview/started",
+  "params": {
+    "threadId": "thread-fixture",
+    "turnId": "turn-fixture",
+    "reviewId": "review-fixture",
+    "targetItemId": "item-file-change-fixture",
+    "startedAtMs": 1783900800000,
+    "action": {
+      "type": "applyPatch",
+      "cwd": "/tmp/voicecoder-demo",
+      "files": ["/tmp/voicecoder-demo/src/App.tsx"]
+    },
+    "review": {
+      "status": "inProgress",
+      "rationale": null,
+      "riskLevel": null,
+      "userAuthorization": null
+    }
+  }
+}
