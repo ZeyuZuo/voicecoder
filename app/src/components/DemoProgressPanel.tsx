@@ -29,7 +29,7 @@ import {
   Wrench,
   XCircle
 } from "lucide-react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -40,6 +40,7 @@ import type {
   AgentPlan,
   AgentRun,
   AgentRunError,
+  AgentServerRequest,
   AgentStructuredPreview,
   AgentWarning,
   DemoSession
@@ -102,6 +103,12 @@ type AgentTimelineEntry =
       id: string;
       occurredAt: string;
       error: AgentRunError;
+    }
+  | {
+      kind: "request";
+      id: string;
+      occurredAt: string;
+      request: AgentServerRequest;
     }
   | {
       kind: "event";
@@ -278,6 +285,15 @@ function AgentTimelineEntryView({
   }
   if (entry.kind === "error") {
     return <AgentErrorCard error={entry.error} />;
+  }
+  if (entry.kind === "request") {
+    return (
+      <AgentServerRequestCard
+        request={entry.request}
+        runId={run.id}
+        nowMs={nowMs}
+      />
+    );
   }
   if (entry.kind === "event") {
     return <AgentEventCard event={entry.event} />;
@@ -852,6 +868,390 @@ function AgentErrorCard({ error }: { error: AgentRunError }) {
   );
 }
 
+type ServerRequestResolutionPayload = {
+  action: "accept" | "acceptForSession" | "decline" | "cancel" | "submit";
+  answers?: Record<string, string[]>;
+  content?: Record<string, unknown>;
+  scope?: "turn" | "session";
+};
+
+type ResolveServerRequest = (payload: ServerRequestResolutionPayload) => Promise<void>;
+
+function AgentServerRequestCard({
+  request,
+  runId,
+  nowMs
+}: {
+  request: AgentServerRequest;
+  runId: string;
+  nowMs: number;
+}) {
+  const [submitting, setSubmitting] = useState<string>();
+  const [error, setError] = useState<string>();
+  const active = isPendingServerRequest(request);
+  const remainingMs = Math.max(0, Date.parse(request.expiresAt) - nowMs);
+  useEffect(() => {
+    if (!active) {
+      setSubmitting(undefined);
+    }
+  }, [active]);
+  const resolveRequest: ResolveServerRequest = async (payload) => {
+    if (!isTauri()) {
+      setError("请在 VoiceCoder 桌面端处理该请求。");
+      return;
+    }
+    setSubmitting(payload.action);
+    setError(undefined);
+    try {
+      await invoke("resolve_coding_agent_server_request", {
+        request: {
+          runId,
+          requestId: request.requestId,
+          action: payload.action,
+          answers: payload.answers ?? {},
+          content: payload.content,
+          scope: payload.scope
+        }
+      });
+    } catch (resolutionError) {
+      setSubmitting(undefined);
+      setError(
+        resolutionError instanceof Error
+          ? resolutionError.message
+          : String(resolutionError)
+      );
+    }
+  };
+  const Icon = request.autoReview
+    ? ShieldCheck
+    : request.kind === "unsupported" || request.status === "failed"
+      ? ShieldAlert
+      : Info;
+
+  return (
+    <article
+      className={`agent-timeline-card agent-request-card is-${normalizeCssToken(request.status)}`}
+      role={request.requiresUserInput && active ? "alert" : "status"}
+    >
+      <header>
+        <Icon size={15} />
+        <strong>{getServerRequestTitle(request)}</strong>
+        <span>{getServerRequestStatusLabel(request.status)}</span>
+        <AgentEventTime occurredAt={request.updatedAt} />
+      </header>
+      {request.details.message ? <p>{request.details.message}</p> : null}
+      {request.details.reason ? <p>{request.details.reason}</p> : null}
+      {request.details.command ? (
+        <code className="agent-command-text">{request.details.command}</code>
+      ) : null}
+      {request.details.cwd ? (
+        <small className="agent-command-cwd">cwd · {request.details.cwd}</small>
+      ) : null}
+      {request.details.grantRoot ? (
+        <small className="agent-command-cwd">额外写入范围 · {request.details.grantRoot}</small>
+      ) : null}
+      {request.details.permissions ? (
+        <AgentExpandableDetails
+          label="查看请求的权限"
+          content={JSON.stringify(request.details.permissions, null, 2)}
+        />
+      ) : null}
+
+      {request.autoReview && active ? (
+        <p className="agent-request-note">
+          Codex 正在自动评估风险并决定批准或拒绝，无需手动操作。
+        </p>
+      ) : null}
+      {request.kind === "unsupported" && active ? (
+        <p className="agent-request-note">该请求无法安全处理，将自动拒绝并继续保留诊断记录。</p>
+      ) : null}
+
+      {active && request.requiresUserInput ? (
+        <div className="agent-request-deadline">
+          <Clock size={12} />
+          <span>剩余 {formatDuration(remainingMs)}</span>
+          {request.kind === "user_input" && request.details.autoResolutionMs
+            ? <small>超时后使用推荐首选项继续</small>
+            : <small>超时后安全取消</small>}
+        </div>
+      ) : null}
+
+      {active && request.requiresUserInput && isApprovalServerRequest(request) ? (
+        <AgentApprovalRequestControls
+          busy={Boolean(submitting)}
+          onResolve={resolveRequest}
+        />
+      ) : null}
+      {active && request.kind === "user_input" ? (
+        <AgentUserInputRequestControls
+          busy={Boolean(submitting)}
+          onResolve={resolveRequest}
+          request={request}
+        />
+      ) : null}
+      {active && request.kind === "mcp_elicitation" ? (
+        <AgentMcpElicitationControls
+          busy={Boolean(submitting)}
+          onResolve={resolveRequest}
+          request={request}
+        />
+      ) : null}
+
+      {submitting ? <small className="agent-request-submitting">响应已提交，等待 Codex 确认…</small> : null}
+      {error ? <p className="agent-request-error">{error}</p> : null}
+      {!active && request.statusMessage ? (
+        <p className="agent-request-outcome">{request.statusMessage}</p>
+      ) : null}
+    </article>
+  );
+}
+
+function AgentApprovalRequestControls({
+  busy,
+  onResolve
+}: {
+  busy: boolean;
+  onResolve: ResolveServerRequest;
+}) {
+  return (
+    <div className="agent-request-actions">
+      <button disabled={busy} type="button" onClick={() => void onResolve({ action: "accept" })}>
+        批准本次
+      </button>
+      <button disabled={busy} type="button" onClick={() => void onResolve({ action: "acceptForSession", scope: "session" })}>
+        本会话允许
+      </button>
+      <button className="is-danger" disabled={busy} type="button" onClick={() => void onResolve({ action: "decline" })}>
+        拒绝
+      </button>
+    </div>
+  );
+}
+
+function AgentUserInputRequestControls({
+  request,
+  busy,
+  onResolve
+}: {
+  request: AgentServerRequest;
+  busy: boolean;
+  onResolve: ResolveServerRequest;
+}) {
+  const questions = request.details.questions ?? [];
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const complete = questions.length > 0 && questions.every((question) => answers[question.id]?.trim());
+  const submit = () => void onResolve({
+    action: "submit",
+    answers: Object.fromEntries(
+      questions.map((question) => [question.id, [answers[question.id]?.trim() ?? ""]])
+    )
+  });
+
+  return (
+    <div className="agent-request-form">
+      {questions.map((question) => (
+        <fieldset key={question.id}>
+          <legend><strong>{question.header}</strong><span>{question.question}</span></legend>
+          {question.options?.length ? (
+            <div className="agent-request-options">
+              {question.options.map((option) => (
+                <label key={option.label}>
+                  <input
+                    checked={answers[question.id] === option.label}
+                    name={`${request.requestKey}-${question.id}`}
+                    onChange={() => setAnswers((current) => ({ ...current, [question.id]: option.label }))}
+                    type="radio"
+                  />
+                  <span><strong>{option.label}</strong><small>{option.description}</small></span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+          {!question.options?.length || question.isOther ? (
+            <input
+              aria-label={`${question.header}回答`}
+              autoComplete="off"
+              className="agent-request-text-input"
+              onChange={(event) => setAnswers((current) => ({
+                ...current,
+                [question.id]: event.target.value
+              }))}
+              placeholder={question.isOther ? "输入其他回答" : "输入回答"}
+              type={question.isSecret ? "password" : "text"}
+              value={question.options?.some((option) => option.label === answers[question.id])
+                ? ""
+                : answers[question.id] ?? ""}
+            />
+          ) : null}
+        </fieldset>
+      ))}
+      {!questions.length ? <p className="agent-request-error">请求中没有可回答的问题。</p> : null}
+      <div className="agent-request-actions">
+        <button disabled={busy || !complete} type="button" onClick={submit}>提交回答</button>
+        <button className="is-danger" disabled={busy} type="button" onClick={() => void onResolve({ action: "cancel" })}>
+          取消请求
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AgentMcpElicitationControls({
+  request,
+  busy,
+  onResolve
+}: {
+  request: AgentServerRequest;
+  busy: boolean;
+  onResolve: ResolveServerRequest;
+}) {
+  const fields = getMcpElicitationFields(request.details.requestedSchema);
+  const required = getMcpRequiredFields(request.details.requestedSchema);
+  const [content, setContent] = useState<Record<string, unknown>>(() =>
+    Object.fromEntries(fields.flatMap(([name, schema]) =>
+      schema.default === undefined ? [] : [[name, schema.default]]
+    ))
+  );
+  const complete = required.every((name) => {
+    const value = content[name];
+    return value !== undefined && value !== "";
+  });
+
+  return (
+    <div className="agent-request-form">
+      {request.details.serverName ? <small>MCP Server · {request.details.serverName}</small> : null}
+      {request.details.url ? (
+        <div className="agent-request-url">
+          <code>{request.details.url}</code>
+          <CopyButton text={request.details.url} label="复制链接" />
+        </div>
+      ) : null}
+      {fields.map(([name, schema]) => (
+        <label className="agent-request-field" key={name}>
+          <span>{readDisplayString(schema.title) ?? name}{required.includes(name) ? " *" : ""}</span>
+          {readDisplayString(schema.description) ? <small>{readDisplayString(schema.description)}</small> : null}
+          <McpElicitationInput
+            name={name}
+            schema={schema}
+            value={content[name]}
+            onChange={(value) => setContent((current) => ({ ...current, [name]: value }))}
+          />
+        </label>
+      ))}
+      <div className="agent-request-actions">
+        <button disabled={busy || !complete} type="button" onClick={() => void onResolve({ action: "accept", content })}>
+          {request.details.url ? "已完成，继续" : "提交给 MCP"}
+        </button>
+        <button disabled={busy} type="button" onClick={() => void onResolve({ action: "decline" })}>拒绝</button>
+        <button className="is-danger" disabled={busy} type="button" onClick={() => void onResolve({ action: "cancel" })}>取消</button>
+      </div>
+    </div>
+  );
+}
+
+function McpElicitationInput({
+  name,
+  schema,
+  value,
+  onChange
+}: {
+  name: string;
+  schema: Record<string, unknown>;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const options = Array.isArray(schema.enum)
+    ? schema.enum.filter((option): option is string => typeof option === "string")
+    : [];
+  if (options.length) {
+    return (
+      <select aria-label={name} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)}>
+        <option value="">请选择</option>
+        {options.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    );
+  }
+  if (schema.type === "boolean") {
+    return (
+      <input
+        aria-label={name}
+        checked={value === true}
+        onChange={(event) => onChange(event.target.checked)}
+        type="checkbox"
+      />
+    );
+  }
+  const numeric = schema.type === "number" || schema.type === "integer";
+  return (
+    <input
+      aria-label={name}
+      autoComplete="off"
+      onChange={(event) => onChange(numeric && event.target.value
+        ? Number(event.target.value)
+        : event.target.value)}
+      type={numeric ? "number" : schema.format === "password" ? "password" : "text"}
+      value={typeof value === "string" || typeof value === "number" ? value : ""}
+    />
+  );
+}
+
+function getMcpElicitationFields(schema: Record<string, unknown> | undefined) {
+  const properties = readUiRecord(schema?.properties);
+  return Object.entries(properties ?? {}).slice(0, 20).flatMap(([name, value]) => {
+    const field = readUiRecord(value);
+    return field ? [[name, field] as const] : [];
+  });
+}
+
+function getMcpRequiredFields(schema: Record<string, unknown> | undefined) {
+  return Array.isArray(schema?.required)
+    ? schema.required.filter((name): name is string => typeof name === "string")
+    : [];
+}
+
+function readUiRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function isApprovalServerRequest(request: AgentServerRequest) {
+  return request.kind === "command_approval"
+    || request.kind === "file_approval"
+    || request.kind === "permissions_approval";
+}
+
+function isPendingServerRequest(request: AgentServerRequest) {
+  return request.status === "pending"
+    || request.status === "auto_reviewing"
+    || request.status === "unsupported";
+}
+
+function getServerRequestTitle(request: AgentServerRequest) {
+  return {
+    command_approval: request.autoReview ? "自动审查命令权限" : "命令需要批准",
+    file_approval: request.autoReview ? "自动审查文件权限" : "文件修改需要批准",
+    permissions_approval: request.autoReview ? "自动审查额外权限" : "Codex 请求额外权限",
+    user_input: "Codex 需要你的选择",
+    mcp_elicitation: "MCP 请求补充信息",
+    unsupported: "无法处理的 Codex 请求"
+  }[request.kind];
+}
+
+function getServerRequestStatusLabel(status: AgentServerRequest["status"]) {
+  return {
+    pending: "等待处理",
+    auto_reviewing: "自动审批中",
+    unsupported: "即将安全拒绝",
+    resolved: "已处理",
+    auto_resolved: "已自动处理",
+    declined: "已拒绝",
+    cancelled: "已取消",
+    timed_out: "已超时",
+    failed: "处理失败"
+  }[status];
+}
+
 function AgentEventCard({ event }: { event: AgentEvent }) {
   if (event.type === "agent_message") {
     return (
@@ -1083,6 +1483,19 @@ function buildAgentTimelineEntries(run: AgentRun): AgentTimelineEntry[] {
     });
   }
 
+  for (const requestKey of run.serverRequestOrder ?? []) {
+    const request = run.serverRequestsById?.[requestKey];
+    if (!request) {
+      continue;
+    }
+    push({
+      kind: "request",
+      id: `request-${request.requestKey}`,
+      occurredAt: request.createdAt,
+      request
+    });
+  }
+
   const routineHooks: AgentHookRun[] = [];
   for (const hookId of run.hookOrder ?? []) {
     const hook = run.hooksById?.[hookId];
@@ -1240,6 +1653,9 @@ function getAgentProgressVersion(run: AgentRun, latestProgressAt: string | undef
   for (const hook of Object.values(run.hooksById ?? {})) {
     contentSize += hook.entries.reduce((size, entry) => size + entry.text.length, 0);
   }
+  for (const request of Object.values(run.serverRequestsById ?? {})) {
+    contentSize += request.status.length + (request.statusMessage?.length ?? 0);
+  }
   return [
     run.id,
     run.status,
@@ -1247,6 +1663,8 @@ function getAgentProgressVersion(run: AgentRun, latestProgressAt: string | undef
     contentSize,
     run.currentPlan?.steps.length ?? 0,
     run.hookOrder?.length ?? 0,
+    run.serverRequestOrder?.length ?? 0,
+    run.pendingServerRequestIds?.length ?? 0,
     run.modelSafetyBuffering?.createdAt ?? "",
     run.modelVerification?.createdAt ?? "",
     run.warnings?.length ?? 0,
@@ -1552,6 +1970,12 @@ function formatAgentEvent(event: AgentEvent) {
     const rationale = event.rationale ? ` · ${event.rationale}` : "";
     return `自动权限审查${status}${action}${rationale}`;
   }
+  if (event.type === "server_request") {
+    return `Codex 请求处理 · ${event.method}`;
+  }
+  if (event.type === "server_request_resolved") {
+    return event.message ?? `Codex 请求已${event.status}`;
+  }
   if (event.type === "command") {
     return `${event.status} · ${event.command}`;
   }
@@ -1585,7 +2009,10 @@ function formatAgentEvent(event: AgentEvent) {
   if (event.type === "model_safety_buffering_updated") {
     return event.showBufferingUi ? "安全缓冲处理中" : "安全缓冲已结束";
   }
-  return event.verifications.length ? "模型验证已启用" : "模型验证已清除";
+  if (event.type === "model_verification_updated") {
+    return event.verifications.length ? "模型验证已启用" : "模型验证已清除";
+  }
+  return "Codex 状态已更新";
 }
 
 function isItemEventOfType(event: AgentEvent, itemType: string) {

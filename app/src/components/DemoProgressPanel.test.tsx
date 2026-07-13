@@ -881,3 +881,134 @@ test("aggregates routine hooks while keeping failed hooks prominent", () => {
   assertMatches(getUniqueArticleContaining(html, "Hooks · 80 次"), /工具调用前 × 80/);
   assertMatches(getUniqueArticleContaining(html, "Hook · 工具调用后"), /format hook failed/);
 });
+
+test("renders auto-reviewed approvals as non-blocking status without manual buttons", () => {
+  const runId = "run-auto-approval";
+  const updated = appendTestEvents(createRunningTestSession(runId), runId, [{
+    type: "server_request",
+    requestId: 9002,
+    requestKey: "number:9002",
+    method: "item/commandExecution/requestApproval",
+    kind: "command_approval",
+    status: "auto_reviewing",
+    requiresUserInput: false,
+    autoReview: true,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "item-command",
+    details: {
+      command: "npm run check",
+      cwd: "/tmp/demo",
+      reason: "需要执行项目检查"
+    },
+    expiresAt: "2026-07-13T03:02:00Z",
+    createdAt: "2026-07-13T03:00:00Z"
+  }]);
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
+  const card = getUniqueArticleContaining(html, "自动审查命令权限");
+  assertMatches(card, /自动审批中/);
+  assertMatches(card, /无需手动操作/);
+  assertMatches(card, /npm run check/);
+  assertDoesNotMatch(card, /批准本次/);
+  assertDoesNotMatch(card, /本会话允许/);
+});
+
+test("renders request_user_input choices with explicit timeout and cancellation", () => {
+  const runId = "run-user-input";
+  const updated = appendTestEvents(createRunningTestSession(runId), runId, [{
+    type: "server_request",
+    requestId: 9004,
+    requestKey: "number:9004",
+    method: "item/tool/requestUserInput",
+    kind: "user_input",
+    status: "pending",
+    requiresUserInput: true,
+    autoReview: false,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "item-user-input",
+    details: {
+      autoResolutionMs: 60_000,
+      questions: [{
+        id: "theme",
+        header: "主题",
+        question: "Demo 应使用哪种主题？",
+        isOther: true,
+        isSecret: false,
+        options: [
+          { label: "浅色", description: "推荐，适合演示" },
+          { label: "深色", description: "适合暗色工作区" }
+        ]
+      }]
+    },
+    expiresAt: "2026-07-13T03:01:00Z",
+    createdAt: "2026-07-13T03:00:00Z"
+  }]);
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={updated} compact />);
+  const card = getUniqueArticleContaining(html, "Codex 需要你的选择");
+  assertMatches(card, /Demo 应使用哪种主题/);
+  assertMatches(card, /浅色/);
+  assertMatches(card, /深色/);
+  assertMatches(card, /超时后使用推荐首选项继续/);
+  assertMatches(card, /提交回答/);
+  assertMatches(card, /取消请求/);
+  assertMatches(card, /输入其他回答/);
+});
+
+test("renders MCP elicitation form and removes actions after server resolution", () => {
+  const runId = "run-mcp-elicitation";
+  const requested = appendTestEvents(createRunningTestSession(runId), runId, [{
+    type: "server_request",
+    requestId: "mcp-9005",
+    requestKey: "string:mcp-9005",
+    method: "mcpServer/elicitation/request",
+    kind: "mcp_elicitation",
+    status: "pending",
+    requiresUserInput: true,
+    autoReview: false,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    details: {
+      serverName: "deployment",
+      mode: "form",
+      message: "请选择预览环境",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          environment: {
+            type: "string",
+            title: "环境",
+            enum: ["staging", "production"],
+            default: "staging"
+          }
+        },
+        required: ["environment"]
+      }
+    },
+    expiresAt: "2026-07-13T03:05:00Z",
+    createdAt: "2026-07-13T03:00:00Z"
+  }]);
+  const pendingHtml = renderToStaticMarkup(<DemoProgressPanel session={requested} compact />);
+  const pendingCard = getUniqueArticleContaining(pendingHtml, "MCP 请求补充信息");
+  assertMatches(pendingCard, /请选择预览环境/);
+  assertMatches(pendingCard, /MCP Server · deployment/);
+  assertMatches(pendingCard, /staging/);
+  assertMatches(pendingCard, /提交给 MCP/);
+
+  const resolved = appendTestEvents(requested, runId, [{
+    type: "server_request_resolved",
+    requestId: "mcp-9005",
+    requestKey: "string:mcp-9005",
+    status: "resolved",
+    resolution: "submitted",
+    message: "已提交回答",
+    createdAt: "2026-07-13T03:00:10Z"
+  }]);
+  const resolvedHtml = renderToStaticMarkup(<DemoProgressPanel session={resolved} compact />);
+  const resolvedCard = getUniqueArticleContaining(resolvedHtml, "MCP 请求补充信息");
+  assertMatches(resolvedCard, /已提交回答/);
+  assertDoesNotMatch(resolvedCard, /提交给 MCP/);
+  assertDoesNotMatch(resolvedCard, /超时后安全取消/);
+});

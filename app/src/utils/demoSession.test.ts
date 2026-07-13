@@ -844,6 +844,107 @@ test("debug-only protocol diagnostics stay out of the user timeline", () => {
   assert.deepEqual(updated.runs[0].events.map((event) => event.type === "diagnostic" ? event.level : event.type), ["warning"]);
 });
 
+test("server requests upsert into pending state and resolved notifications clear them", () => {
+  const requested = demoSessionReducer(startTestRun(), {
+    type: "append_agent_event",
+    runId: "run-1",
+    now: "2026-07-13T00:00:01Z",
+    event: {
+      type: "server_request",
+      requestId: 9004,
+      requestKey: "number:9004",
+      method: "item/tool/requestUserInput",
+      kind: "user_input",
+      status: "pending",
+      requiresUserInput: true,
+      autoReview: false,
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-user-input",
+      details: {
+        autoResolutionMs: 60_000,
+        questions: [{
+          id: "theme",
+          header: "主题",
+          question: "请选择主题",
+          isOther: false,
+          isSecret: false,
+          options: [
+            { label: "浅色", description: "推荐" },
+            { label: "深色", description: "暗色工作区" }
+          ]
+        }]
+      },
+      expiresAt: "2026-07-13T00:01:01Z",
+      createdAt: "2026-07-13T00:00:01Z"
+    }
+  });
+
+  const pending = requested.runs[0].serverRequestsById?.["number:9004"];
+  assert.equal(pending?.details.questions?.[0].options?.[0].label, "浅色");
+  assert.deepEqual(requested.runs[0].pendingServerRequestIds, ["number:9004"]);
+  assert.equal(requested.runs[0].events.some((event) => event.type === "server_request"), false);
+
+  const resolved = demoSessionReducer(requested, {
+    type: "append_agent_event",
+    runId: "run-1",
+    now: "2026-07-13T00:00:02Z",
+    event: {
+      type: "server_request_resolved",
+      requestId: 9004,
+      requestKey: "number:9004",
+      status: "resolved",
+      resolution: "submitted",
+      message: "已提交回答",
+      createdAt: "2026-07-13T00:00:02Z"
+    }
+  });
+
+  assert.deepEqual(resolved.runs[0].pendingServerRequestIds, []);
+  assert.equal(resolved.runs[0].serverRequestsById?.["number:9004"].status, "resolved");
+  assert.equal(
+    resolved.runs[0].serverRequestsById?.["number:9004"].statusMessage,
+    "已提交回答"
+  );
+});
+
+test("terminal run outcomes cancel every pending server request", () => {
+  const requested = demoSessionReducer(startTestRun(), {
+    type: "append_agent_event",
+    runId: "run-1",
+    now: "2026-07-13T00:00:01Z",
+    event: {
+      type: "server_request",
+      requestId: "approval-1",
+      requestKey: "string:approval-1",
+      method: "item/fileChange/requestApproval",
+      kind: "file_approval",
+      status: "auto_reviewing",
+      requiresUserInput: false,
+      autoReview: true,
+      details: { reason: "需要额外写权限" },
+      expiresAt: "2026-07-13T00:02:01Z",
+      createdAt: "2026-07-13T00:00:01Z"
+    }
+  });
+  const completed = demoSessionReducer(requested, {
+    type: "complete_agent_run",
+    runId: "run-1",
+    status: "interrupted",
+    now: "2026-07-13T00:00:02Z"
+  });
+
+  assert.deepEqual(completed.runs[0].pendingServerRequestIds, []);
+  assert.equal(
+    completed.runs[0].serverRequestsById?.["string:approval-1"].status,
+    "cancelled"
+  );
+  assert.equal(
+    completed.runs[0].serverRequestsById?.["string:approval-1"].resolution,
+    "run_finished"
+  );
+});
+
 test("terminal interaction counts updates without retaining stdin", () => {
   const stdinSecret = "terminal-stdin-secret";
   const updated = demoSessionReducer(startTestRun(), {

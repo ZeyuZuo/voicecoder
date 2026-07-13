@@ -290,17 +290,36 @@ AgentRun
 
 目标：默认保持“Approve for me”式静默体验，同时任何意外请求都不会造成假死。
 
+完成日期：2026-07-13
+
 - [x] 6.1 处理 `item/autoApprovalReview/started`，显示低优先级“正在自动审查权限”。（Milestone 0 提前完成）
 - [x] 6.2 处理 `item/autoApprovalReview/completed`，显示批准或拒绝结果。（Milestone 0 提前完成）
 - [x] 6.3 处理 guardian warning，说明自动审查拒绝的原因。（Milestone 5 提前完成）
-- [ ] 6.4 对 `item/commandExecution/requestApproval` 建立协议响应能力。
-- [ ] 6.5 对 `item/fileChange/requestApproval` 建立协议响应能力。
-- [ ] 6.6 对 `item/permissions/requestApproval` 建立协议响应能力。
-- [ ] 6.7 对 `item/tool/requestUserInput` 和 MCP elicitation 建立非静默兜底 UI。
-- [ ] 6.8 自动 reviewer 已接管的请求不弹人工确认框，只显示状态。
-- [ ] 6.9 必须由用户决定的请求显示内联卡片，并有明确超时和取消行为。
-- [ ] 6.10 处理 `serverRequest/resolved`，清理页面上的 pending request。
-- [ ] 6.11 AgentRun 结束或取消时清理所有未决请求。
+- [x] 6.4 对 `item/commandExecution/requestApproval` 建立协议响应能力。
+- [x] 6.5 对 `item/fileChange/requestApproval` 建立协议响应能力。
+- [x] 6.6 对 `item/permissions/requestApproval` 建立协议响应能力。
+- [x] 6.7 对 `item/tool/requestUserInput` 和 MCP elicitation 建立非静默兜底 UI。
+- [x] 6.8 自动 reviewer 已接管的请求不弹人工确认框，只显示状态。
+- [x] 6.9 必须由用户决定的请求显示内联卡片，并有明确超时和取消行为。
+- [x] 6.10 处理 `serverRequest/resolved`，清理页面上的 pending request。
+- [x] 6.11 AgentRun 结束或取消时清理所有未决请求。
+
+落地约束：
+
+- `on-request + auto_review` 仍是默认值；`auto_review` 由带风险判断框架的 Codex 子 Agent 决定批准或拒绝，VoiceCoder 不会把它降级成无条件放行。
+- 自动 reviewer 接管的命令、文件和权限请求只显示非阻塞状态；仅在显式把 reviewer 切换为 `user` 时提供批准、会话内批准和拒绝按钮。
+- `request_user_input` 根据协议中的 `autoResolutionMs` 显示倒计时；到期时使用各问题的推荐首选项继续。没有自动解决期限的人工请求在 5 分钟后安全取消。
+- MCP form / URL elicitation 使用内联卡片处理，可接受、拒绝或取消；未知主动请求在 5 秒后返回标准 `Method not found` 错误并留下诊断。
+- 页面回答通过按 AgentRun 注册的 Rust channel 回到唯一 stdout/stdin transport owner；前端不能直接写 app-server stdin，也不能响应已由自动 reviewer 接管的审批。
+- 用户回答和 MCP form 内容不会写入 DemoSession；发往 app-server 的原值只存在于内存，transport JSONL 使用 `[REDACTED_USER_INPUT]` 占位。
+- `serverRequest/resolved`、请求超时、Turn 完成、运行失败或取消都会清空 pending 状态；传输或页面事件发送异常时会先终止 app-server 子进程并安全处理未决请求。
+
+验证基线：
+
+- 前端类型检查、生产构建与 74 个单元/SSR 测试通过。
+- Rust `cargo check` 与 132 个非 ignored 测试通过；2 个依赖真实账号/服务的 smoke 测试保持 ignored。
+- 真实 Codex app-server 只读 transport smoke test 单独启用后通过，运行期间未出现人工审批。
+- 0.144.1 生成 schema 中的 5 类 v2 server request 与 `serverRequest/resolved` 均有 fixture；命令、文件、权限、用户输入和 MCP response shape 有单元测试锁定。
 
 退出标准：
 

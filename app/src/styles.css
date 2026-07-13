@@ -1549,6 +1549,228 @@ button {
   color: #a9781c;
 }
 
+.agent-request-card {
+  border-color: #d7e1ea;
+  background: #f8fbfd;
+}
+
+.agent-request-card > header > span {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #657888;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.agent-request-card.is-auto-reviewing {
+  border-color: #d5e4d9;
+  background: #f7fbf8;
+}
+
+.agent-request-card.is-auto-reviewing > header svg,
+.agent-request-card.is-resolved > header svg,
+.agent-request-card.is-auto-resolved > header svg {
+  color: #438256;
+}
+
+.agent-request-card.is-unsupported,
+.agent-request-card.is-timed-out,
+.agent-request-card.is-declined {
+  border-color: #ead7a6;
+  background: #fffaf0;
+}
+
+.agent-request-card.is-failed,
+.agent-request-card.is-cancelled {
+  border-color: #edcbc5;
+  background: #fff7f5;
+}
+
+.agent-request-card > p,
+.agent-request-note,
+.agent-request-outcome,
+.agent-request-error {
+  margin: 0;
+  color: #4b5863;
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-request-note {
+  color: #5d7062;
+}
+
+.agent-request-deadline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  color: #7a6541;
+  font-size: 10.5px;
+}
+
+.agent-request-deadline small {
+  color: #8c806e;
+}
+
+.agent-request-form {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.agent-request-form > fieldset {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #dce4ea;
+  border-radius: 8px;
+}
+
+.agent-request-form legend {
+  display: grid;
+  gap: 2px;
+  max-width: 100%;
+  padding: 0 4px;
+  color: #43515d;
+  font-size: 11px;
+}
+
+.agent-request-form legend span,
+.agent-request-field > small {
+  color: #75818b;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.agent-request-options {
+  display: grid;
+  gap: 5px;
+}
+
+.agent-request-options > label {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 6px;
+  align-items: start;
+  padding: 6px;
+  border: 1px solid #e0e6ea;
+  border-radius: 7px;
+  background: #fff;
+  color: #46535e;
+  cursor: pointer;
+}
+
+.agent-request-options > label > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.agent-request-options > label small {
+  color: #7c8790;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.agent-request-field {
+  display: grid;
+  gap: 4px;
+  color: #4b5863;
+  font-size: 11px;
+}
+
+.agent-request-text-input,
+.agent-request-field input:not([type="checkbox"]),
+.agent-request-field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #d6dee4;
+  border-radius: 7px;
+  outline: none;
+  background: #fff;
+  color: #35424c;
+  font: inherit;
+  font-size: 11px;
+}
+
+.agent-request-text-input:focus,
+.agent-request-field input:focus,
+.agent-request-field select:focus {
+  border-color: #87acd0;
+  box-shadow: 0 0 0 2px rgb(62 127 184 / 10%);
+}
+
+.agent-request-url {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+}
+
+.agent-request-url > code {
+  overflow: hidden;
+  min-width: 0;
+  color: #526a7c;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-request-actions > button {
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid #c9d7e2;
+  border-radius: 7px;
+  background: #fff;
+  color: #3e6889;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.agent-request-actions > button:hover:not(:disabled) {
+  border-color: #98b5cb;
+  background: #f2f7fa;
+}
+
+.agent-request-actions > button.is-danger {
+  border-color: #e4c8c3;
+  color: #a24a40;
+}
+
+.agent-request-actions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.agent-request-submitting {
+  color: #607f99;
+  font-size: 10.5px;
+}
+
+.agent-request-error {
+  color: #a54138;
+}
+
+.agent-request-outcome {
+  color: #596d5e;
+}
+
 .agent-progress-event {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) auto;

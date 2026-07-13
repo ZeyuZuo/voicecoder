@@ -9,6 +9,7 @@ import type {
   AgentMessagePhase,
   AgentRun,
   AgentRunKind,
+  AgentServerRequest,
   AgentStructuredPreview,
   AgentTokenUsageBreakdown,
   AgentTurnStatus,
@@ -272,6 +273,9 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
       aggregateDiffStats: EMPTY_AGENT_DIFF_STATS,
       hooksById: {},
       hookOrder: [],
+      serverRequestsById: {},
+      serverRequestOrder: [],
+      pendingServerRequestIds: [],
       warnings: [],
       errors: [],
       changedFiles: [],
@@ -350,18 +354,24 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
 
     return {
       ...session,
-      runs: session.runs.map((candidate) =>
-        candidate.id === action.runId
-          ? {
-              ...candidate,
-              status: runStatus,
-              finalMessage: action.finalMessage ?? candidate.finalMessage,
-              changedFiles: mergeUnique(candidate.changedFiles, action.changedFiles ?? []),
-              error: action.error ?? candidate.error,
-              completedAt: action.now
-            }
-          : candidate
-      ),
+      runs: session.runs.map((candidate) => {
+        if (candidate.id !== action.runId) {
+          return candidate;
+        }
+        const settled = settlePendingServerRequests(
+          candidate,
+          action.now,
+          outcome === "completed" ? "AgentRun 已结束" : "AgentRun 已中断"
+        );
+        return {
+          ...settled,
+          status: runStatus,
+          finalMessage: action.finalMessage ?? candidate.finalMessage,
+          changedFiles: mergeUnique(candidate.changedFiles, action.changedFiles ?? []),
+          error: action.error ?? candidate.error,
+          completedAt: action.now
+        };
+      }),
       currentPreviewUrl: action.currentPreviewUrl ?? session.currentPreviewUrl,
       status: sessionStatus,
       error: runStatus === "failed" ? action.error ?? run.error ?? "Codex turn failed." : undefined,
@@ -425,16 +435,14 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
 
     return {
       ...session,
-      runs: session.runs.map((candidate) =>
-        candidate.id === action.runId
-          ? {
-              ...candidate,
-              status: "failed",
-              error: action.error,
-              completedAt: action.now
-            }
-          : candidate
-      ),
+      runs: session.runs.map((candidate) => candidate.id === action.runId
+        ? {
+            ...settlePendingServerRequests(candidate, action.now, "AgentRun 失败，请求已取消"),
+            status: "failed",
+            error: action.error,
+            completedAt: action.now
+          }
+        : candidate),
       status: "error",
       error: action.error,
       updatedAt: action.now
@@ -449,15 +457,13 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
 
     return {
       ...session,
-      runs: session.runs.map((candidate) =>
-        candidate.id === action.runId
-          ? {
-              ...candidate,
-              status: "cancelled",
-              completedAt: action.now
-            }
-          : candidate
-      ),
+      runs: session.runs.map((candidate) => candidate.id === action.runId
+        ? {
+            ...settlePendingServerRequests(candidate, action.now, "AgentRun 已取消"),
+            status: "cancelled",
+            completedAt: action.now
+          }
+        : candidate),
       status: "preview_ready",
       updatedAt: action.now
     };
@@ -868,6 +874,32 @@ function isTerminalRunStatus(status: AgentRun["status"]) {
   return status === "succeeded" || status === "failed" || status === "cancelled";
 }
 
+function settlePendingServerRequests(run: AgentRun, now: string, message: string): AgentRun {
+  const pendingIds = run.pendingServerRequestIds ?? [];
+  if (!pendingIds.length) {
+    return run;
+  }
+  const serverRequestsById = { ...(run.serverRequestsById ?? {}) };
+  for (const requestKey of pendingIds) {
+    const request = serverRequestsById[requestKey];
+    if (!request) {
+      continue;
+    }
+    serverRequestsById[requestKey] = {
+      ...request,
+      status: "cancelled",
+      resolution: "run_finished",
+      statusMessage: message,
+      updatedAt: now
+    };
+  }
+  return {
+    ...run,
+    serverRequestsById,
+    pendingServerRequestIds: []
+  };
+}
+
 function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
   const nextRun: AgentRun = {
     ...run,
@@ -975,6 +1007,60 @@ function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
       ...nextRun,
       codexThreadId: event.threadId,
       codexTurnId: event.turnId
+    };
+  }
+  if (event.type === "server_request") {
+    const request: AgentServerRequest = {
+      requestId: event.requestId,
+      requestKey: event.requestKey,
+      method: limitAgentText(event.method, 300) ?? "unknown",
+      kind: event.kind,
+      status: event.status,
+      requiresUserInput: event.requiresUserInput,
+      autoReview: event.autoReview,
+      threadId: event.threadId,
+      turnId: event.turnId,
+      itemId: event.itemId,
+      details: sanitizeAgentServerRequestDetails(event.details),
+      expiresAt: event.expiresAt,
+      createdAt: event.createdAt,
+      updatedAt: event.createdAt
+    };
+    return {
+      ...nextRun,
+      codexThreadId: event.threadId ?? nextRun.codexThreadId,
+      codexTurnId: event.turnId ?? nextRun.codexTurnId,
+      serverRequestsById: {
+        ...(nextRun.serverRequestsById ?? {}),
+        [event.requestKey]: request
+      },
+      serverRequestOrder: appendUnique(nextRun.serverRequestOrder ?? [], event.requestKey),
+      pendingServerRequestIds: appendUnique(
+        nextRun.pendingServerRequestIds ?? [],
+        event.requestKey
+      )
+    };
+  }
+  if (event.type === "server_request_resolved") {
+    const existing = nextRun.serverRequestsById?.[event.requestKey];
+    const serverRequestsById = existing
+      ? {
+          ...(nextRun.serverRequestsById ?? {}),
+          [event.requestKey]: {
+            ...existing,
+            status: event.status,
+            resolution: limitAgentText(event.resolution, 200),
+            statusMessage: limitAgentSensitiveText(event.message, AGENT_TEXT_PREVIEW_LIMIT),
+            updatedAt: event.createdAt
+          }
+        }
+      : nextRun.serverRequestsById ?? {};
+    return {
+      ...nextRun,
+      serverRequestsById,
+      pendingServerRequestIds: (nextRun.pendingServerRequestIds ?? []).filter(
+        (requestKey) => requestKey !== event.requestKey
+      )
     };
   }
   if (event.type === "warning") {
@@ -1121,6 +1207,8 @@ function shouldRetainAgentEvent(event: AgentEvent) {
     event.type === "token_usage_updated" ||
     event.type === "model_safety_buffering_updated" ||
     event.type === "model_verification_updated" ||
+    event.type === "server_request" ||
+    event.type === "server_request_resolved" ||
     event.type === "warning" ||
     event.type === "config_warning" ||
     event.type === "guardian_warning" ||
@@ -1827,6 +1915,69 @@ function sanitizeAgentStates(value: unknown) {
       message: limitAgentSensitiveText(readString(stateRecord?.message), AGENT_TEXT_PREVIEW_LIMIT)
     }];
   }));
+}
+
+function sanitizeAgentServerRequestDetails(
+  value: unknown
+): AgentServerRequest["details"] {
+  const details = readRecord(value) ?? {};
+  const questions = Array.isArray(details.questions)
+    ? details.questions.slice(0, 10).flatMap((candidate) => {
+        const question = readRecord(candidate);
+        const id = limitAgentText(readString(question?.id), 200);
+        const prompt = limitAgentSensitiveText(
+          readString(question?.question),
+          AGENT_TEXT_PREVIEW_LIMIT
+        );
+        if (!id || !prompt) {
+          return [];
+        }
+        const options = Array.isArray(question?.options)
+          ? question.options.slice(0, 10).flatMap((candidateOption) => {
+              const option = readRecord(candidateOption);
+              const label = limitAgentSensitiveText(readString(option?.label), 300);
+              if (!label) {
+                return [];
+              }
+              return [{
+                label,
+                description: limitAgentSensitiveText(
+                  readString(option?.description),
+                  AGENT_TEXT_PREVIEW_LIMIT
+                ) ?? ""
+              }];
+            })
+          : undefined;
+        return [{
+          id,
+          header: limitAgentSensitiveText(readString(question?.header), 200) ?? "需要确认",
+          question: prompt,
+          isOther: readBoolean(question?.isOther) ?? false,
+          isSecret: readBoolean(question?.isSecret) ?? false,
+          options: options?.length ? options : undefined
+        }];
+      })
+    : undefined;
+  const sanitizeRecord = (record: unknown) => readRecord(redactAgentValue(record, 0, {
+    nodesRemaining: AGENT_STRUCTURED_PREVIEW_MAX_NODES,
+    sourceCharsRemaining: AGENT_STRUCTURED_PREVIEW_MAX_SOURCE_CHARS
+  }));
+
+  return {
+    command: limitAgentSensitiveText(readString(details.command), AGENT_TEXT_PREVIEW_LIMIT),
+    cwd: limitAgentText(readString(details.cwd), AGENT_TEXT_PREVIEW_LIMIT),
+    reason: limitAgentSensitiveText(readString(details.reason), AGENT_TEXT_PREVIEW_LIMIT),
+    grantRoot: limitAgentText(readString(details.grantRoot), AGENT_TEXT_PREVIEW_LIMIT),
+    permissions: sanitizeRecord(details.permissions),
+    questions,
+    autoResolutionMs: readNumber(details.autoResolutionMs),
+    serverName: limitAgentText(readString(details.serverName), 300),
+    mode: limitAgentText(readString(details.mode), 100),
+    message: limitAgentSensitiveText(readString(details.message), AGENT_TEXT_PREVIEW_LIMIT),
+    url: limitAgentText(readString(details.url), AGENT_TEXT_PREVIEW_LIMIT),
+    elicitationId: limitAgentText(readString(details.elicitationId), 300),
+    requestedSchema: sanitizeRecord(details.requestedSchema)
+  };
 }
 
 function readAgentStates(value: unknown) {

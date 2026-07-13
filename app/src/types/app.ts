@@ -557,6 +557,74 @@ export type AgentRunError = {
   createdAt: string;
 };
 
+export type AgentServerRequestKind =
+  | "command_approval"
+  | "file_approval"
+  | "permissions_approval"
+  | "user_input"
+  | "mcp_elicitation"
+  | "unsupported";
+
+export type AgentServerRequestStatus =
+  | "pending"
+  | "auto_reviewing"
+  | "unsupported"
+  | "resolved"
+  | "auto_resolved"
+  | "declined"
+  | "cancelled"
+  | "timed_out"
+  | "failed";
+
+export type AgentUserInputOption = {
+  label: string;
+  description: string;
+};
+
+export type AgentUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options?: AgentUserInputOption[];
+};
+
+export type AgentServerRequestDetails = {
+  command?: string;
+  cwd?: string;
+  reason?: string;
+  grantRoot?: string;
+  permissions?: Record<string, unknown>;
+  questions?: AgentUserInputQuestion[];
+  autoResolutionMs?: number;
+  serverName?: string;
+  mode?: string;
+  message?: string;
+  url?: string;
+  elicitationId?: string;
+  requestedSchema?: Record<string, unknown>;
+};
+
+export type AgentServerRequest = {
+  requestId: string | number;
+  requestKey: string;
+  method: string;
+  kind: AgentServerRequestKind;
+  status: AgentServerRequestStatus;
+  requiresUserInput: boolean;
+  autoReview: boolean;
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  details: AgentServerRequestDetails;
+  resolution?: string;
+  statusMessage?: string;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AgentTurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
 
 export type AgentEvent =
@@ -635,6 +703,31 @@ export type AgentEvent =
       status: string;
       action?: string;
       rationale?: string;
+      createdAt: string;
+    }
+  | {
+      type: "server_request";
+      requestId: string | number;
+      requestKey: string;
+      method: string;
+      kind: AgentServerRequestKind;
+      status: AgentServerRequestStatus;
+      requiresUserInput: boolean;
+      autoReview: boolean;
+      threadId?: string;
+      turnId?: string;
+      itemId?: string;
+      details: Record<string, unknown>;
+      expiresAt: string;
+      createdAt: string;
+    }
+  | {
+      type: "server_request_resolved";
+      requestId: string | number;
+      requestKey: string;
+      status: AgentServerRequestStatus;
+      resolution?: string;
+      message?: string;
       createdAt: string;
     }
   | {
@@ -770,6 +863,9 @@ export type AgentRun = {
   tokenUsage?: AgentTokenUsage;
   modelSafetyBuffering?: AgentModelSafetyBuffering;
   modelVerification?: AgentModelVerification;
+  serverRequestsById?: Record<string, AgentServerRequest>;
+  serverRequestOrder?: string[];
+  pendingServerRequestIds?: string[];
   warnings: AgentWarning[];
   errors: AgentRunError[];
   changedFiles: string[];
