@@ -4,9 +4,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
+    fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    path::Path,
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        Arc, Mutex,
+    },
     thread,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter};
 
@@ -16,6 +23,12 @@ const DEFAULT_CODEX_SANDBOX: CodingAgentSandboxMode = CodingAgentSandboxMode::Wo
 const CODEX_APP_SERVER_TRANSPORT: &str = "stdio";
 const CODEX_APPROVAL_POLICY_ENV: &str = "VOICECODER_CODEX_APPROVAL_POLICY";
 const CODEX_APPROVALS_REVIEWER_ENV: &str = "VOICECODER_CODEX_APPROVALS_REVIEWER";
+const APP_SERVER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const APP_SERVER_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_SERVER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const APP_SERVER_TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const APP_SERVER_STDERR_TAIL_LINES: usize = 20;
+const APP_SERVER_LAST_MESSAGE_LIMIT: usize = 2_000;
 const AGENT_RUN_STARTED_EVENT: &str = "agent://run-started";
 const AGENT_EVENT_EVENT: &str = "agent://event";
 const AGENT_RUN_COMPLETED_EVENT: &str = "agent://run-completed";
@@ -226,6 +239,13 @@ pub enum AgentEvent {
         rationale: Option<String>,
         created_at: String,
     },
+    Diagnostic {
+        level: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        created_at: String,
+    },
     Command {
         command: String,
         status: String,
@@ -283,6 +303,7 @@ struct CodingAgentRuntimeMetadata {
     sandbox: String,
     approval_policy: Option<String>,
     approvals_reviewer: Option<String>,
+    transport_log_path: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -385,6 +406,18 @@ impl CodingAgentProvider for CodexAppServerProvider {
         );
 
         apply_permission_settings_to_diagnostic(&mut diagnostic);
+        diagnostic.details.insert(
+            "responseTimeoutSeconds".to_string(),
+            APP_SERVER_RESPONSE_TIMEOUT.as_secs().to_string(),
+        );
+        diagnostic.details.insert(
+            "serverRequestTimeoutSeconds".to_string(),
+            APP_SERVER_SERVER_REQUEST_TIMEOUT.as_secs().to_string(),
+        );
+        diagnostic.details.insert(
+            "heartbeatIntervalSeconds".to_string(),
+            APP_SERVER_HEARTBEAT_INTERVAL.as_secs().to_string(),
+        );
         diagnostic
     }
 
@@ -393,7 +426,8 @@ impl CodingAgentProvider for CodexAppServerProvider {
         context: CodingAgentStartContext,
     ) -> Result<Box<dyn CodingAgentSession + Send>, String> {
         self.validate_start()?;
-        Ok(Box::new(start_codex_app_server_session(context)?))
+        let log_id = format!("provider-{}", Utc::now().timestamp_millis());
+        Ok(Box::new(start_codex_app_server_session(context, &log_id)?))
     }
 }
 
@@ -534,7 +568,7 @@ fn run_app_server_demo_agent(
         prompt: request.prompt.clone(),
         sandbox: request.sandbox,
     };
-    let mut session = start_codex_app_server_session(context)?;
+    let mut session = start_codex_app_server_session(context, &request.run_id)?;
 
     emit_agent_run_started(
         &app,
@@ -564,6 +598,7 @@ fn run_app_server_demo_agent(
                         .as_str()
                         .to_string(),
                 ),
+                transport_log_path: Some(session.client.log_path().to_string()),
             },
             started_at: current_agent_event_timestamp(),
         },
@@ -635,6 +670,7 @@ fn run_codex_exec_json_demo_agent(
                         .as_str()
                         .to_string(),
                 ),
+                transport_log_path: None,
             },
             started_at: current_agent_event_timestamp(),
         },
@@ -969,31 +1005,31 @@ struct CodexAppServerSession {
 
 impl CodingAgentSession for CodexAppServerSession {
     fn cancel(&mut self) -> Result<(), String> {
-        self.child
-            .kill()
-            .map_err(|error| format!("停止 Codex app-server 失败：{error}"))?;
+        let stop_result = if self
+            .child
+            .try_wait()
+            .map_err(|error| format!("检查 Codex app-server 子进程状态失败：{error}"))?
+            .is_none()
+        {
+            self.child
+                .kill()
+                .map_err(|error| format!("停止 Codex app-server 失败：{error}"))
+        } else {
+            Ok(())
+        };
         let _ = self.child.wait();
-        Ok(())
+        self.client.join_readers();
+        stop_result
     }
 }
 
 impl CodexAppServerSession {
     fn take_pending_agent_events(&mut self) -> Vec<AgentEvent> {
-        self.client
-            .take_pending_notifications()
-            .iter()
-            .flat_map(normalize_codex_notification)
-            .collect()
+        self.client.take_pending_agent_events()
     }
 
     fn read_next_agent_events(&mut self) -> Result<Vec<AgentEvent>, String> {
-        loop {
-            let message = self.client.read_message(&mut self.child)?;
-            let events = normalize_codex_notification(&message);
-            if !events.is_empty() {
-                return Ok(events);
-            }
-        }
+        self.client.read_next_agent_events(&mut self.child)
     }
 }
 
@@ -1087,10 +1123,12 @@ fn emit_agent_error(
 
 fn start_codex_app_server_session(
     context: CodingAgentStartContext,
+    run_id: &str,
 ) -> Result<CodexAppServerSession, String> {
     validate_coding_agent_start_context(&context)?;
     let codex_version = validate_codex_executable()?;
     let permission_settings = resolve_coding_agent_permission_settings()?;
+    let transport_log = AppServerTransportLog::create(&context.project_path, run_id)?;
 
     let executable = codex_executable();
     let mut child = Command::new(&executable)
@@ -1109,14 +1147,24 @@ fn start_codex_app_server_session(
         let _ = child.kill();
         return Err("Codex app-server stdout 不可用。".to_string());
     };
-    let mut client = CodexAppServerClient::new(stdin, stdout);
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        return Err("Codex app-server stderr 不可用。".to_string());
+    };
+    let mut client = CodexAppServerClient::new(stdin, stdout, stderr, transport_log);
     if let Err(error) = initialize_codex_app_server(&mut child, &mut client) {
-        return Err(cleanup_child_with_error(&mut child, error));
+        let error = cleanup_child_with_error(&mut child, error);
+        client.join_readers();
+        return Err(error);
     }
     let run_handles =
         match start_initial_codex_turn(&mut child, &mut client, &context, permission_settings) {
             Ok(run_handles) => run_handles,
-            Err(error) => return Err(cleanup_child_with_error(&mut child, error)),
+            Err(error) => {
+                let error = cleanup_child_with_error(&mut child, error);
+                client.join_readers();
+                return Err(error);
+            }
         };
     let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
 
@@ -1598,24 +1646,173 @@ fn current_agent_event_timestamp() -> String {
     Utc::now().to_rfc3339()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum JsonRpcInboundKind {
+    Response { request_id: u64 },
+    Notification { method: String },
+    ServerRequest { request_id: Value, method: String },
+    Unknown { reason: String },
+}
+
+enum AppServerReaderEvent {
+    Message {
+        message: Value,
+        received_at: String,
+    },
+    InvalidJson {
+        line: String,
+        error: String,
+        received_at: String,
+    },
+    Closed,
+    Failed(String),
+}
+
+struct PendingServerRequest {
+    request_id: Value,
+    method: String,
+    deadline: Instant,
+}
+
+#[derive(Clone, Default)]
+struct AppServerHeartbeatSnapshot {
+    last_message_at: Option<String>,
+    last_progress_at: Option<String>,
+    last_method: Option<String>,
+    last_message: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SharedAppServerHeartbeat(Arc<Mutex<AppServerHeartbeatSnapshot>>);
+
+impl SharedAppServerHeartbeat {
+    fn record_message(&self, message: &Value, received_at: &str) {
+        if let Ok(mut heartbeat) = self.0.lock() {
+            heartbeat.last_message_at = Some(received_at.to_string());
+            heartbeat.last_method = message
+                .get("method")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            heartbeat.last_message = Some(truncate_transport_text(
+                &message.to_string(),
+                APP_SERVER_LAST_MESSAGE_LIMIT,
+            ));
+        }
+    }
+
+    fn record_progress(&self, occurred_at: &str) {
+        if let Ok(mut heartbeat) = self.0.lock() {
+            heartbeat.last_progress_at = Some(occurred_at.to_string());
+        }
+    }
+
+    fn snapshot(&self) -> AppServerHeartbeatSnapshot {
+        self.0.lock().map(|value| value.clone()).unwrap_or_default()
+    }
+}
+
+#[derive(Clone)]
+struct AppServerTransportLog {
+    path: String,
+    file: Arc<Mutex<File>>,
+}
+
+impl AppServerTransportLog {
+    fn create(project_path: &str, run_id: &str) -> Result<Self, String> {
+        let voicecoder_dir = Path::new(project_path).join(".voicecoder");
+        fs::create_dir_all(&voicecoder_dir)
+            .map_err(|error| format!("创建 app-server 诊断目录失败：{error}"))?;
+        let file_name = format!(
+            "agent_run_{}_app_server.jsonl",
+            sanitize_transport_log_stem(run_id)
+        );
+        let path = voicecoder_dir.join(file_name);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("创建 app-server 原始日志失败：{error}"))?;
+
+        Ok(Self {
+            path: path.to_string_lossy().to_string(),
+            file: Arc::new(Mutex::new(file)),
+        })
+    }
+
+    fn record(&self, direction: &str, kind: &str, payload: Value) -> Result<(), String> {
+        let record = json!({
+            "recordedAt": current_agent_event_timestamp(),
+            "direction": direction,
+            "kind": kind,
+            "payload": payload
+        });
+        let line = serde_json::to_string(&record)
+            .map_err(|error| format!("序列化 app-server 原始日志失败：{error}"))?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| "app-server 原始日志锁已损坏。".to_string())?;
+        file.write_all(line.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .and_then(|_| file.flush())
+            .map_err(|error| format!("写入 app-server 原始日志失败：{error}"))
+    }
+}
+
 #[allow(dead_code)]
 struct CodexAppServerClient {
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    receiver: Receiver<AppServerReaderEvent>,
+    stdout_reader: Option<thread::JoinHandle<()>>,
+    stderr_reader: Option<thread::JoinHandle<()>>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    heartbeat: SharedAppServerHeartbeat,
+    transport_log: AppServerTransportLog,
     next_request_id: u64,
     pending_responses: BTreeMap<u64, Value>,
-    pending_notifications: VecDeque<Value>,
+    pending_agent_events: VecDeque<AgentEvent>,
+    pending_server_requests: VecDeque<PendingServerRequest>,
+    last_heartbeat_notice: Instant,
 }
 
 impl CodexAppServerClient {
-    fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
+    fn new(
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        stderr: ChildStderr,
+        transport_log: AppServerTransportLog,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let heartbeat = SharedAppServerHeartbeat::default();
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+        let stdout_reader = spawn_app_server_stdout_reader(
+            stdout,
+            sender,
+            transport_log.clone(),
+            heartbeat.clone(),
+        );
+        let stderr_reader =
+            spawn_app_server_stderr_reader(stderr, transport_log.clone(), stderr_tail.clone());
+
         Self {
             stdin,
-            stdout: BufReader::new(stdout),
+            receiver,
+            stdout_reader: Some(stdout_reader),
+            stderr_reader: Some(stderr_reader),
+            stderr_tail,
+            heartbeat,
+            transport_log,
             next_request_id: FIRST_APP_SERVER_REQUEST_ID,
             pending_responses: BTreeMap::new(),
-            pending_notifications: VecDeque::new(),
+            pending_agent_events: VecDeque::new(),
+            pending_server_requests: VecDeque::new(),
+            last_heartbeat_notice: Instant::now(),
         }
+    }
+
+    fn log_path(&self) -> &str {
+        &self.transport_log.path
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -1632,17 +1829,16 @@ impl CodexAppServerClient {
     ) -> Result<Value, String> {
         let request_id = self.next_request_id();
         let request = build_json_rpc_request(request_id, method, params);
-        self.write_json_line(&request)?;
+        self.write_json_line(&request, "request")?;
         self.read_response(child, request_id)
     }
 
     fn send_notification(&mut self, method: &str, params: Value) -> Result<(), String> {
-        self.write_json_line(&build_json_rpc_notification(method, params))
+        self.write_json_line(&build_json_rpc_notification(method, params), "notification")
     }
 
-    #[allow(dead_code)]
-    fn take_pending_notifications(&mut self) -> Vec<Value> {
-        self.pending_notifications.drain(..).collect()
+    fn take_pending_agent_events(&mut self) -> Vec<AgentEvent> {
+        self.pending_agent_events.drain(..).collect()
     }
 
     fn read_response(&mut self, child: &mut Child, request_id: u64) -> Result<Value, String> {
@@ -1650,69 +1846,421 @@ impl CodexAppServerClient {
             return validate_json_rpc_response(response);
         }
 
+        let deadline = Instant::now() + APP_SERVER_RESPONSE_TIMEOUT;
         loop {
-            let message = self.read_message(child)?;
-            if let Some(message_id) = message.get("id").and_then(Value::as_u64) {
-                if message_id == request_id {
-                    return validate_json_rpc_response(message);
-                }
-
-                self.pending_responses.insert(message_id, message);
-                continue;
-            }
-
-            self.pending_notifications.push_back(message);
-        }
-    }
-
-    fn read_message(&mut self, child: &mut Child) -> Result<Value, String> {
-        loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("检查 Codex app-server 子进程状态失败：{error}"))?
-            {
-                return Err(format!(
-                    "Codex app-server 已退出，退出码：{}。",
-                    format_exit_status(status)
+            self.resolve_expired_server_requests()?;
+            if Instant::now() >= deadline {
+                return Err(self.transport_error_context(
+                    child,
+                    &format!("等待 Codex app-server request {request_id} 响应超时。"),
                 ));
             }
 
-            let mut line = String::new();
-            let read_bytes = self
-                .stdout
-                .read_line(&mut line)
-                .map_err(|error| format!("读取 Codex app-server stdout 失败：{error}"))?;
-            if read_bytes == 0 {
-                let exit_status = child
-                    .try_wait()
-                    .map_err(|error| format!("检查 Codex app-server 子进程状态失败：{error}"))?;
-                return Err(match exit_status {
-                    Some(status) => format!(
-                        "Codex app-server stdout 已关闭，退出码：{}。",
-                        format_exit_status(status)
-                    ),
-                    None => "Codex app-server stdout 已关闭。".to_string(),
-                });
+            match self
+                .receiver
+                .recv_timeout(APP_SERVER_TRANSPORT_POLL_INTERVAL)
+            {
+                Ok(event) => {
+                    if let Some(response) =
+                        self.process_reader_event(child, event, Some(request_id))?
+                    {
+                        return validate_json_rpc_response(response);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => self.ensure_child_is_running(child)?,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self.transport_error_context(
+                        child,
+                        "Codex app-server stdout reader 已断开。",
+                    ));
+                }
             }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            return serde_json::from_str::<Value>(trimmed)
-                .map_err(|error| format!("Codex app-server 输出不是合法 JSON：{error}"));
         }
     }
 
-    fn write_json_line(&mut self, value: &Value) -> Result<(), String> {
+    fn read_next_agent_events(&mut self, child: &mut Child) -> Result<Vec<AgentEvent>, String> {
+        loop {
+            if !self.pending_agent_events.is_empty() {
+                return Ok(self.take_pending_agent_events());
+            }
+
+            self.resolve_expired_server_requests()?;
+            if !self.pending_agent_events.is_empty() {
+                return Ok(self.take_pending_agent_events());
+            }
+
+            match self
+                .receiver
+                .recv_timeout(APP_SERVER_TRANSPORT_POLL_INTERVAL)
+            {
+                Ok(event) => {
+                    let _ = self.process_reader_event(child, event, None)?;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.ensure_child_is_running(child)?;
+                    if self.last_heartbeat_notice.elapsed() >= APP_SERVER_HEARTBEAT_INTERVAL {
+                        self.last_heartbeat_notice = Instant::now();
+                        return Ok(vec![self.heartbeat_diagnostic_event()]);
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self.transport_error_context(
+                        child,
+                        "Codex app-server stdout reader 已断开。",
+                    ));
+                }
+            }
+        }
+    }
+
+    fn process_reader_event(
+        &mut self,
+        child: &mut Child,
+        event: AppServerReaderEvent,
+        expected_response_id: Option<u64>,
+    ) -> Result<Option<Value>, String> {
+        match event {
+            AppServerReaderEvent::Message {
+                message,
+                received_at,
+            } => self.route_message(message, received_at, expected_response_id),
+            AppServerReaderEvent::InvalidJson {
+                line,
+                error,
+                received_at,
+            } => {
+                self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                    level: "warning".to_string(),
+                    message: format!(
+                        "忽略一行无效 app-server JSON：{error} · {}",
+                        truncate_transport_text(&line, 240)
+                    ),
+                    method: None,
+                    created_at: received_at,
+                });
+                Ok(None)
+            }
+            AppServerReaderEvent::Closed => {
+                Err(self.transport_error_context(child, "Codex app-server stdout 已关闭。"))
+            }
+            AppServerReaderEvent::Failed(error) => Err(self.transport_error_context(
+                child,
+                &format!("读取 Codex app-server stdout 失败：{error}"),
+            )),
+        }
+    }
+
+    fn route_message(
+        &mut self,
+        message: Value,
+        received_at: String,
+        expected_response_id: Option<u64>,
+    ) -> Result<Option<Value>, String> {
+        match classify_json_rpc_message(&message) {
+            JsonRpcInboundKind::Response { request_id } => {
+                if expected_response_id == Some(request_id) {
+                    return Ok(Some(message));
+                }
+                self.pending_responses.insert(request_id, message);
+            }
+            JsonRpcInboundKind::Notification { method } => {
+                let events = normalize_codex_notification_at(&message, &received_at);
+                if events.is_empty() {
+                    self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                        level: "debug".to_string(),
+                        message: "收到尚未映射的 app-server notification".to_string(),
+                        method: Some(method),
+                        created_at: received_at,
+                    });
+                } else {
+                    self.heartbeat.record_progress(&received_at);
+                    self.last_heartbeat_notice = Instant::now();
+                    self.pending_agent_events.extend(events);
+                }
+            }
+            JsonRpcInboundKind::ServerRequest { request_id, method } => {
+                self.pending_server_requests
+                    .push_back(PendingServerRequest {
+                        request_id,
+                        method: method.clone(),
+                        deadline: Instant::now() + APP_SERVER_SERVER_REQUEST_TIMEOUT,
+                    });
+                self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                    level: "warning".to_string(),
+                    message: format!(
+                        "收到尚未接入 UI 的 app-server 主动请求；若未处理将在 {} 秒后安全拒绝",
+                        APP_SERVER_SERVER_REQUEST_TIMEOUT.as_secs()
+                    ),
+                    method: Some(method),
+                    created_at: received_at,
+                });
+            }
+            JsonRpcInboundKind::Unknown { reason } => {
+                self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                    level: "warning".to_string(),
+                    message: format!("收到无法分类的 app-server 消息：{reason}"),
+                    method: message
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    created_at: received_at,
+                });
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn resolve_expired_server_requests(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        let mut pending = VecDeque::new();
+
+        while let Some(request) = self.pending_server_requests.pop_front() {
+            if request.deadline > now {
+                pending.push_back(request);
+                continue;
+            }
+
+            let response = build_json_rpc_error_response(
+                request.request_id,
+                -32002,
+                "VoiceCoder 尚未实现该 app-server 主动请求，已在超时后安全拒绝。",
+            );
+            self.write_json_line(&response, "server_request_timeout_response")?;
+            self.pending_agent_events.push_back(AgentEvent::Diagnostic {
+                level: "warning".to_string(),
+                message: "app-server 主动请求等待超时，已安全拒绝".to_string(),
+                method: Some(request.method),
+                created_at: current_agent_event_timestamp(),
+            });
+        }
+
+        self.pending_server_requests = pending;
+        Ok(())
+    }
+
+    fn heartbeat_diagnostic_event(&self) -> AgentEvent {
+        let heartbeat = self.heartbeat.snapshot();
+        let last_message_at = heartbeat
+            .last_message_at
+            .as_deref()
+            .unwrap_or("尚未收到消息");
+        let last_progress_at = heartbeat
+            .last_progress_at
+            .as_deref()
+            .unwrap_or("尚未收到有效进展");
+
+        AgentEvent::Diagnostic {
+            level: "info".to_string(),
+            message: format!(
+                "仍在等待 Codex；最后消息：{last_message_at}；最后有效进展：{last_progress_at}"
+            ),
+            method: heartbeat.last_method,
+            created_at: current_agent_event_timestamp(),
+        }
+    }
+
+    fn ensure_child_is_running(&self, child: &mut Child) -> Result<(), String> {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("检查 Codex app-server 子进程状态失败：{error}"))?
+        {
+            return Err(self.transport_error_context(
+                child,
+                &format!(
+                    "Codex app-server 已退出，退出码：{}。",
+                    format_exit_status(status)
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn transport_error_context(&self, child: &mut Child, message: &str) -> String {
+        let heartbeat = self.heartbeat.snapshot();
+        let exit_status = child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(format_exit_status)
+            .unwrap_or_else(|| "仍在运行或状态未知".to_string());
+        let stderr = self
+            .stderr_tail
+            .lock()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join(" | "))
+            .unwrap_or_default();
+        let last_message = heartbeat
+            .last_message
+            .unwrap_or_else(|| "没有已记录的协议消息".to_string());
+
+        format!(
+            "{message} 进程状态：{exit_status}；最后协议消息：{last_message}；stderr：{}；原始日志：{}",
+            if stderr.is_empty() { "无" } else { &stderr },
+            self.transport_log.path
+        )
+    }
+
+    fn write_json_line(&mut self, value: &Value, kind: &str) -> Result<(), String> {
         let line = serde_json::to_string(value)
             .map_err(|error| format!("序列化 Codex app-server 消息失败：{error}"))?;
+        self.transport_log.record("outbound", kind, value.clone())?;
         self.stdin
             .write_all(line.as_bytes())
             .and_then(|_| self.stdin.write_all(b"\n"))
             .and_then(|_| self.stdin.flush())
             .map_err(|error| format!("写入 Codex app-server stdin 失败：{error}"))
+    }
+
+    fn join_readers(&mut self) {
+        if let Some(reader) = self.stdout_reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn spawn_app_server_stdout_reader(
+    stdout: ChildStdout,
+    sender: Sender<AppServerReaderEvent>,
+    transport_log: AppServerTransportLog,
+    heartbeat: SharedAppServerHeartbeat,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let received_at = current_agent_event_timestamp();
+            match line {
+                Ok(line) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    match serde_json::from_str::<Value>(trimmed) {
+                        Ok(message) => {
+                            heartbeat.record_message(&message, &received_at);
+                            let _ = transport_log.record("inbound", "message", message.clone());
+                            if sender
+                                .send(AppServerReaderEvent::Message {
+                                    message,
+                                    received_at,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = transport_log.record(
+                                "inbound",
+                                "invalid_json",
+                                json!({ "line": trimmed, "error": error.to_string() }),
+                            );
+                            if sender
+                                .send(AppServerReaderEvent::InvalidJson {
+                                    line,
+                                    error: error.to_string(),
+                                    received_at,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(AppServerReaderEvent::Failed(error.to_string()));
+                    return;
+                }
+            }
+        }
+        let _ = sender.send(AppServerReaderEvent::Closed);
+    })
+}
+
+fn spawn_app_server_stderr_reader(
+    stderr: ChildStderr,
+    transport_log: AppServerTransportLog,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let _ = transport_log.record("inbound", "stderr", Value::String(line.clone()));
+            if let Ok(mut tail) = stderr_tail.lock() {
+                tail.push_back(line);
+                while tail.len() > APP_SERVER_STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+            }
+        }
+    })
+}
+
+fn classify_json_rpc_message(message: &Value) -> JsonRpcInboundKind {
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let request_id = message.get("id").filter(|id| !id.is_null());
+
+    if let (Some(method), Some(request_id)) = (method.clone(), request_id) {
+        return JsonRpcInboundKind::ServerRequest {
+            request_id: request_id.clone(),
+            method,
+        };
+    }
+
+    if let Some(request_id) = request_id.and_then(Value::as_u64) {
+        if message.get("result").is_some() || message.get("error").is_some() {
+            return JsonRpcInboundKind::Response { request_id };
+        }
+    }
+
+    if let Some(method) = method {
+        return JsonRpcInboundKind::Notification { method };
+    }
+
+    JsonRpcInboundKind::Unknown {
+        reason: "缺少可识别的 method 或 response id/result/error".to_string(),
+    }
+}
+
+fn build_json_rpc_error_response(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
+}
+
+fn sanitize_transport_log_stem(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn truncate_transport_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
     }
 }
 
@@ -2039,6 +2587,148 @@ mod tests {
             request.pointer("/params/cwd").and_then(Value::as_str),
             Some("/tmp/project")
         );
+    }
+
+    #[test]
+    fn classifies_response_notification_server_request_and_unknown_messages() {
+        assert_eq!(
+            classify_json_rpc_message(&json!({ "id": 7, "result": {} })),
+            JsonRpcInboundKind::Response { request_id: 7 }
+        );
+        assert_eq!(
+            classify_json_rpc_message(&json!({
+                "method": "turn/started",
+                "params": { "turn": { "id": "turn-1" } }
+            })),
+            JsonRpcInboundKind::Notification {
+                method: "turn/started".to_string()
+            }
+        );
+        assert_eq!(
+            classify_json_rpc_message(&json!({
+                "id": "approval-1",
+                "method": "item/fileChange/requestApproval",
+                "params": {}
+            })),
+            JsonRpcInboundKind::ServerRequest {
+                request_id: Value::String("approval-1".to_string()),
+                method: "item/fileChange/requestApproval".to_string()
+            }
+        );
+        assert!(matches!(
+            classify_json_rpc_message(&json!({ "unexpected": true })),
+            JsonRpcInboundKind::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn builds_json_rpc_error_response_for_expired_server_request() {
+        assert_eq!(
+            build_json_rpc_error_response(
+                Value::String("approval-1".to_string()),
+                -32002,
+                "Timed out"
+            ),
+            json!({
+                "id": "approval-1",
+                "error": {
+                    "code": -32002,
+                    "message": "Timed out"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn transport_log_records_jsonl_and_sanitizes_run_id() {
+        let root = std::env::temp_dir().join(format!(
+            "voicecoder-transport-log-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let log =
+            AppServerTransportLog::create(root.to_string_lossy().as_ref(), "run/with unsafe chars")
+                .unwrap();
+        let log_path = log.path.clone();
+
+        log.record("inbound", "message", json!({ "method": "turn/started" }))
+            .unwrap();
+        let content = fs::read_to_string(&log_path).unwrap();
+
+        assert!(log_path.ends_with("agent_run_run_with_unsafe_chars_app_server.jsonl"));
+        assert!(content.contains("\"direction\":\"inbound\""));
+        assert!(content.contains("\"method\":\"turn/started\""));
+
+        drop(log);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn heartbeat_tracks_last_message_and_effective_progress() {
+        let heartbeat = SharedAppServerHeartbeat::default();
+        heartbeat.record_message(
+            &json!({ "method": "item/started", "params": {} }),
+            "2026-07-13T00:00:00Z",
+        );
+        heartbeat.record_progress("2026-07-13T00:00:01Z");
+        let snapshot = heartbeat.snapshot();
+
+        assert_eq!(
+            snapshot.last_message_at.as_deref(),
+            Some("2026-07-13T00:00:00Z")
+        );
+        assert_eq!(snapshot.last_method.as_deref(), Some("item/started"));
+        assert_eq!(
+            snapshot.last_progress_at.as_deref(),
+            Some("2026-07-13T00:00:01Z")
+        );
+    }
+
+    #[test]
+    #[ignore = "uses a real Codex account, service, and app-server process"]
+    fn codex_app_server_transport_smoke_from_env() {
+        let root = std::env::temp_dir().join(format!(
+            "voicecoder-app-server-smoke-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let context = CodingAgentStartContext {
+            project_path: root.to_string_lossy().to_string(),
+            prompt: "Do not modify files. Reply with exactly: transport ok".to_string(),
+            sandbox: Some(CodingAgentSandboxMode::ReadOnly),
+        };
+        let result = (|| -> Result<(), String> {
+            let mut session = start_codex_app_server_session(context, "smoke")?;
+            let deadline = Instant::now() + Duration::from_secs(120);
+
+            loop {
+                if Instant::now() >= deadline {
+                    let _ = session.cancel();
+                    return Err("Codex app-server transport smoke test timed out.".to_string());
+                }
+
+                let events = session.read_next_agent_events()?;
+                if events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+                {
+                    session.cancel()?;
+                    return Ok(());
+                }
+                if let Some(message) = events.iter().find_map(|event| match event {
+                    AgentEvent::Error { message, .. } => Some(message.clone()),
+                    _ => None,
+                }) {
+                    let _ = session.cancel();
+                    return Err(message);
+                }
+            }
+        })();
+
+        let _ = fs::remove_dir_all(root);
+        result.unwrap();
     }
 
     #[test]
@@ -2899,6 +3589,9 @@ mod tests {
                 sandbox: "workspace-write".to_string(),
                 approval_policy: Some("on-request".to_string()),
                 approvals_reviewer: Some("auto_review".to_string()),
+                transport_log_path: Some(
+                    "/tmp/demo/.voicecoder/agent_run_run-1_app_server.jsonl".to_string(),
+                ),
             },
             started_at: "2026-07-13T00:00:00Z".to_string(),
         })
@@ -2919,6 +3612,12 @@ mod tests {
                 .pointer("/runtime/approvalsReviewer")
                 .and_then(Value::as_str),
             Some("auto_review")
+        );
+        assert_eq!(
+            value
+                .pointer("/runtime/transportLogPath")
+                .and_then(Value::as_str),
+            Some("/tmp/demo/.voicecoder/agent_run_run-1_app_server.jsonl")
         );
     }
 

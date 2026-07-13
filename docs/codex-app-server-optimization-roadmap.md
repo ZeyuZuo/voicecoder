@@ -125,18 +125,20 @@ Demo 生成中 · 01:24
 
 目标：正确区分 response、notification 和 app-server 主动 request，消除协议层假死。
 
-- [ ] 1.1 将 stdout 读取改为单一持续 reader，所有 JSONL 消息只在一个地方解析。
-- [ ] 1.2 按消息形态路由：
+完成日期：2026-07-13
+
+- [x] 1.1 将 stdout 读取改为单一持续 reader，所有 JSONL 消息只在一个地方解析。
+- [x] 1.2 按消息形态路由：
   - `id + result/error`：VoiceCoder request 的 response。
   - `method + params`：notification。
   - `id + method + params`：app-server 主动 server request。
-- [ ] 1.3 用 pending request map 匹配 VoiceCoder 发出的 JSON-RPC request。
-- [ ] 1.4 为 notification 建立独立事件 channel，不因未知事件阻塞 stdout reader。
-- [ ] 1.5 为 server request 建立处理 channel 和超时策略。
-- [ ] 1.6 持续消费 app-server stderr，并写入诊断日志。
-- [ ] 1.7 子进程退出时携带 exit code、最后 stderr 和最后协议消息。
-- [ ] 1.8 未识别消息不得丢弃：写入原始日志并发出低优先级 diagnostic event。
-- [ ] 1.9 增加 heartbeat 信息：最后收到消息时间、最后有效进展时间。
+- [x] 1.3 用 pending request map 匹配 VoiceCoder 发出的 JSON-RPC request。
+- [x] 1.4 为 notification 建立独立事件 channel，不因未知事件阻塞 stdout reader。
+- [x] 1.5 为 server request 建立处理 channel 和超时策略。
+- [x] 1.6 持续消费 app-server stderr，并写入诊断日志。
+- [x] 1.7 子进程退出时携带 exit code、最后 stderr 和最后协议消息。
+- [x] 1.8 未识别消息不得丢弃：写入原始日志并发出低优先级 diagnostic event。
+- [x] 1.9 增加 heartbeat 信息：最后收到消息时间、最后有效进展时间。
 
 退出标准：
 

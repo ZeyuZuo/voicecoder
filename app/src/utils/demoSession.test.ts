@@ -110,7 +110,8 @@ test("agent run start records Codex runtime and silent approval settings", () =>
       transport: "stdio",
       sandbox: "workspace-write",
       approvalPolicy: "on-request",
-      approvalsReviewer: "auto_review"
+      approvalsReviewer: "auto_review",
+      transportLogPath: "/tmp/demo/.voicecoder/agent_run_run-1_app_server.jsonl"
     },
     now: "3"
   });
@@ -123,7 +124,8 @@ test("agent run start records Codex runtime and silent approval settings", () =>
     transport: "stdio",
     sandbox: "workspace-write",
     approvalPolicy: "on-request",
-    approvalsReviewer: "auto_review"
+    approvalsReviewer: "auto_review",
+    transportLogPath: "/tmp/demo/.voicecoder/agent_run_run-1_app_server.jsonl"
   });
 });
 

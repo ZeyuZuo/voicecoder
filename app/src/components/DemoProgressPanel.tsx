@@ -116,6 +116,10 @@ function AgentEventIcon({ event }: { event: AgentEvent }) {
     return <XCircle size={15} />;
   }
 
+  if (event.type === "diagnostic") {
+    return event.level === "error" ? <XCircle size={15} /> : <Bot size={15} />;
+  }
+
   return <Bot size={15} />;
 }
 
@@ -153,6 +157,10 @@ function formatAgentEvent(event: AgentEvent) {
 
   if (event.type === "turn_completed") {
     return compactText(event.finalMessage ?? "本轮已完成");
+  }
+
+  if (event.type === "diagnostic") {
+    return compactText(event.method ? `${event.message} · ${event.method}` : event.message);
   }
 
   return event.message;

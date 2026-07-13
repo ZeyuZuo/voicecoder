@@ -331,6 +331,7 @@ export type CodingAgentRuntimeMetadata = {
   sandbox: string;
   approvalPolicy?: string;
   approvalsReviewer?: string;
+  transportLogPath?: string;
 };
 
 export type AgentEvent =
@@ -359,6 +360,13 @@ export type AgentEvent =
       status: string;
       action?: string;
       rationale?: string;
+      createdAt: string;
+    }
+  | {
+      type: "diagnostic";
+      level: string;
+      message: string;
+      method?: string;
       createdAt: string;
     }
   | {
