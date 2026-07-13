@@ -4,7 +4,6 @@
   "params": {
     "threadId": "thread-fixture",
     "cwd": "/tmp/voicecoder-demo",
-    "runtimeWorkspaceRoots": ["/tmp/voicecoder-demo"],
     "sandboxPolicy": {
       "type": "workspaceWrite",
       "writableRoots": ["/tmp/voicecoder-demo"],

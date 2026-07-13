@@ -11,12 +11,13 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "schema:codex-app-server": "node scripts/generate-codex-app-server-schema.mjs",
+    "schema:check-codex-app-server": "node scripts/check-codex-app-server-schema.mjs",
     "diagnose:iflytek": "node scripts/diagnose-iflytek-handshake.mjs",
     "typecheck": "tsc --noEmit",
     "test:unit": "node --test dist-tests/requirementState.test.mjs dist-tests/demoSession.test.mjs dist-tests/agentProgress.test.mjs dist-tests/DemoProgressPanel.test.mjs",
     "pretest:unit": "esbuild src/utils/requirementState.test.ts src/utils/demoSession.test.ts src/utils/agentProgress.test.ts src/components/DemoProgressPanel.test.tsx --bundle --platform=node --format=esm --packages=external --outdir=dist-tests --out-extension:.js=.mjs --entry-names=[name]",
     "check:rust": "cd src-tauri && cargo fmt -- --check && cargo check && cargo test",
-    "check": "npm run typecheck && npm run test:unit && npm run build && npm run check:rust"
+    "check": "npm run typecheck && npm run schema:check-codex-app-server && npm run test:unit && npm run build && npm run check:rust"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",

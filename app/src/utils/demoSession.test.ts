@@ -9,7 +9,8 @@ import {
   demoSessionReducer,
   demoSessionStoreReducer,
   detectDevServerOutputIssue,
-  formatDevServerPreviewError
+  formatDevServerPreviewError,
+  recoverDemoSessionSnapshot
 } from "./demoSession";
 
 test("creates a demo session that is ready to start", () => {
@@ -64,6 +65,74 @@ test("store reducer keeps the same demo session for duplicate requirement input"
   });
 
   assert.equal(next, session);
+});
+
+test("store reducer restores a persisted demo session", () => {
+  const recovered = completeInitialBuild(createTestSession());
+  const next = demoSessionStoreReducer(undefined, {
+    type: "restore_demo_session",
+    session: recovered
+  });
+
+  assert.equal(next, recovered);
+  assert.equal(next?.runs[0].status, "succeeded");
+});
+
+test("recovery preserves structured items and the Codex thread id for an active run", () => {
+  let running = startTestRun();
+  running = demoSessionReducer(running, {
+    type: "append_agent_event",
+    runId: "run-1",
+    event: completedItem("file-1", "fileChange", {
+      id: "file-1",
+      type: "fileChange",
+      status: "completed",
+      changes: [{ path: "/tmp/demo/src/App.tsx", kind: "update", diff: "+hello" }]
+    }),
+    now: "3"
+  });
+  const snapshot = {
+    ...running,
+    codexThreadId: "thread-restore",
+    runs: running.runs.map((run) => ({ ...run, codexThreadId: "thread-restore" }))
+  };
+
+  const recovered = recoverDemoSessionSnapshot(snapshot, new Set(["run-1"]), "4");
+
+  assert.equal(recovered?.status, "agent_running");
+  assert.equal(recovered?.codexThreadId, "thread-restore");
+  assert.equal(recovered?.recoveredAt, "4");
+  assert.equal(recovered?.runs[0].itemsById["file-1"].lifecycle, "completed");
+  assert.deepEqual(recovered?.runs[0].itemOrder, ["file-1"]);
+});
+
+test("recovery rebuilds legacy flat events into items and settles a dead run", () => {
+  const running = startTestRun();
+  const event = completedItem("command-1", "commandExecution", {
+    id: "command-1",
+    type: "commandExecution",
+    status: "completed",
+    command: "npm test",
+    aggregatedOutput: "ok"
+  });
+  const legacySnapshot = {
+    ...running,
+    runs: running.runs.map((run) => ({
+      ...run,
+      events: [event],
+      itemsById: undefined,
+      itemOrder: undefined,
+      messagesByItemId: undefined,
+      filesByPath: undefined
+    }))
+  };
+
+  const recovered = recoverDemoSessionSnapshot(legacySnapshot, new Set(), "4");
+
+  assert.equal(recovered?.status, "error");
+  assert.equal(recovered?.runs[0].status, "failed");
+  assert.ok(/本地日志恢复时间线/.test(recovered?.runs[0].error ?? ""));
+  assert.equal(recovered?.runs[0].itemsById["command-1"].command?.command, "npm test");
 });
 
 test("starts and completes the initial build run", () => {

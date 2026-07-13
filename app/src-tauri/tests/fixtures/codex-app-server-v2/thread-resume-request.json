@@ -1,11 +1,11 @@
 {
-  "method": "thread/start",
-  "id": 1,
+  "method": "thread/resume",
+  "id": 3,
   "params": {
+    "threadId": "thread-fixture",
     "cwd": "/tmp/voicecoder-demo",
     "approvalPolicy": "on-request",
     "approvalsReviewer": "auto_review",
-    "sandbox": "workspace-write",
-    "threadSource": "user"
+    "sandbox": "workspace-write"
   }
 }

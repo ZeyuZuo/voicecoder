@@ -497,11 +497,13 @@ fn mcp_elicitation_response_keeps_content_out_of_transport_log() {
 fn request_registry_routes_resolutions_and_removes_finished_runs() {
     let state = CodingAgentRequestState::default();
     let receiver = state.register("run-request-test").unwrap();
+    assert_eq!(state.is_active("run-request-test"), Ok(true));
     state
         .resolve("run-request-test", test_resolution(json!(42), "decline"))
         .unwrap();
     assert_eq!(receiver.recv().unwrap().request_id, json!(42));
     state.unregister("run-request-test");
+    assert_eq!(state.is_active("run-request-test"), Ok(false));
     assert!(state
         .resolve("run-request-test", test_resolution(json!(42), "decline"),)
         .is_err());
@@ -536,25 +538,76 @@ fn test_resolution(request_id: Value, action: &str) -> ServerRequestResolution {
 }
 
 #[test]
-fn transport_log_records_jsonl_and_sanitizes_run_id() {
+fn transport_log_records_redacted_jsonl_and_sanitizes_run_id() {
     let root = std::env::temp_dir().join(format!(
         "voicecoder-transport-log-{}-{}",
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     ));
     fs::create_dir_all(&root).unwrap();
-    let log =
-        AppServerTransportLog::create(root.to_string_lossy().as_ref(), "run/with unsafe chars")
-            .unwrap();
+    let log = AgentRunTransportLog::create(
+        root.to_string_lossy().as_ref(),
+        "run/with unsafe chars",
+        "app_server",
+    )
+    .unwrap();
     let log_path = log.path.clone();
 
-    log.record("inbound", "message", json!({ "method": "turn/started" }))
-        .unwrap();
+    log.record(
+        "inbound",
+        "message",
+        json!({
+            "method": "turn/started",
+            "authorization": "Bearer protocol-secret",
+            "nested": { "apiKey": "sk-example-secret-value" }
+        }),
+    )
+    .unwrap();
+    log.record(
+        "outbound",
+        "request",
+        json!({
+            "method": "turn/start",
+            "params": { "input": [{ "type": "text", "text": "private prompt body" }] }
+        }),
+    )
+    .unwrap();
+    log.record(
+        "inbound",
+        "stderr",
+        json!("OPENAI_API_KEY=sk-stderr-secret-value"),
+    )
+    .unwrap();
+    log.record_process_exit(
+        None,
+        "spawn_failed",
+        Some("Authorization: Bearer process-secret"),
+        &["API_KEY=sk-exit-secret-value".to_string()],
+    );
     let content = fs::read_to_string(&log_path).unwrap();
 
     assert!(log_path.ends_with("agent_run_run_with_unsafe_chars_app_server.jsonl"));
     assert!(content.contains("\"direction\":\"inbound\""));
     assert!(content.contains("\"method\":\"turn/started\""));
+    assert!(content.contains("[REDACTED_CREDENTIAL]"));
+    assert!(content.contains("[REDACTED_CREDENTIAL_TEXT]"));
+    assert!(content.contains("[REDACTED_USER_INPUT]"));
+    assert!(content.contains("\"kind\":\"process_exit\""));
+    assert!(content.contains("\"reason\":\"spawn_failed\""));
+    assert!(!content.contains("protocol-secret"));
+    assert!(!content.contains("sk-example-secret-value"));
+    assert!(!content.contains("sk-stderr-secret-value"));
+    assert!(!content.contains("process-secret"));
+    assert!(!content.contains("sk-exit-secret-value"));
+    assert!(!content.contains("private prompt body"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&log_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     drop(log);
     fs::remove_dir_all(root).unwrap();
@@ -579,6 +632,35 @@ fn heartbeat_tracks_last_message_and_effective_progress() {
         snapshot.last_progress_at.as_deref(),
         Some("2026-07-13T00:00:01Z")
     );
+}
+
+#[test]
+fn heartbeat_diagnostic_context_does_not_retain_credentials() {
+    let heartbeat = SharedAppServerHeartbeat::default();
+    heartbeat.record_message(
+        &json!({
+            "method": "account/updated",
+            "params": { "accessToken": "secret-access-token" }
+        }),
+        "2026-07-13T00:00:00Z",
+    );
+    let snapshot = heartbeat.snapshot();
+    let message = snapshot.last_message.unwrap();
+
+    assert!(message.contains("[REDACTED_CREDENTIAL]"));
+    assert!(!message.contains("secret-access-token"));
+}
+
+#[test]
+fn codex_protocol_version_comparison_warns_only_for_unverified_versions() {
+    assert_eq!(
+        codex_protocol_compatibility(CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION),
+        "verified"
+    );
+    assert!(codex_protocol_version_warning(CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION).is_none());
+    let warning = codex_protocol_version_warning("codex-cli 0.145.0").unwrap();
+    assert!(warning.contains("codex-cli 0.145.0"));
+    assert!(warning.contains(CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION));
 }
 
 #[test]
@@ -744,12 +826,7 @@ fn builds_thread_start_params_with_cwd_and_workspace_sandbox() {
         params.get("approvalsReviewer").and_then(Value::as_str),
         Some("auto_review")
     );
-    assert_eq!(
-        params
-            .pointer("/runtimeWorkspaceRoots/0")
-            .and_then(Value::as_str),
-        Some("/tmp/voicecoder-demo")
-    );
+    assert!(params.get("runtimeWorkspaceRoots").is_none());
     assert_eq!(
         params.get("threadSource").and_then(Value::as_str),
         Some("user")
@@ -802,6 +879,20 @@ fn builds_turn_start_params_with_thread_cwd_prompt_and_sandbox_policy() {
             .and_then(Value::as_str),
         Some("/tmp/voicecoder-demo")
     );
+}
+
+#[test]
+fn builds_thread_resume_params_from_the_persisted_codex_thread_id() {
+    let params = build_thread_resume_params(
+        "thread-fixture",
+        "/tmp/voicecoder-demo",
+        CodingAgentSandboxMode::WorkspaceWrite,
+        CodingAgentPermissionSettings::default(),
+    );
+    let fixture: Value = serde_json::from_str(THREAD_RESUME_REQUEST_FIXTURE).unwrap();
+
+    assert_eq!(params, fixture["params"]);
+    assert_eq!(params["threadId"], "thread-fixture");
 }
 
 #[test]

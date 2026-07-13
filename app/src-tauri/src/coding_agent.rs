@@ -2,19 +2,15 @@
 
 use crate::env_config::read_local_env;
 use chrono::Utc;
-use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    io::{BufRead, BufReader},
-    process::{Child, ChildStdout, Command, Stdio},
-    sync::mpsc::Receiver,
-    thread,
-    time::Duration,
-};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
+use std::{collections::BTreeMap, process::Command, sync::mpsc::Receiver, thread, time::Duration};
 use tauri::{AppHandle, Emitter, State};
 
 mod model;
 mod protocol;
+mod session;
 #[cfg(test)]
 mod tests;
 mod transport;
@@ -22,9 +18,12 @@ mod transport;
 pub(crate) use model::CodingAgentRequestState;
 use model::*;
 use protocol::*;
+use session::*;
+#[cfg(test)]
 use transport::*;
 
 const DEFAULT_CODEX_BIN: &str = "codex";
+const CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION: &str = "codex-cli 0.144.1";
 const FIRST_APP_SERVER_REQUEST_ID: u64 = 0;
 const DEFAULT_CODEX_SANDBOX: CodingAgentSandboxMode = CodingAgentSandboxMode::WorkspaceWrite;
 const CODEX_APP_SERVER_TRANSPORT: &str = "stdio";
@@ -198,7 +197,8 @@ impl CodingAgentProvider for CodexExecJsonProvider {
         context: CodingAgentStartContext,
     ) -> Result<Box<dyn CodingAgentSession + Send>, String> {
         self.validate_start()?;
-        Ok(Box::new(start_codex_exec_json_session(context)?))
+        let log_id = format!("provider-{}", Utc::now().timestamp_millis());
+        Ok(Box::new(start_codex_exec_json_session(context, &log_id)?))
     }
 }
 
@@ -260,6 +260,14 @@ pub fn resolve_coding_agent_server_request(
             scope: request.scope,
         },
     )
+}
+
+#[tauri::command]
+pub fn is_coding_agent_run_active(
+    request_state: State<'_, CodingAgentRequestState>,
+    run_id: String,
+) -> Result<bool, String> {
+    request_state.is_active(&run_id)
 }
 
 fn validate_start_initial_demo_run_request(
@@ -372,6 +380,9 @@ fn run_app_server_demo_agent(
                         .to_string(),
                 ),
                 transport_log_path: Some(session.client.log_path().to_string()),
+                protocol_baseline_version: CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION.to_string(),
+                protocol_compatibility: codex_protocol_compatibility(&session.codex_version)
+                    .to_string(),
             },
             started_at: current_agent_event_timestamp(),
         },
@@ -429,7 +440,7 @@ fn run_codex_exec_json_demo_agent(
         prompt: request.prompt.clone(),
         sandbox: request.sandbox,
     };
-    let mut session = start_codex_exec_json_session(context)?;
+    let mut session = start_codex_exec_json_session(context, &request.run_id)?;
 
     emit_agent_run_started(
         &app,
@@ -459,7 +470,10 @@ fn run_codex_exec_json_demo_agent(
                         .as_str()
                         .to_string(),
                 ),
-                transport_log_path: None,
+                transport_log_path: Some(session.transport_log.path.clone()),
+                protocol_baseline_version: CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION.to_string(),
+                protocol_compatibility: codex_protocol_compatibility(&session.codex_version)
+                    .to_string(),
             },
             started_at: current_agent_event_timestamp(),
         },
@@ -566,6 +580,18 @@ fn codex_diagnostic<const N: usize>(
             "PATH".to_string()
         },
     );
+    detail_map.insert(
+        "protocolBaselineVersion".to_string(),
+        CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION.to_string(),
+    );
+    detail_map.insert(
+        "protocolCompatibility".to_string(),
+        version
+            .as_deref()
+            .map(codex_protocol_compatibility)
+            .unwrap_or("unavailable")
+            .to_string(),
+    );
 
     CodingAgentProviderDiagnostic {
         provider,
@@ -600,6 +626,22 @@ fn validate_codex_executable() -> Result<String, String> {
     }
 
     Ok(stdout)
+}
+
+fn codex_protocol_compatibility(version: &str) -> &'static str {
+    if version.trim() == CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION {
+        "verified"
+    } else {
+        "version-mismatch"
+    }
+}
+
+fn codex_protocol_version_warning(version: &str) -> Option<String> {
+    (codex_protocol_compatibility(version) != "verified").then(|| {
+        format!(
+            "当前 Codex CLI 为 `{version}`，VoiceCoder app-server 协议基线为 `{CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION}`。未知事件会降级记录；请重新生成 schema 并运行协议兼容检查。"
+        )
+    })
 }
 
 fn codex_executable() -> String {
@@ -644,173 +686,6 @@ fn apply_permission_settings_to_diagnostic(diagnostic: &mut CodingAgentProviderD
                 None => error,
             });
         }
-    }
-}
-
-struct CodexExecJsonSession {
-    child: Child,
-    stdout: BufReader<ChildStdout>,
-    sandbox: CodingAgentSandboxMode,
-    permission_settings: CodingAgentPermissionSettings,
-    codex_version: String,
-}
-
-impl CodingAgentSession for CodexExecJsonSession {
-    fn cancel(&mut self) -> Result<(), String> {
-        if self
-            .child
-            .try_wait()
-            .map_err(|error| format!("检查 Codex exec --json 子进程状态失败：{error}"))?
-            .is_none()
-        {
-            self.child
-                .kill()
-                .map_err(|error| format!("停止 Codex exec --json 失败：{error}"))?;
-        }
-        let _ = self.child.wait();
-        Ok(())
-    }
-}
-
-impl CodexExecJsonSession {
-    fn read_next_agent_events(&mut self) -> Result<Vec<AgentEvent>, String> {
-        loop {
-            let mut line = String::new();
-            let read_bytes = self
-                .stdout
-                .read_line(&mut line)
-                .map_err(|error| format!("读取 Codex exec --json stdout 失败：{error}"))?;
-            if read_bytes == 0 {
-                let status = self
-                    .child
-                    .wait()
-                    .map_err(|error| format!("等待 Codex exec --json 退出失败：{error}"))?;
-                if status.success() {
-                    return Ok(vec![AgentEvent::TurnCompleted {
-                        thread_id: None,
-                        turn_id: None,
-                        status: "completed".to_string(),
-                        final_message: None,
-                        created_at: current_agent_event_timestamp(),
-                    }]);
-                }
-
-                return Err(format!(
-                    "Codex exec --json 已退出，退出码：{}。",
-                    format_exit_status(status)
-                ));
-            }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let message = serde_json::from_str::<Value>(trimmed)
-                .map_err(|error| format!("Codex exec --json 输出不是合法 JSON：{error}"))?;
-            let events = normalize_codex_exec_json_event(&message);
-            if !events.is_empty() {
-                return Ok(events);
-            }
-        }
-    }
-}
-
-fn start_codex_exec_json_session(
-    context: CodingAgentStartContext,
-) -> Result<CodexExecJsonSession, String> {
-    validate_coding_agent_start_context(&context)?;
-    let codex_version = validate_codex_executable()?;
-    let permission_settings = resolve_coding_agent_permission_settings()?;
-    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
-
-    let executable = codex_executable();
-    let args = build_codex_exec_json_args(&context, permission_settings);
-    let mut child = Command::new(&executable)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("启动 Codex exec --json 失败：{error}"))?;
-
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        return Err("Codex exec --json stdout 不可用。".to_string());
-    };
-
-    Ok(CodexExecJsonSession {
-        child,
-        stdout: BufReader::new(stdout),
-        sandbox,
-        permission_settings,
-        codex_version,
-    })
-}
-
-fn build_codex_exec_json_args(
-    context: &CodingAgentStartContext,
-    permission_settings: CodingAgentPermissionSettings,
-) -> Vec<String> {
-    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
-    vec![
-        "--ask-for-approval".to_string(),
-        permission_settings.approval_policy.as_str().to_string(),
-        "--config".to_string(),
-        format!(
-            "approvals_reviewer=\"{}\"",
-            permission_settings.approvals_reviewer.as_str()
-        ),
-        "exec".to_string(),
-        "--json".to_string(),
-        "--sandbox".to_string(),
-        sandbox.codex_exec_sandbox_arg().to_string(),
-        "--cd".to_string(),
-        context.project_path.clone(),
-        context.prompt.clone(),
-    ]
-}
-
-#[allow(dead_code)]
-struct CodexAppServerSession {
-    child: Child,
-    client: CodexAppServerClient,
-    project_path: String,
-    sandbox: CodingAgentSandboxMode,
-    permission_settings: CodingAgentPermissionSettings,
-    codex_version: String,
-    codex_thread_id: String,
-    initial_turn_id: String,
-    initial_prompt: String,
-}
-
-impl CodingAgentSession for CodexAppServerSession {
-    fn cancel(&mut self) -> Result<(), String> {
-        let _ = self.client.cancel_pending_server_requests();
-        let stop_result = if self
-            .child
-            .try_wait()
-            .map_err(|error| format!("检查 Codex app-server 子进程状态失败：{error}"))?
-            .is_none()
-        {
-            self.child
-                .kill()
-                .map_err(|error| format!("停止 Codex app-server 失败：{error}"))
-        } else {
-            Ok(())
-        };
-        let _ = self.child.wait();
-        self.client.join_readers();
-        stop_result
-    }
-}
-
-impl CodexAppServerSession {
-    fn take_pending_agent_events(&mut self) -> Vec<AgentEvent> {
-        self.client.take_pending_agent_events()
-    }
-
-    fn read_next_agent_events(&mut self) -> Result<Vec<AgentEvent>, String> {
-        self.client.read_next_agent_events(&mut self.child)
     }
 }
 
@@ -950,192 +825,4 @@ fn emit_agent_error(
             occurred_at: current_agent_event_timestamp(),
         },
     );
-}
-
-fn start_codex_app_server_session(
-    context: CodingAgentStartContext,
-    run_id: &str,
-    request_receiver: Option<Receiver<ServerRequestResolution>>,
-) -> Result<CodexAppServerSession, String> {
-    validate_coding_agent_start_context(&context)?;
-    let codex_version = validate_codex_executable()?;
-    let permission_settings = resolve_coding_agent_permission_settings()?;
-    let transport_log = AppServerTransportLog::create(&context.project_path, run_id)?;
-
-    let executable = codex_executable();
-    let mut child = Command::new(&executable)
-        .args(["app-server", "--stdio"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("启动 Codex app-server 失败：{error}"))?;
-
-    let Some(stdin) = child.stdin.take() else {
-        let _ = child.kill();
-        return Err("Codex app-server stdin 不可用。".to_string());
-    };
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        return Err("Codex app-server stdout 不可用。".to_string());
-    };
-    let Some(stderr) = child.stderr.take() else {
-        let _ = child.kill();
-        return Err("Codex app-server stderr 不可用。".to_string());
-    };
-    let mut client = CodexAppServerClient::new(
-        stdin,
-        stdout,
-        stderr,
-        transport_log,
-        request_receiver,
-        permission_settings.approvals_reviewer,
-    );
-    if let Err(error) = initialize_codex_app_server(&mut child, &mut client) {
-        let error = cleanup_child_with_error(&mut child, error);
-        client.join_readers();
-        return Err(error);
-    }
-    let run_handles =
-        match start_initial_codex_turn(&mut child, &mut client, &context, permission_settings) {
-            Ok(run_handles) => run_handles,
-            Err(error) => {
-                let error = cleanup_child_with_error(&mut child, error);
-                client.join_readers();
-                return Err(error);
-            }
-        };
-    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
-
-    Ok(CodexAppServerSession {
-        child,
-        client,
-        project_path: context.project_path,
-        sandbox,
-        permission_settings,
-        codex_version,
-        codex_thread_id: run_handles.thread_id,
-        initial_turn_id: run_handles.turn_id,
-        initial_prompt: context.prompt,
-    })
-}
-
-fn validate_coding_agent_start_context(context: &CodingAgentStartContext) -> Result<(), String> {
-    if context.project_path.trim().is_empty() {
-        return Err("Coding Agent 启动失败：项目路径不能为空。".to_string());
-    }
-    if context.prompt.trim().is_empty() {
-        return Err("Coding Agent 启动失败：prompt 不能为空。".to_string());
-    }
-    Ok(())
-}
-
-fn cleanup_child_with_error(child: &mut Child, error: String) -> String {
-    let _ = child.kill();
-    let _ = child.wait();
-    error
-}
-
-fn initialize_codex_app_server(
-    child: &mut Child,
-    client: &mut CodexAppServerClient,
-) -> Result<(), String> {
-    client.send_request(child, "initialize", initialize_params())?;
-    client.send_notification("initialized", json!({}))?;
-    Ok(())
-}
-
-fn initialize_params() -> Value {
-    json!({
-        "clientInfo": {
-            "name": "voicecoder",
-            "title": "VoiceCoder",
-            "version": env!("CARGO_PKG_VERSION")
-        },
-        "capabilities": {
-            "experimentalApi": true,
-            "requestAttestation": false
-        }
-    })
-}
-
-struct CodexAppServerRunHandles {
-    thread_id: String,
-    turn_id: String,
-}
-
-fn start_initial_codex_turn(
-    child: &mut Child,
-    client: &mut CodexAppServerClient,
-    context: &CodingAgentStartContext,
-    permission_settings: CodingAgentPermissionSettings,
-) -> Result<CodexAppServerRunHandles, String> {
-    let sandbox = context.sandbox.unwrap_or(DEFAULT_CODEX_SANDBOX);
-    let thread_response = client.send_request(
-        child,
-        "thread/start",
-        build_thread_start_params(&context.project_path, sandbox, permission_settings),
-    )?;
-    let thread_id = extract_json_pointer_string(
-        &thread_response,
-        "/result/thread/id",
-        "Codex app-server thread/start 响应缺少 thread.id。",
-    )?;
-
-    let turn_response = client.send_request(
-        child,
-        "turn/start",
-        build_turn_start_params(
-            &thread_id,
-            &context.project_path,
-            sandbox,
-            permission_settings,
-            &context.prompt,
-        ),
-    )?;
-    let turn_id = extract_json_pointer_string(
-        &turn_response,
-        "/result/turn/id",
-        "Codex app-server turn/start 响应缺少 turn.id。",
-    )?;
-
-    Ok(CodexAppServerRunHandles { thread_id, turn_id })
-}
-
-fn build_thread_start_params(
-    project_path: &str,
-    sandbox: CodingAgentSandboxMode,
-    permission_settings: CodingAgentPermissionSettings,
-) -> Value {
-    json!({
-        "cwd": project_path,
-        "runtimeWorkspaceRoots": [project_path],
-        "approvalPolicy": permission_settings.approval_policy.as_str(),
-        "approvalsReviewer": permission_settings.approvals_reviewer.as_str(),
-        "sandbox": sandbox.app_server_thread_sandbox(),
-        "threadSource": "user"
-    })
-}
-
-fn build_turn_start_params(
-    thread_id: &str,
-    project_path: &str,
-    sandbox: CodingAgentSandboxMode,
-    permission_settings: CodingAgentPermissionSettings,
-    prompt: &str,
-) -> Value {
-    json!({
-        "threadId": thread_id,
-        "cwd": project_path,
-        "runtimeWorkspaceRoots": [project_path],
-        "sandboxPolicy": sandbox.app_server_turn_sandbox_policy(project_path),
-        "approvalPolicy": permission_settings.approval_policy.as_str(),
-        "approvalsReviewer": permission_settings.approvals_reviewer.as_str(),
-        "input": [
-            {
-                "type": "text",
-                "text": prompt
-            }
-        ]
-    })
 }

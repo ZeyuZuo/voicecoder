@@ -471,6 +471,13 @@ impl CodingAgentRequestState {
         }
     }
 
+    pub(super) fn is_active(&self, run_id: &str) -> Result<bool, String> {
+        self.responders
+            .lock()
+            .map(|responders| responders.contains_key(run_id))
+            .map_err(|_| "Coding Agent 请求响应注册表已损坏。".to_string())
+    }
+
     pub(super) fn resolve(
         &self,
         run_id: &str,
@@ -512,6 +519,8 @@ pub(super) struct CodingAgentRuntimeMetadata {
     pub(super) approval_policy: Option<String>,
     pub(super) approvals_reviewer: Option<String>,
     pub(super) transport_log_path: Option<String>,
+    pub(super) protocol_baseline_version: String,
+    pub(super) protocol_compatibility: String,
 }
 
 #[derive(Clone, Serialize)]

@@ -67,6 +67,17 @@ function completedItemEvent(
   };
 }
 
+test("labels a timeline restored from the local DemoSession log", () => {
+  const session = {
+    ...createRunningTestSession("run-recovered"),
+    recoveredAt: "2026-07-13T01:01:00Z"
+  };
+
+  const html = renderToStaticMarkup(<DemoProgressPanel session={session} />);
+
+  assertMatches(html, /已恢复本地时间线/);
+});
+
 test("renders live file stats and completed command metadata from Agent items", () => {
   const session = createDemoSession({
     projectPath: "/tmp/demo",

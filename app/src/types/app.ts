@@ -332,6 +332,8 @@ export type CodingAgentRuntimeMetadata = {
   approvalPolicy?: string;
   approvalsReviewer?: string;
   transportLogPath?: string;
+  protocolBaselineVersion?: string;
+  protocolCompatibility?: "verified" | "version-mismatch" | string;
 };
 
 export type AgentMessagePhase = "commentary" | "final_answer" | "unknown";
@@ -896,6 +898,7 @@ export type DemoSession = {
   currentPreviewUrl?: string;
   status: DemoSessionStatus;
   error?: string;
+  recoveredAt?: string;
   createdAt: string;
   updatedAt: string;
 };

@@ -756,6 +756,8 @@ fn serializes_agent_run_started_runtime_for_session_logs() {
             transport_log_path: Some(
                 "/tmp/demo/.voicecoder/agent_run_run-1_app_server.jsonl".to_string(),
             ),
+            protocol_baseline_version: CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION.to_string(),
+            protocol_compatibility: "verified".to_string(),
         },
         started_at: "2026-07-13T00:00:00Z".to_string(),
     })
@@ -776,6 +778,18 @@ fn serializes_agent_run_started_runtime_for_session_logs() {
             .pointer("/runtime/approvalsReviewer")
             .and_then(Value::as_str),
         Some("auto_review")
+    );
+    assert_eq!(
+        value
+            .pointer("/runtime/protocolBaselineVersion")
+            .and_then(Value::as_str),
+        Some(CODEX_APP_SERVER_PROTOCOL_BASELINE_VERSION)
+    );
+    assert_eq!(
+        value
+            .pointer("/runtime/protocolCompatibility")
+            .and_then(Value::as_str),
+        Some("verified")
     );
     assert_eq!(
         value

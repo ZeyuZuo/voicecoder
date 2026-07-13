@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 mod coding_agent;
+mod demo_session_log;
 mod dev_server;
 mod env_config;
 mod llm;
+mod log_sanitizer;
 mod voice;
 
 #[derive(Serialize)]
@@ -25,22 +27,9 @@ struct SaveRequirementDocumentRequest {
     coding_prompt: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SaveDemoSessionLogRequest {
-    project_path: String,
-    demo_session: serde_json::Value,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedRequirementDocument {
-    path: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SavedDemoSessionLog {
     path: String,
 }
 
@@ -104,42 +93,6 @@ fn save_requirement_document(
 
     Ok(SavedRequirementDocument {
         path: document_path.to_string_lossy().to_string(),
-    })
-}
-
-#[tauri::command]
-fn save_demo_session_log(
-    request: SaveDemoSessionLogRequest,
-) -> Result<SavedDemoSessionLog, String> {
-    let project_root = Path::new(&request.project_path);
-    if !project_root.is_dir() {
-        return Err("当前项目路径不是有效文件夹，无法写入 DemoSession 日志。".to_string());
-    }
-
-    let voicecoder_dir = project_root.join(".voicecoder");
-    fs::create_dir_all(&voicecoder_dir)
-        .map_err(|error| format!("创建 .voicecoder 目录失败：{error}"))?;
-
-    let session_id = request
-        .demo_session
-        .pointer("/id")
-        .and_then(serde_json::Value::as_str)
-        .map(sanitize_log_file_stem)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| Local::now().format("%Y%m%d_%H%M%S_%3f").to_string());
-    let log_path = voicecoder_dir.join(format!("demo_session_{session_id}.json"));
-    let log_payload = serde_json::json!({
-        "savedAt": Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        "demoSession": request.demo_session
-    });
-    let log_json = serde_json::to_string_pretty(&log_payload)
-        .map_err(|error| format!("序列化 DemoSession 日志失败：{error}"))?;
-
-    fs::write(&log_path, format!("{log_json}\n"))
-        .map_err(|error| format!("写入 DemoSession 日志失败：{error}"))?;
-
-    Ok(SavedDemoSessionLog {
-        path: log_path.to_string_lossy().to_string(),
     })
 }
 
@@ -235,19 +188,6 @@ fn build_requirement_markdown(request: &SaveRequirementDocumentRequest) -> Strin
     format!("{}\n", sections.join("\n\n"))
 }
 
-fn sanitize_log_file_stem(value: &str) -> String {
-    value
-        .chars()
-        .map(|char| {
-            if char.is_ascii_alphanumeric() || matches!(char, '-' | '_') {
-                char
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 pub fn run() {
     install_rustls_crypto_provider();
 
@@ -261,7 +201,8 @@ pub fn run() {
             read_project_tree,
             read_git_branch,
             save_requirement_document,
-            save_demo_session_log,
+            demo_session_log::save_demo_session_log,
+            demo_session_log::load_latest_demo_session_log,
             dev_server::get_dev_server_snapshot,
             dev_server::get_dev_server_diagnostic,
             dev_server::start_demo_dev_server,
@@ -271,6 +212,7 @@ pub fn run() {
             voice::get_voice_provider_status,
             coding_agent::get_coding_agent_provider_status,
             coding_agent::start_initial_demo_run,
+            coding_agent::is_coding_agent_run_active,
             coding_agent::resolve_coding_agent_server_request,
             llm::get_llm_provider_status,
             llm::test_llm_provider_connection,

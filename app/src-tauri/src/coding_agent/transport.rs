@@ -11,6 +11,7 @@ use super::{
     APP_SERVER_TRANSPORT_POLL_INTERVAL, APP_SERVER_USER_DECISION_TIMEOUT,
     FIRST_APP_SERVER_REQUEST_ID,
 };
+use crate::log_sanitizer::sanitize_json_for_log;
 use chrono::Utc;
 use serde_json::{json, Map, Value};
 mod server_requests;
@@ -21,7 +22,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::Path,
-    process::{Child, ChildStderr, ChildStdin, ChildStdout},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus},
     sync::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
         Arc, Mutex,
@@ -110,7 +111,7 @@ impl SharedAppServerHeartbeat {
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
             heartbeat.last_message = Some(truncate_transport_text(
-                &message.to_string(),
+                &sanitize_json_for_log(message).to_string(),
                 APP_SERVER_LAST_MESSAGE_LIMIT,
             ));
         }
@@ -128,27 +129,42 @@ impl SharedAppServerHeartbeat {
 }
 
 #[derive(Clone)]
-pub(super) struct AppServerTransportLog {
+pub(super) struct AgentRunTransportLog {
     pub(super) path: String,
     pub(super) file: Arc<Mutex<File>>,
 }
 
-impl AppServerTransportLog {
-    pub(super) fn create(project_path: &str, run_id: &str) -> Result<Self, String> {
+impl AgentRunTransportLog {
+    pub(super) fn create(
+        project_path: &str,
+        run_id: &str,
+        transport: &str,
+    ) -> Result<Self, String> {
         let voicecoder_dir = Path::new(project_path).join(".voicecoder");
         fs::create_dir_all(&voicecoder_dir)
             .map_err(|error| format!("创建 app-server 诊断目录失败：{error}"))?;
         let file_name = format!(
-            "agent_run_{}_app_server.jsonl",
-            sanitize_transport_log_stem(run_id)
+            "agent_run_{}_{}.jsonl",
+            sanitize_transport_log_stem(run_id),
+            sanitize_transport_log_stem(transport)
         );
         let path = voicecoder_dir.join(file_name);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&path)
             .map_err(|error| format!("创建 app-server 原始日志失败：{error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("限制 app-server 原始日志权限失败：{error}"))?;
+        }
 
         Ok(Self {
             path: path.to_string_lossy().to_string(),
@@ -161,7 +177,7 @@ impl AppServerTransportLog {
             "recordedAt": current_agent_event_timestamp(),
             "direction": direction,
             "kind": kind,
-            "payload": payload
+            "payload": sanitize_transport_log_payload(&payload)
         });
         let line = serde_json::to_string(&record)
             .map_err(|error| format!("序列化 app-server 原始日志失败：{error}"))?;
@@ -174,6 +190,40 @@ impl AppServerTransportLog {
             .and_then(|_| file.flush())
             .map_err(|error| format!("写入 app-server 原始日志失败：{error}"))
     }
+
+    pub(super) fn record_process_exit(
+        &self,
+        status: Option<&ExitStatus>,
+        reason: &str,
+        error: Option<&str>,
+        stderr_tail: &[String],
+    ) {
+        let _ = self.record(
+            "meta",
+            "process_exit",
+            json!({
+                "reason": reason,
+                "status": status.map(|status| format_exit_status(*status)),
+                "success": status.map(ExitStatus::success),
+                "error": error,
+                "stderrTail": stderr_tail
+            }),
+        );
+    }
+}
+
+fn sanitize_transport_log_payload(payload: &Value) -> Value {
+    let mut sanitized = sanitize_json_for_log(payload);
+    let method = payload.get("method").and_then(Value::as_str);
+    if matches!(
+        method,
+        Some("turn/start" | "turn/steer" | "thread/inject_items")
+    ) {
+        if let Some(input) = sanitized.pointer_mut("/params/input") {
+            *input = Value::String("[REDACTED_USER_INPUT]".to_string());
+        }
+    }
+    sanitized
 }
 
 #[allow(dead_code)]
@@ -184,7 +234,7 @@ pub(super) struct CodexAppServerClient {
     pub(super) stderr_reader: Option<thread::JoinHandle<()>>,
     pub(super) stderr_tail: Arc<Mutex<VecDeque<String>>>,
     pub(super) heartbeat: SharedAppServerHeartbeat,
-    pub(super) transport_log: AppServerTransportLog,
+    pub(super) transport_log: AgentRunTransportLog,
     pub(super) next_request_id: u64,
     pub(super) pending_responses: BTreeMap<u64, Value>,
     pub(super) pending_agent_events: VecDeque<AgentEvent>,
@@ -199,7 +249,7 @@ impl CodexAppServerClient {
         stdin: ChildStdin,
         stdout: ChildStdout,
         stderr: ChildStderr,
-        transport_log: AppServerTransportLog,
+        transport_log: AgentRunTransportLog,
         server_request_resolutions: Option<Receiver<ServerRequestResolution>>,
         approvals_reviewer: CodingAgentApprovalsReviewer,
     ) -> Self {
@@ -364,7 +414,7 @@ impl CodexAppServerClient {
                     level: "warning".to_string(),
                     message: format!(
                         "忽略一行无效 app-server JSON：{error} · {}",
-                        truncate_transport_text(&line, 240)
+                        truncate_transport_text(&sanitize_transport_text(&line), 240)
                     ),
                     method: None,
                     created_at: received_at,
@@ -683,7 +733,7 @@ impl CodexAppServerClient {
 pub(super) fn spawn_app_server_stdout_reader(
     stdout: ChildStdout,
     sender: Sender<AppServerReaderEvent>,
-    transport_log: AppServerTransportLog,
+    transport_log: AgentRunTransportLog,
     heartbeat: SharedAppServerHeartbeat,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -742,7 +792,7 @@ pub(super) fn spawn_app_server_stdout_reader(
 
 pub(super) fn spawn_app_server_stderr_reader(
     stderr: ChildStderr,
-    transport_log: AppServerTransportLog,
+    transport_log: AgentRunTransportLog,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -751,8 +801,9 @@ pub(super) fn spawn_app_server_stderr_reader(
                 break;
             };
             let _ = transport_log.record("inbound", "stderr", Value::String(line.clone()));
+            let sanitized_line = sanitize_transport_text(&line);
             if let Ok(mut tail) = stderr_tail.lock() {
-                tail.push_back(line);
+                tail.push_back(sanitized_line);
                 while tail.len() > APP_SERVER_STDERR_TAIL_LINES {
                     tail.pop_front();
                 }
@@ -825,6 +876,13 @@ pub(super) fn truncate_transport_text(value: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn sanitize_transport_text(value: &str) -> String {
+    sanitize_json_for_log(&Value::String(value.to_string()))
+        .as_str()
+        .unwrap_or("[REDACTED_CREDENTIAL_TEXT]")
+        .to_string()
 }
 
 pub(super) fn build_json_rpc_request(id: u64, method: &str, params: Value) -> Value {

@@ -190,6 +190,7 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
           <span>{getAgentRunKindLabel(latestRun.kind)}</span>
           <strong>{getAgentRunStatusLabel(latestRun.status)}</strong>
           {durationMs !== undefined ? <small>耗时 {formatDuration(durationMs)}</small> : null}
+          {session.recoveredAt ? <small>已恢复本地时间线</small> : null}
         </div>
         <div className="agent-progress-stats" aria-label="文件变更统计">
           <span>{changedCount} 个文件</span>

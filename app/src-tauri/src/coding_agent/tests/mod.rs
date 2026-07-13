@@ -4,6 +4,8 @@ pub(super) const THREAD_START_REQUEST_FIXTURE: &str =
     include_str!("../../../tests/fixtures/codex-app-server-v2/thread-start-request.json");
 pub(super) const TURN_START_REQUEST_FIXTURE: &str =
     include_str!("../../../tests/fixtures/codex-app-server-v2/turn-start-request.json");
+pub(super) const THREAD_RESUME_REQUEST_FIXTURE: &str =
+    include_str!("../../../tests/fixtures/codex-app-server-v2/thread-resume-request.json");
 pub(super) const FILE_CHANGE_STARTED_FIXTURE: &str = include_str!(
     "../../../tests/fixtures/codex-app-server-v2/file-change-started-notification.json"
 );
