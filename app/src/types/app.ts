@@ -338,6 +338,34 @@ export type AgentMessagePhase = "commentary" | "final_answer" | "unknown";
 
 export type AgentItemLifecycle = "in_progress" | "completed";
 
+export type AgentFileChangeKind = "add" | "update" | "delete" | "unknown";
+
+export type AgentFileChange = {
+  itemId: string;
+  path: string;
+  kind: AgentFileChangeKind;
+  movePath?: string;
+  diff: string;
+  additions: number;
+  deletions: number;
+};
+
+export type AgentCommandState = {
+  command: string;
+  cwd?: string;
+  status: string;
+  exitCode?: number;
+  durationMs?: number;
+  outputTail: string;
+  outputTruncated: boolean;
+};
+
+export type AgentDiffStats = {
+  additions: number;
+  deletions: number;
+  files: number;
+};
+
 export type AgentItem = {
   id: string;
   type: string;
@@ -352,7 +380,10 @@ export type AgentItem = {
   text?: string;
   phase?: AgentMessagePhase;
   output?: string;
+  outputTruncated?: boolean;
   reasoningSummary?: string;
+  fileChanges?: AgentFileChange[];
+  command?: AgentCommandState;
 };
 
 export type AgentPlanStepStatus = "pending" | "inProgress" | "completed";
@@ -453,6 +484,13 @@ export type AgentEvent =
       createdAt: string;
     }
   | {
+      type: "turn_diff_updated";
+      threadId: string;
+      turnId: string;
+      diff: string;
+      createdAt: string;
+    }
+  | {
       type: "approval_review";
       status: string;
       action?: string;
@@ -515,6 +553,9 @@ export type AgentRun = {
   itemsById: Record<string, AgentItem>;
   itemOrder: string[];
   messagesByItemId: Record<string, AgentItem>;
+  filesByPath: Record<string, AgentFileChange>;
+  aggregateDiff: string;
+  aggregateDiffStats: AgentDiffStats;
   currentPlan?: AgentPlan;
   warnings: AgentWarning[];
   errors: AgentRunError[];

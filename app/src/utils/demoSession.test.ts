@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { DemoSession, DevServerLifecycleEventEnvelope, RequirementUtterance } from "../types/app";
+import { AGENT_COMMAND_OUTPUT_TAIL_LIMIT } from "./agentProgress";
 import {
   AGENT_EVENT_BATCH_INTERVAL_MS,
   createInitialDemoPrompt,
@@ -442,6 +443,200 @@ test("turn completion outcomes map to succeeded cancelled and failed runs", () =
 test("agent event batching interval stays within the 50 to 100ms target", () => {
   assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS >= 50);
   assert.ok(AGENT_EVENT_BATCH_INTERVAL_MS <= 100);
+});
+
+test("file patches update per-file stats and completed snapshot replaces interim changes", () => {
+  const running = startTestRun();
+  const withPatch = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "4",
+    events: [
+      {
+        type: "item_started",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "file-1",
+        itemType: "fileChange",
+        lifecycle: "in_progress",
+        status: "inProgress",
+        startedAt: "2",
+        item: { id: "file-1", type: "fileChange", status: "inProgress", changes: [] },
+        createdAt: "2"
+      },
+      {
+        type: "item_delta",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "file-1",
+        itemType: "fileChange",
+        lifecycle: "in_progress",
+        method: "item/fileChange/patchUpdated",
+        delta: [
+          {
+            path: "src/App.tsx",
+            kind: { type: "update" },
+            diff: "@@ -1 +1,2 @@\n-old\n+new\n+extra\n"
+          },
+          {
+            path: "src/temporary.css",
+            kind: { type: "add" },
+            diff: "@@ -0,0 +1 @@\n+body {}\n"
+          }
+        ],
+        createdAt: "3"
+      },
+      {
+        type: "turn_diff_updated",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        diff: "diff --git a/src/App.tsx b/src/App.tsx\n--- a/src/App.tsx\n+++ b/src/App.tsx\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n",
+        createdAt: "4"
+      }
+    ]
+  });
+
+  assert.equal(withPatch.runs[0].itemsById["file-1"].fileChanges?.length, 2);
+  assert.deepEqual(withPatch.runs[0].filesByPath["src/App.tsx"], {
+    itemId: "file-1",
+    path: "src/App.tsx",
+    kind: "update",
+    movePath: undefined,
+    diff: "@@ -1 +1,2 @@\n-old\n+new\n+extra\n",
+    additions: 2,
+    deletions: 1
+  });
+  assert.deepEqual(withPatch.runs[0].aggregateDiffStats, {
+    additions: 2,
+    deletions: 1,
+    files: 1
+  });
+
+  const completed = demoSessionReducer(withPatch, {
+    type: "append_agent_event",
+    runId: "run-1",
+    now: "5",
+    event: {
+      type: "item_completed",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "file-1",
+      itemType: "fileChange",
+      lifecycle: "completed",
+      status: "completed",
+      completedAt: "5",
+      item: {
+        id: "file-1",
+        type: "fileChange",
+        status: "completed",
+        changes: [{
+          path: "src/App.tsx",
+          kind: { type: "update", move_path: "src/Main.tsx" },
+          diff: "@@ -1 +1 @@\n-old\n+new\n"
+        }]
+      },
+      createdAt: "5"
+    }
+  });
+
+  assert.deepEqual(Object.keys(completed.runs[0].filesByPath), ["src/App.tsx"]);
+  assert.deepEqual(completed.runs[0].changedFiles, ["src/App.tsx"]);
+  assert.equal(completed.runs[0].filesByPath["src/App.tsx"].movePath, "src/Main.tsx");
+});
+
+test("command execution streams a bounded output tail and preserves terminal metadata", () => {
+  const running = startTestRun();
+  const longOutput = "x".repeat(AGENT_COMMAND_OUTPUT_TAIL_LIMIT + 100);
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_events",
+    runId: "run-1",
+    now: "5",
+    events: [
+      {
+        type: "item_started",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        itemType: "commandExecution",
+        lifecycle: "in_progress",
+        status: "inProgress",
+        startedAt: "2026-07-13T00:00:00Z",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "npm run check",
+          cwd: "/tmp/demo",
+          status: "inProgress"
+        },
+        createdAt: "2"
+      },
+      {
+        type: "item_delta",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        itemType: "commandExecution",
+        lifecycle: "in_progress",
+        method: "item/commandExecution/outputDelta",
+        delta: longOutput,
+        createdAt: "3"
+      },
+      {
+        type: "item_completed",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        itemType: "commandExecution",
+        lifecycle: "completed",
+        status: "failed",
+        completedAt: "2026-07-13T00:00:02.5Z",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "npm run check",
+          cwd: "/tmp/demo",
+          status: "failed",
+          exitCode: 1,
+          durationMs: 2_500,
+          aggregatedOutput: null
+        },
+        createdAt: "5"
+      }
+    ]
+  });
+
+  const item = updated.runs[0].itemsById["command-1"];
+  assert.equal(item.command?.command, "npm run check");
+  assert.equal(item.command?.cwd, "/tmp/demo");
+  assert.equal(item.command?.status, "failed");
+  assert.equal(item.command?.exitCode, 1);
+  assert.equal(item.command?.durationMs, 2_500);
+  assert.equal(item.command?.outputTail.length, AGENT_COMMAND_OUTPUT_TAIL_LIMIT);
+  assert.equal(item.command?.outputTruncated, true);
+  assert.equal(updated.runs[0].events.length, 0);
+});
+
+test("legacy file output delta stays a bounded compatibility detail", () => {
+  const running = startTestRun();
+  const updated = demoSessionReducer(running, {
+    type: "append_agent_event",
+    runId: "run-1",
+    now: "3",
+    event: {
+      type: "item_delta",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "file-legacy",
+      itemType: "fileChange",
+      lifecycle: "in_progress",
+      method: "item/fileChange/outputDelta",
+      delta: "Done!",
+      createdAt: "3"
+    }
+  });
+
+  assert.equal(updated.runs[0].itemsById["file-legacy"].output, "Done!");
+  assert.deepEqual(updated.runs[0].itemsById["file-legacy"].fileChanges, []);
 });
 
 test("ready dev server event can attach the preview URL after initial build", () => {

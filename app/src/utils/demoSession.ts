@@ -18,6 +18,15 @@ import type {
   StartDevServerRequest,
   StopDevServerRequest
 } from "../types/app";
+import {
+  appendAgentOutputTail,
+  buildAgentFilesByPath,
+  EMPTY_AGENT_DIFF_STATS,
+  getCompletedFileChangePaths,
+  limitAgentOutputTail,
+  parseAgentFileChanges,
+  parseUnifiedDiffStats
+} from "./agentProgress";
 import { createId } from "./project";
 
 const DEV_SERVER_START_TIMEOUT_MS = 45_000;
@@ -242,6 +251,9 @@ export function demoSessionReducer(session: DemoSession, action: DemoSessionActi
       itemsById: {},
       itemOrder: [],
       messagesByItemId: {},
+      filesByPath: {},
+      aggregateDiff: "",
+      aggregateDiffStats: EMPTY_AGENT_DIFF_STATS,
       warnings: [],
       errors: [],
       changedFiles: [],
@@ -679,6 +691,15 @@ export function useDemoSession(
           return;
         }
 
+        if (event.payload.event.type === "item_completed") {
+          const changedPaths = getCompletedFileChangePaths(
+            event.payload.event.itemType,
+            event.payload.event.item
+          );
+          if (changedPaths.length) {
+            dispatchProjectFilesChanged(sessionProjectPath, changedPaths, "incremental");
+          }
+        }
         agentEventBatch.push(event.payload);
         agentEventBatchTimer ??= setTimeout(flushAgentEventBatch, AGENT_EVENT_BATCH_INTERVAL_MS);
       }),
@@ -700,7 +721,7 @@ export function useDemoSession(
         if (event.payload.status !== "completed") {
           return;
         }
-        dispatchProjectFilesChanged(sessionProjectPath, event.payload.changedFiles);
+        dispatchProjectFilesChanged(sessionProjectPath, event.payload.changedFiles, "full");
         startDevServerTimeout(devServerTimeoutRef, (message) => {
           dispatch({
             type: "fail_preview",
@@ -830,9 +851,9 @@ function isTerminalRunStatus(status: AgentRun["status"]) {
 }
 
 function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
-  let nextRun: AgentRun = {
+  const nextRun: AgentRun = {
     ...run,
-    events: [...run.events, event]
+    events: shouldRetainAgentEvent(event) ? [...run.events, event] : run.events
   };
 
   if (event.type === "thread_started") {
@@ -856,6 +877,15 @@ function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
         steps: event.plan,
         updatedAt: event.createdAt
       }
+    };
+  }
+  if (event.type === "turn_diff_updated") {
+    return {
+      ...nextRun,
+      codexThreadId: event.threadId,
+      codexTurnId: event.turnId,
+      aggregateDiff: event.diff,
+      aggregateDiffStats: parseUnifiedDiffStats(event.diff)
     };
   }
   if (event.type === "warning") {
@@ -899,10 +929,15 @@ function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
           [item.id]: item
         }
       : nextRun.messagesByItemId ?? {};
-  const changedFiles = extractChangedFilePaths(item.data).reduce(
-    (paths, path) => appendUnique(paths, path),
-    nextRun.changedFiles
-  );
+  let filesByPath = nextRun.filesByPath ?? {};
+  let changedFiles = nextRun.changedFiles;
+  if (item.type === "fileChange") {
+    filesByPath = buildAgentFilesByPath(Object.values(itemsById));
+    const legacyChangedFiles = nextRun.events.flatMap((candidate) =>
+      candidate.type === "file_change" ? [candidate.path] : []
+    );
+    changedFiles = mergeUnique(legacyChangedFiles, Object.keys(filesByPath));
+  }
 
   return {
     ...nextRun,
@@ -911,8 +946,22 @@ function applyAgentEvent(run: AgentRun, event: AgentEvent): AgentRun {
     itemsById,
     itemOrder: appendUnique(nextRun.itemOrder ?? [], item.id),
     messagesByItemId,
+    filesByPath,
     changedFiles
   };
+}
+
+function shouldRetainAgentEvent(event: AgentEvent) {
+  if (event.type === "turn_diff_updated") {
+    return false;
+  }
+  if (
+    (event.type === "item_started" || event.type === "item_delta" || event.type === "item_completed") &&
+    (event.itemType === "fileChange" || event.itemType === "commandExecution")
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function applyAgentItemEvent(
@@ -937,12 +986,14 @@ function applyAgentItemEvent(
       text: existing?.text,
       phase: existing?.phase,
       output: existing?.output,
+      outputTruncated: existing?.outputTruncated,
       reasoningSummary: existing?.reasoningSummary
     });
   }
 
   if (event.type === "item_completed") {
     const aggregatedOutput = readString(event.item.aggregatedOutput);
+    const limitedOutput = aggregatedOutput === undefined ? undefined : limitAgentOutputTail(aggregatedOutput);
     return hydrateAgentItem({
       id: event.itemId,
       type: event.itemType,
@@ -953,12 +1004,13 @@ function applyAgentItemEvent(
       startedAt: existing?.startedAt ?? event.completedAt,
       updatedAt: event.createdAt,
       completedAt: event.completedAt,
-      data: event.item,
+      data: sanitizeAgentItemData(event.item, limitedOutput),
       text: readString(event.item.text) ?? existing?.text,
       phase: event.itemType === "agentMessage"
         ? readAgentMessagePhase(event.item.phase) ?? "unknown"
         : existing?.phase,
-      output: aggregatedOutput ?? existing?.output,
+      output: limitedOutput?.outputTail ?? existing?.output,
+      outputTruncated: limitedOutput?.truncated ?? existing?.outputTruncated,
       reasoningSummary: existing?.reasoningSummary
     });
   }
@@ -978,16 +1030,17 @@ function applyAgentItemEvent(
     data: {}
   };
   const deltaText = readString(event.delta);
+  const retainLastDelta =
+    event.method !== "item/commandExecution/outputDelta" &&
+    event.method !== "item/fileChange/outputDelta" &&
+    event.method !== "item/fileChange/patchUpdated";
   const next: AgentItem = {
     ...item,
     threadId: event.threadId,
     turnId: event.turnId,
     type: item.type === "unknown" ? event.itemType : item.type,
     updatedAt: event.createdAt,
-    data: {
-      ...item.data,
-      lastDelta: event.delta
-    }
+    data: retainLastDelta ? { ...item.data, lastDelta: event.delta } : item.data
   };
 
   if (event.method === "item/agentMessage/delta" || event.method === "item/plan/delta") {
@@ -996,7 +1049,13 @@ function applyAgentItemEvent(
     event.method === "item/commandExecution/outputDelta" ||
     event.method === "item/fileChange/outputDelta"
   ) {
-    next.output = `${item.output ?? ""}${deltaText ?? ""}`;
+    const output = appendAgentOutputTail(
+      item.output,
+      deltaText ?? "",
+      item.outputTruncated
+    );
+    next.output = output.outputTail;
+    next.outputTruncated = output.truncated;
   } else if (event.method === "item/fileChange/patchUpdated") {
     next.data = {
       ...next.data,
@@ -1010,6 +1069,28 @@ function applyAgentItemEvent(
 }
 
 function hydrateAgentItem(item: AgentItem): AgentItem {
+  if (item.type === "fileChange") {
+    return {
+      ...item,
+      fileChanges: parseAgentFileChanges(item.data, item.id)
+    };
+  }
+
+  if (item.type === "commandExecution") {
+    return {
+      ...item,
+      command: {
+        command: readString(item.data.command) ?? "",
+        cwd: readString(item.data.cwd),
+        status: readString(item.data.status) ?? item.status ?? "unknown",
+        exitCode: readNumber(item.data.exitCode),
+        durationMs: readNumber(item.data.durationMs),
+        outputTail: item.output ?? "",
+        outputTruncated: item.outputTruncated ?? false
+      }
+    };
+  }
+
   if (item.type !== "agentMessage") {
     return item;
   }
@@ -1028,16 +1109,19 @@ function hydrateAgentItem(item: AgentItem): AgentItem {
   };
 }
 
-function extractChangedFilePaths(data: Record<string, unknown>) {
-  if (!Array.isArray(data.changes)) {
-    return [];
+function sanitizeAgentItemData(
+  data: Record<string, unknown>,
+  limitedOutput: ReturnType<typeof limitAgentOutputTail> | undefined
+) {
+  if (!limitedOutput) {
+    return data;
   }
 
-  return data.changes.flatMap((change) => {
-    const record = readRecord(change);
-    const path = record ? readString(record.path) : undefined;
-    return path ? [path] : [];
-  });
+  return {
+    ...data,
+    aggregatedOutput: limitedOutput.outputTail,
+    aggregatedOutputTruncated: limitedOutput.truncated
+  };
 }
 
 function readAgentMessagePhase(value: unknown): AgentMessagePhase | undefined {
@@ -1055,6 +1139,10 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
 
 function readString(value: unknown) {
   return typeof value === "string" ? value : undefined;
+}
+
+function readNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function findRun(session: DemoSession, runId: string) {
@@ -1216,7 +1304,11 @@ export function detectDevServerOutputIssue(text: string) {
   return undefined;
 }
 
-function dispatchProjectFilesChanged(projectPath: string, changedFiles: string[]) {
+function dispatchProjectFilesChanged(
+  projectPath: string,
+  changedFiles: string[],
+  refreshMode: "incremental" | "full"
+) {
   if (typeof window === "undefined") {
     return;
   }
@@ -1224,7 +1316,9 @@ function dispatchProjectFilesChanged(projectPath: string, changedFiles: string[]
   window.dispatchEvent(new CustomEvent("voicecoder:project-files-changed", {
     detail: {
       projectPath,
-      changedPath: resolveChangedPath(projectPath, changedFiles[0])
+      changedPath: resolveChangedPath(projectPath, changedFiles[0]),
+      changedPaths: changedFiles.map((path) => resolveChangedPath(projectPath, path)),
+      refreshMode
     }
   }));
 }

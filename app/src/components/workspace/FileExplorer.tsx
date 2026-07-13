@@ -26,7 +26,12 @@ export function FileExplorer({ project }: FileExplorerProps) {
 
   useEffect(() => {
     function handleProjectFilesChanged(event: Event) {
-      const detail = (event as CustomEvent<{ projectPath?: string; changedPath?: string }>).detail;
+      const detail = (event as CustomEvent<{
+        projectPath?: string;
+        changedPath?: string;
+        changedPaths?: string[];
+        refreshMode?: "incremental" | "full";
+      }>).detail;
       if (!project || detail?.projectPath !== project.path) {
         return;
       }

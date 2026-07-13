@@ -189,24 +189,26 @@ AgentRun
 
 目标：首先解决用户感知最强的“改文件时没有反馈”。
 
+完成日期：2026-07-13
+
 ### 文件修改
 
-- [ ] 3.1 处理 `item/started` 中的 `fileChange`，立即显示“准备修改文件”。
-- [ ] 3.2 处理 `item/fileChange/patchUpdated`，实时更新 `changes[]`。
-- [ ] 3.3 处理 `turn/diff/updated`，将其作为本轮最新聚合 diff 快照。
-- [ ] 3.4 解析 unified diff，按文件计算 additions / deletions。
-- [ ] 3.5 支持 `add`、`update`、`delete` 和 move path 显示。
-- [ ] 3.6 处理 `item/completed fileChange`，用最终 changes 覆盖中间结果。
-- [ ] 3.7 `item/fileChange/outputDelta` 仅作为旧 Codex 版本兼容路径。
-- [ ] 3.8 文件树在文件 Item 完成后增量刷新；本轮结束后再做一次完整刷新。
+- [x] 3.1 处理 `item/started` 中的 `fileChange`，立即显示“准备修改文件”。
+- [x] 3.2 处理 `item/fileChange/patchUpdated`，实时更新 `changes[]`。
+- [x] 3.3 处理 `turn/diff/updated`，将其作为本轮最新聚合 diff 快照。
+- [x] 3.4 解析 unified diff，按文件计算 additions / deletions。
+- [x] 3.5 支持 `add`、`update`、`delete` 和 move path 显示。
+- [x] 3.6 处理 `item/completed fileChange`，用最终 changes 覆盖中间结果。
+- [x] 3.7 `item/fileChange/outputDelta` 仅作为旧 Codex 版本兼容路径。
+- [x] 3.8 文件树在文件 Item 完成后增量刷新；本轮结束后再做一次完整刷新。
 
 ### 命令执行
 
-- [ ] 3.9 `item/started commandExecution` 显示 command、cwd 和进行中状态。
-- [ ] 3.10 处理 `item/commandExecution/outputDelta`，持续追加 stdout/stderr。
-- [ ] 3.11 完成时显示 exit code、duration、completed/failed/declined。
-- [ ] 3.12 页面只保留命令输出尾部和摘要，完整输出写入日志。
-- [ ] 3.13 对长驻命令显示持续时间和最新输出，不把“没有新行”误判成崩溃。
+- [x] 3.9 `item/started commandExecution` 显示 command、cwd 和进行中状态。
+- [x] 3.10 处理 `item/commandExecution/outputDelta`，持续追加 stdout/stderr。
+- [x] 3.11 完成时显示 exit code、duration、completed/failed/declined。
+- [x] 3.12 页面只保留命令输出尾部和摘要，完整输出写入日志。
+- [x] 3.13 对长驻命令显示持续时间和最新输出，不把“没有新行”误判成崩溃。
 
 退出标准：
 

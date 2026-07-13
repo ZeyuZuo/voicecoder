@@ -1,5 +1,7 @@
 import { AlertTriangle, Bot, FileCode2, ListChecks, ShieldCheck, Terminal, XCircle } from "lucide-react";
-import type { AgentEvent, AgentRun, DemoSession } from "../types/app";
+import { useEffect, useState } from "react";
+import type { AgentEvent, AgentFileChange, AgentItem, AgentRun, DemoSession } from "../types/app";
+import { getAgentItemDurationMs, getAgentOutputPreview } from "../utils/agentProgress";
 
 type DemoProgressPanelProps = {
   session: DemoSession;
@@ -8,6 +10,15 @@ type DemoProgressPanelProps = {
 
 export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) {
   const latestRun = session.runs[session.runs.length - 1];
+  const workItems = latestRun
+    ? (latestRun.itemOrder ?? [])
+        .map((itemId) => latestRun.itemsById?.[itemId])
+        .filter((item): item is AgentItem => Boolean(item && (item.type === "fileChange" || item.type === "commandExecution")))
+    : [];
+  const hasRunningCommand = workItems.some(
+    (item) => item.type === "commandExecution" && item.lifecycle === "in_progress"
+  );
+  const nowMs = useAgentClock(hasRunningCommand);
 
   if (!latestRun) {
     return (
@@ -28,8 +39,21 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
     );
   }
 
-  const visibleEvents = summarizeAgentEvents(latestRun.events).slice(-5);
-  const changedCount = latestRun.changedFiles.length;
+  const visibleEvents = summarizeAgentEvents(latestRun.events)
+    .filter((event) => !isFileOrCommandItemEvent(event))
+    .slice(-5);
+  const changedCount = Object.keys(latestRun.filesByPath ?? {}).length || latestRun.changedFiles.length;
+  const fileDiffStats = Object.values(latestRun.filesByPath ?? {}).reduce(
+    (stats, file) => ({
+      additions: stats.additions + file.additions,
+      deletions: stats.deletions + file.deletions,
+      files: stats.files + 1
+    }),
+    { additions: 0, deletions: 0, files: 0 }
+  );
+  const diffStats = latestRun.aggregateDiff
+    ? latestRun.aggregateDiffStats ?? fileDiffStats
+    : fileDiffStats;
 
   return (
     <section className={`agent-progress-panel is-${latestRun.status} ${compact ? "is-compact" : ""}`} aria-live="polite">
@@ -38,8 +62,27 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
           <span>{getAgentRunKindLabel(latestRun.kind)}</span>
           <strong>{getAgentRunStatusLabel(latestRun.status)}</strong>
         </div>
-        {changedCount ? <small>{changedCount} 个文件变更</small> : null}
+        {changedCount || diffStats.additions || diffStats.deletions ? (
+          <small>
+            {changedCount} 个文件
+            <span className="agent-diff-additions"> +{diffStats.additions}</span>
+            <span className="agent-diff-deletions"> -{diffStats.deletions}</span>
+          </small>
+        ) : null}
       </div>
+
+      {workItems.length ? (
+        <div className="agent-work-items">
+          {workItems.map((item) => (
+            <AgentWorkItemCard
+              item={item}
+              nowMs={nowMs}
+              projectPath={session.projectPath}
+              key={item.id}
+            />
+          ))}
+        </div>
+      ) : null}
 
       <div className="agent-progress-events">
         {visibleEvents.length ? (
@@ -49,15 +92,176 @@ export function DemoProgressPanel({ session, compact }: DemoProgressPanelProps) 
               <p>{formatAgentEvent(event)}</p>
             </div>
           ))
-        ) : (
+        ) : !workItems.length ? (
           <div className="agent-progress-event is-waiting">
             <Bot size={15} />
             <p>正在启动 Codex thread</p>
           </div>
-        )}
+        ) : null}
       </div>
     </section>
   );
+}
+
+function AgentWorkItemCard({
+  item,
+  nowMs,
+  projectPath
+}: {
+  item: AgentItem;
+  nowMs: number;
+  projectPath: string;
+}) {
+  return item.type === "fileChange"
+    ? <FileChangeCard item={item} projectPath={projectPath} />
+    : <CommandExecutionCard item={item} nowMs={nowMs} />;
+}
+
+function FileChangeCard({ item, projectPath }: { item: AgentItem; projectPath: string }) {
+  const changes = item.fileChanges ?? [];
+  const status = item.status ?? (item.lifecycle === "completed" ? "completed" : "inProgress");
+
+  return (
+    <article className={`agent-work-card is-file-change is-${normalizeCssToken(status)}`}>
+      <header>
+        <FileCode2 size={15} />
+        <strong>{getFileChangeStatusLabel(status, item.lifecycle)}</strong>
+        <span>{changes.length ? `${changes.length} 个文件` : "等待补丁"}</span>
+      </header>
+      {changes.length ? (
+        <ul className="agent-file-change-list">
+          {changes.map((change) => (
+            <li key={`${change.path}-${change.movePath ?? ""}`}>
+              <span className={`agent-file-kind is-${change.kind}`}>{getFileChangeKindLabel(change.kind)}</span>
+              <code>{formatFileChangePath(change, projectPath)}</code>
+              <span className="agent-file-stats">
+                <span className="agent-diff-additions">+{change.additions}</span>
+                <span className="agent-diff-deletions">-{change.deletions}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="agent-work-placeholder">Codex 正在准备文件修改…</p>
+      )}
+    </article>
+  );
+}
+
+function CommandExecutionCard({ item, nowMs }: { item: AgentItem; nowMs: number }) {
+  const command = item.command;
+  const status = command?.status ?? item.status ?? (item.lifecycle === "completed" ? "completed" : "inProgress");
+  const durationMs = getAgentItemDurationMs(
+    item.startedAt,
+    item.completedAt,
+    command?.durationMs,
+    nowMs
+  );
+  const outputPreview = getAgentOutputPreview(command?.outputTail ?? item.output);
+
+  return (
+    <article className={`agent-work-card is-command-execution is-${normalizeCssToken(status)}`}>
+      <header>
+        <Terminal size={15} />
+        <strong>{getCommandStatusLabel(status)}</strong>
+        {durationMs !== undefined ? <span>{formatDuration(durationMs)}</span> : null}
+      </header>
+      <code className="agent-command-text">{command?.command || "等待 Codex 提供命令…"}</code>
+      {command?.cwd ? <small className="agent-command-cwd">cwd · {command.cwd}</small> : null}
+      {outputPreview ? (
+        <pre className="agent-command-output">
+          {command?.outputTruncated ? "… 仅显示输出末尾\n" : ""}
+          {outputPreview}
+        </pre>
+      ) : item.lifecycle === "in_progress" ? (
+        <p className="agent-work-placeholder">命令正在执行，等待输出…</p>
+      ) : null}
+      {item.lifecycle === "completed" ? (
+        <footer>
+          {typeof command?.exitCode === "number" ? <span>退出码 {command.exitCode}</span> : null}
+          {status === "declined" ? <span>命令未获批准</span> : null}
+        </footer>
+      ) : null}
+    </article>
+  );
+}
+
+function useAgentClock(enabled: boolean) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    setNowMs(Date.now());
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [enabled]);
+
+  return nowMs;
+}
+
+function isFileOrCommandItemEvent(event: AgentEvent) {
+  return (
+    (event.type === "item_started" || event.type === "item_delta" || event.type === "item_completed") &&
+    (event.itemType === "fileChange" || event.itemType === "commandExecution")
+  );
+}
+
+function formatFileChangePath(change: AgentFileChange, projectPath: string) {
+  const path = compactProjectPath(change.path, projectPath);
+  return change.movePath
+    ? `${path} → ${compactProjectPath(change.movePath, projectPath)}`
+    : path;
+}
+
+function compactProjectPath(path: string, projectPath: string) {
+  const prefix = `${projectPath.replace(/\/+$/, "")}/`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+function getFileChangeStatusLabel(status: string, lifecycle: AgentItem["lifecycle"]) {
+  if (status === "failed") {
+    return "文件修改失败";
+  }
+  if (status === "declined") {
+    return "文件修改被拒绝";
+  }
+  return lifecycle === "completed" ? "文件修改完成" : "正在修改文件";
+}
+
+function getFileChangeKindLabel(kind: AgentFileChange["kind"]) {
+  return {
+    add: "新增",
+    update: "修改",
+    delete: "删除",
+    unknown: "变更"
+  }[kind];
+}
+
+function getCommandStatusLabel(status: string) {
+  return {
+    inProgress: "正在执行命令",
+    completed: "命令执行完成",
+    failed: "命令执行失败",
+    declined: "命令执行被拒绝"
+  }[status] ?? `命令状态：${status}`;
+}
+
+function formatDuration(durationMs: number) {
+  if (durationMs < 1_000) {
+    return `${Math.round(durationMs)}ms`;
+  }
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+  }
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.floor((durationMs % 60_000) / 1_000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function normalizeCssToken(value: string) {
+  return value.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
 }
 
 function summarizeAgentEvents(events: AgentEvent[]) {
@@ -151,6 +355,10 @@ function formatAgentEvent(event: AgentEvent) {
   if (event.type === "plan_updated") {
     const steps = event.plan.map((step) => `[${step.status}] ${step.step}`).join(" · ");
     return compactText([event.explanation, steps].filter(Boolean).join(" · "));
+  }
+
+  if (event.type === "turn_diff_updated") {
+    return "整轮文件 diff 已更新";
   }
 
   if (event.type === "item_started") {

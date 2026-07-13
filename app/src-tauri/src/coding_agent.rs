@@ -273,6 +273,12 @@ pub enum AgentEvent {
         plan: Vec<AgentPlanStep>,
         created_at: String,
     },
+    TurnDiffUpdated {
+        thread_id: String,
+        turn_id: String,
+        diff: String,
+        created_at: String,
+    },
     ApprovalReview {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1447,6 +1453,22 @@ fn normalize_codex_notification_at(notification: &Value, created_at: &str) -> Ve
         | "item/reasoning/summaryPartAdded"
         | "item/reasoning/textDelta" => normalize_codex_item_delta(method, params, created_at),
         "turn/plan/updated" => normalize_codex_plan_updated(params, created_at),
+        "turn/diff/updated" => {
+            let thread_id = extract_string(params, "/threadId");
+            let turn_id = extract_string(params, "/turnId");
+            let diff = extract_string(params, "/diff");
+            match (thread_id, turn_id, diff) {
+                (Some(thread_id), Some(turn_id), Some(diff)) => {
+                    vec![AgentEvent::TurnDiffUpdated {
+                        thread_id,
+                        turn_id,
+                        diff,
+                        created_at: created_at.to_string(),
+                    }]
+                }
+                _ => Vec::new(),
+            }
+        }
         "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
             normalize_auto_approval_review(params, created_at)
         }
@@ -3615,6 +3637,61 @@ mod tests {
                     }
                 ]),
                 created_at: "2026-06-24T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_command_output_delta_for_the_same_item() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "item/commandExecution/outputDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "command-1",
+                    "delta": "tests passed\n"
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::ItemDelta {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "command-1".to_string(),
+                item_type: "commandExecution".to_string(),
+                lifecycle: "in_progress".to_string(),
+                method: "item/commandExecution/outputDelta".to_string(),
+                delta: json!("tests passed\n"),
+                created_at: "2026-07-13T00:00:00Z".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalizes_turn_diff_as_latest_snapshot() {
+        let events = normalize_codex_notification_at(
+            &json!({
+                "method": "turn/diff/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "diff": "diff --git a/src/App.tsx b/src/App.tsx\n-old\n+new\n"
+                }
+            }),
+            "2026-07-13T00:00:00Z",
+        );
+
+        assert_eq!(
+            events,
+            vec![AgentEvent::TurnDiffUpdated {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                diff: "diff --git a/src/App.tsx b/src/App.tsx\n-old\n+new\n".to_string(),
+                created_at: "2026-07-13T00:00:00Z".to_string(),
             }]
         );
     }
